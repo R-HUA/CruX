@@ -1,0 +1,23 @@
+# Build output
+/build/
+/entry/build/
+dist/
+/.hvigor/
+/.idea/
+/.cxx/
+/oh_modules/
+/entry/oh_modules/
+
+# Local project material kept outside the repository history
+/docs/
+/screenshots/
+
+# Tooling / signing material - never commit
+*.p12
+*.cer
+*.p7b
+*.csr
+local.properties
+
+# OS noise
+.DS_Store
