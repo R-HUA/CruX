@@ -1,0 +1,20 @@
+{
+  "string": [
+    {
+      "name": "home_timeline",
+      "value": "Home Timeline"
+    },
+    {
+      "name": "search_hint",
+      "value": "Search"
+    },
+    {
+      "name": "compose",
+      "value": "Compose"
+    },
+    {
+      "name": "internet_reason",
+      "value": "OpenTwit loads the Twitter timeline."
+    }
+  ]
+}

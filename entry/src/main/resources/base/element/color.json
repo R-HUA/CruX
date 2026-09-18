@@ -1,0 +1,32 @@
+{
+  "color": [
+    {
+      "name": "hw_primary",
+      "value": "#0A59F7"
+    },
+    {
+      "name": "hw_bg_light",
+      "value": "#F1F3F5"
+    },
+    {
+      "name": "hw_bg_dark",
+      "value": "#000000"
+    },
+    {
+      "name": "hw_card_light",
+      "value": "#FFFFFF"
+    },
+    {
+      "name": "hw_text_primary",
+      "value": "#1A1A1A"
+    },
+    {
+      "name": "hw_text_secondary",
+      "value": "#6B7280"
+    },
+    {
+      "name": "hw_text_grey",
+      "value": "#536471"
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "name": "opentwit",
+  "version": "1.0.0",
+  "description": "OpenTwit HarmonyOS Stage-model scaffold",
+  "modelVersion": "5.0.0",
+  "ohosVersion": "5.0.0(12)",
+  "author": "",
+  "license": "Apache-2.0",
+  "dependencies": {},
+  "devDependencies": {}
+}
