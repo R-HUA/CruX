@@ -1,25 +1,12 @@
 {
   "app": {
-    "signingConfigs": [
-      {
-        "name": "default",
-        "material": {
-          "storeFile": "/Users/abhi/.ohos/config/debug.p12",
-          "storePassword": "DebugKey",
-          "keyAlias": "debugKey",
-          "keyPassword": "DebugKey",
-          "profile": "/Users/abhi/.ohos/config/debug.p7b",
-          "certpath": "/Users/abhi/.ohos/config/debug.cer",
-          "signAlg": "SHA256withECDSA"
-        }
-      }
-    ],
+    "signingConfigs": [],
     "products": [
       {
         "name": "default",
-        "signingConfig": "default",
         "compatibleSdkVersion": 24,
-        "compileSdkVersion": 24
+        "compileSdkVersion": 24,
+        "targetSdkVersion": 24
       }
     ],
     "buildModeSet": [

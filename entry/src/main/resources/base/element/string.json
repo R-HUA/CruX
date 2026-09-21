@@ -1,20 +1,124 @@
 {
   "string": [
     {
-      "name": "home_timeline",
-      "value": "Home Timeline"
+      "name": "tab_home",
+      "value": "Home"
     },
     {
-      "name": "search_hint",
+      "name": "tab_explore",
+      "value": "Explore"
+    },
+    {
+      "name": "tab_notifications",
+      "value": "Notifications"
+    },
+    {
+      "name": "tab_messages",
+      "value": "Messages"
+    },
+    {
+      "name": "tab_profile",
+      "value": "Profile"
+    },
+    {
+      "name": "search_placeholder",
+      "value": "Search X"
+    },
+    {
+      "name": "menu_search",
       "value": "Search"
     },
     {
-      "name": "compose",
-      "value": "Compose"
+      "name": "menu_notification_settings",
+      "value": "Notification settings"
+    },
+    {
+      "name": "menu_new_message",
+      "value": "New message"
+    },
+    {
+      "name": "menu_edit_profile",
+      "value": "Edit profile"
+    },
+    {
+      "name": "menu_create_account",
+      "value": "Create account"
+    },
+    {
+      "name": "menu_refresh",
+      "value": "Refresh"
+    },
+    {
+      "name": "menu_desktop_site",
+      "value": "Desktop site"
+    },
+    {
+      "name": "menu_mobile_site",
+      "value": "Mobile site"
+    },
+    {
+      "name": "compose_title",
+      "value": "New post"
+    },
+    {
+      "name": "compose_post",
+      "value": "Post"
+    },
+    {
+      "name": "compose_cancel",
+      "value": "Cancel"
+    },
+    {
+      "name": "compose_post_sent",
+      "value": "Post sent"
+    },
+    {
+      "name": "compose_post_missing",
+      "value": "Nothing to post yet"
+    },
+    {
+      "name": "vibrate_reason",
+      "value": "OpenTwit gives light tactile feedback when you switch tabs."
+    },
+    {
+      "name": "error_title",
+      "value": "Could not load X"
+    },
+    {
+      "name": "error_message",
+      "value": "Check your connection and try again."
+    },
+    {
+      "name": "retry",
+      "value": "Retry"
+    },
+    {
+      "name": "location_dialog_title",
+      "value": "Allow location access?"
+    },
+    {
+      "name": "location_dialog_message",
+      "value": "A web page on x.com wants to use your location. Allow it only if you want location-tagged posts."
+    },
+    {
+      "name": "allow",
+      "value": "Allow"
+    },
+    {
+      "name": "deny",
+      "value": "Don't allow"
+    },
+    {
+      "name": "file_selector_error",
+      "value": "Could not open the file picker."
     },
     {
       "name": "internet_reason",
-      "value": "OpenTwit loads the Twitter timeline."
+      "value": "OpenTwit loads full Twitter web (x.com) in-app."
+    },
+    {
+      "name": "location_reason",
+      "value": "OpenTwit web pages may request your location for location-tagged posts."
     }
   ]
 }

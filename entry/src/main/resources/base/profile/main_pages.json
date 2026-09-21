@@ -1,8 +1,5 @@
 {
   "src": [
-    "pages/MainTabs",
-    "pages/Login",
-    "pages/Detail",
-    "pages/UserProfile"
+    "pages/MainTabs"
   ]
 }
