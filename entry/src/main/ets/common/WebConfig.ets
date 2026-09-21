@@ -6,7 +6,12 @@ export const TWITTER_BASE: string = 'https://x.com';
 export const TWITTER_HOME: string = 'https://x.com/home';
 export const TWITTER_EXPLORE: string = 'https://x.com/explore';
 export const TWITTER_NOTIFICATIONS: string = 'https://x.com/notifications';
+// Direct messages. The mobile web routes DMs through /messages (the "Messages"
+// inbox); /i/chat is the separate encrypted Chat product, which shows an empty
+// inbox until a chat is started from the native X app.
 export const TWITTER_MESSAGES: string = 'https://x.com/messages';
+export const TWITTER_SETTINGS: string = 'https://x.com/settings';
+export const TWITTER_BOOKMARKS: string = 'https://x.com/i/bookmarks';
 export const TWITTER_COMPOSE: string = 'https://x.com/compose/post';
 export const TWITTER_LOGIN: string = 'https://x.com/i/flow/login';
 export const TWITTER_SIGNUP: string = 'https://x.com/i/flow/signup';
@@ -51,6 +56,13 @@ export function searchUrl(query: string): string {
 export function profileUrl(handle: string): string {
   const clean: string = handle.charAt(0) === '@' ? handle.substring(1) : handle;
   return TWITTER_BASE + '/' + clean;
+}
+
+// Account-scoped pages the shell reaches from its own native account menu, so
+// the user never has to hunt for them inside the web UI.
+export function listsUrl(handle: string): string {
+  const clean: string = handle.charAt(0) === '@' ? handle.substring(1) : handle;
+  return TWITTER_BASE + '/' + clean + '/lists';
 }
 
 // Lowercase path of an x.com URL without query/hash/trailing slash.
@@ -122,7 +134,9 @@ export function routeIndexForUrl(url: string): number {
   if (path === '/notifications' || path.indexOf('/notifications/') === 0) {
     return 2;
   }
-  if (path === '/messages' || path.indexOf('/messages/') === 0) {
+  // The mobile web routes direct messages through /i/chat.
+  if (path === '/messages' || path.indexOf('/messages/') === 0 ||
+    path === '/i/chat' || path.indexOf('/i/chat/') === 0) {
     return 3;
   }
   // Only the profile editor belongs to the Profile tab; other /settings and /i
@@ -168,5 +182,6 @@ export function profileHandleForUrl(url: string): string {
 // (back button, profile name) since native has no back control.
 export function isTabRootPath(path: string): boolean {
   return path === '/' || path === '/home' || path === '/explore' ||
-    path === '/notifications' || path === '/messages';
+    path === '/notifications' || path === '/messages' ||
+    path === '/i/chat' || path === '/settings/profile';
 }

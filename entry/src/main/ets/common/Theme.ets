@@ -8,6 +8,11 @@
 // Typography: the app never overrides the font family — HarmonyOS Sans (and
 // the user's font-size / bold-text accessibility settings) apply by default.
 
+// The shell pins every native text node to HarmonyOS Sans explicitly instead of
+// relying on the default, and the web content is pinned to the same family by
+// the injected stylesheet in WebChrome.ets. One family, everywhere.
+export const FONT_FAMILY: string = 'HarmonyOS Sans';
+
 // Spacing scale (vp).
 export const S4: number = 4;
 export const S8: number = 8;

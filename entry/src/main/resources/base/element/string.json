@@ -25,8 +25,32 @@
       "value": "Search X"
     },
     {
-      "name": "menu_search",
-      "value": "Search"
+      "name": "home_for_you",
+      "value": "For you"
+    },
+    {
+      "name": "home_following",
+      "value": "Following"
+    },
+    {
+      "name": "menu_account",
+      "value": "Account"
+    },
+    {
+      "name": "menu_view_profile",
+      "value": "Profile"
+    },
+    {
+      "name": "menu_bookmarks",
+      "value": "Bookmarks"
+    },
+    {
+      "name": "menu_lists",
+      "value": "Lists"
+    },
+    {
+      "name": "menu_settings",
+      "value": "Settings and privacy"
     },
     {
       "name": "menu_notification_settings",
@@ -37,24 +61,8 @@
       "value": "New message"
     },
     {
-      "name": "menu_edit_profile",
-      "value": "Edit profile"
-    },
-    {
       "name": "menu_create_account",
       "value": "Create account"
-    },
-    {
-      "name": "menu_refresh",
-      "value": "Refresh"
-    },
-    {
-      "name": "menu_desktop_site",
-      "value": "Desktop site"
-    },
-    {
-      "name": "menu_mobile_site",
-      "value": "Mobile site"
     },
     {
       "name": "compose_title",
@@ -75,6 +83,22 @@
     {
       "name": "compose_post_missing",
       "value": "Nothing to post yet"
+    },
+    {
+      "name": "compose_placeholder",
+      "value": "What's happening?"
+    },
+    {
+      "name": "compose_counter",
+      "value": "%d / 280"
+    },
+    {
+      "name": "compose_more",
+      "value": "Media & more"
+    },
+    {
+      "name": "compose_web_fallback",
+      "value": "Opening the full composer"
     },
     {
       "name": "vibrate_reason",
@@ -119,6 +143,14 @@
     {
       "name": "location_reason",
       "value": "OpenTwit web pages may request your location for location-tagged posts."
+    },
+    {
+      "name": "back",
+      "value": "Back"
+    },
+    {
+      "name": "post",
+      "value": "Post"
     }
   ]
 }

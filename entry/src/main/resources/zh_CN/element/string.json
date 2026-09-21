@@ -25,8 +25,32 @@
       "value": "搜索 X"
     },
     {
-      "name": "menu_search",
-      "value": "搜索"
+      "name": "home_for_you",
+      "value": "为你推荐"
+    },
+    {
+      "name": "home_following",
+      "value": "正在关注"
+    },
+    {
+      "name": "menu_account",
+      "value": "账号"
+    },
+    {
+      "name": "menu_view_profile",
+      "value": "个人资料"
+    },
+    {
+      "name": "menu_bookmarks",
+      "value": "书签"
+    },
+    {
+      "name": "menu_lists",
+      "value": "列表"
+    },
+    {
+      "name": "menu_settings",
+      "value": "设置与隐私"
     },
     {
       "name": "menu_notification_settings",
@@ -37,24 +61,8 @@
       "value": "新建消息"
     },
     {
-      "name": "menu_edit_profile",
-      "value": "编辑个人资料"
-    },
-    {
       "name": "menu_create_account",
       "value": "创建账号"
-    },
-    {
-      "name": "menu_refresh",
-      "value": "刷新"
-    },
-    {
-      "name": "menu_desktop_site",
-      "value": "桌面版网站"
-    },
-    {
-      "name": "menu_mobile_site",
-      "value": "移动版网站"
     },
     {
       "name": "compose_title",
@@ -75,6 +83,22 @@
     {
       "name": "compose_post_missing",
       "value": "还没有可发布的内容"
+    },
+    {
+      "name": "compose_placeholder",
+      "value": "有什么新鲜事？"
+    },
+    {
+      "name": "compose_counter",
+      "value": "%d / 280"
+    },
+    {
+      "name": "compose_more",
+      "value": "媒体与更多"
+    },
+    {
+      "name": "compose_web_fallback",
+      "value": "正在打开完整编辑器"
     },
     {
       "name": "vibrate_reason",
@@ -119,6 +143,14 @@
     {
       "name": "location_reason",
       "value": "OpenTwit 中的网页可能为发布带位置的帖子而请求你的位置信息。"
+    },
+    {
+      "name": "back",
+      "value": "返回"
+    },
+    {
+      "name": "post",
+      "value": "帖子"
     }
   ]
 }
