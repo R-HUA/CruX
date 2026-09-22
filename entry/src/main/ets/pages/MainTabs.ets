@@ -3,7 +3,7 @@ import mediaquery from '@ohos.mediaquery';
 import { preferences } from '@kit.ArkData';
 import { photoAccessHelper } from '@kit.MediaLibraryKit';
 import { abilityAccessCtrl, common, PermissionRequestResult, Permissions } from '@kit.AbilityKit';
-import { BusinessError } from '@kit.BasicServicesKit';
+import { BusinessError, deviceInfo } from '@kit.BasicServicesKit';
 import { notificationManager } from '@kit.NotificationKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { SymbolGlyphModifier } from '@kit.ArkUI';
@@ -23,7 +23,8 @@ import {
 import {
   OWN_HANDLE_SCRIPT, chromeScript, chromeFlagScript, scrollToTopScript,
   CLICK_POST_BUTTON_SCRIPT, PROFILE_BOOTSTRAP_SCRIPT, fillComposerScript,
-  HOME_TAB_SCRIPT, selectHomeTabScript, AVATAR_SCRIPT, UNREAD_COUNTS_SCRIPT
+  HOME_TAB_SCRIPT, selectHomeTabScript, AVATAR_SCRIPT, UNREAD_COUNTS_SCRIPT,
+  ONLINE_PATCH
 } from '../common/WebChrome';
 
 // OpenTwit-Web: the real x.com web app inside a fully native HarmonyOS shell.
@@ -476,10 +477,11 @@ struct MainTabs {
     this.hasError = false;
     this.progress = 0;
     try {
-      // x.com refuses e-mail sign-up on its mobile web path, so that flow alone
-      // is loaded with a desktop user agent. No user-facing switch: the shell
+      // x.com refuses e-mail sign-up on its mobile web path, so that flow is
+      // loaded with a desktop user agent. No user-facing switch: the shell
       // picks what the page needs.
-      this.controller.setCustomUserAgent(userAgentFor(url.indexOf('/i/flow/signup') >= 0));
+      this.controller.setCustomUserAgent(
+        userAgentFor(deviceInfo.deviceType === '2in1' || url.indexOf('/i/flow/signup') >= 0));
     } catch (err) {
       hilog.warn(DOMAIN, TAG, 'UA switch failed: %{public}s', JSON.stringify(err));
     }
@@ -487,6 +489,24 @@ struct MainTabs {
       this.controller.loadUrl(url);
     } catch (err) {
       hilog.error(DOMAIN, TAG, 'loadUrl failed: %{public}s', JSON.stringify(err));
+    }
+  }
+
+  // A 2in1 window is a desktop, so it asks x.com for the desktop web app: a
+  // phone user agent inside a 1000+ vp window is a mismatch the site acts on
+  // (and one its sign-in risk checks can read as an emulated browser). Phones,
+  // tablets and unfolded foldables keep the mobile web app they were built
+  // against.
+  private userAgent(): string {
+    return userAgentFor(deviceInfo.deviceType === '2in1');
+  }
+
+  // Feeds the document-start navigator.onLine patch (see ONLINE_PATCH). The
+  // shell only ever corrects it downwards, when the main frame really failed.
+  private setOnlineFlag(online: boolean): void {
+    try {
+      this.controller.runJavaScript('window.__otOnline=' + (online ? 'true' : 'false') + ';');
+    } catch (err) {
     }
   }
 
@@ -1598,11 +1618,34 @@ struct MainTabs {
         // userAgent() on the attribute is deprecated; the controller API is the
         // supported way and can only run once the controller is bound.
         try {
-          this.controller.setCustomUserAgent(userAgentFor(false));
+          this.controller.setCustomUserAgent(this.userAgent());
         } catch (err) {
           hilog.warn(DOMAIN, TAG, 'custom UA rejected: %{public}s', JSON.stringify(err));
         }
       })
+      // x.com opens some flows — the Google and Apple sign-in hand-offs, and
+      // links that leave the site — in a new tab. ArkWeb blocks the renderer
+      // until this event is answered, which is why those links used to look
+      // dead; the shell deliberately has one WebView, so the target is loaded
+      // here and no second window is created.
+      .onWindowNew((event: OnWindowNewEvent) => {
+        try {
+          const target: string = event.targetUrl;
+          try {
+            event.handler.setWebController(null);
+          } catch (err) {
+            hilog.warn(DOMAIN, TAG, 'new-window hand-off failed: %{public}s', JSON.stringify(err));
+          }
+          if (target !== '') {
+            hilog.info(DOMAIN, TAG, 'new-window request served in place: %{public}s', target);
+            this.loadWeb(target);
+          }
+        } catch (err) {
+        }
+      })
+      // Runs before any page script: ArkWeb's own navigator.onLine is wrong on
+      // these images, and x.com's Chat and sign-in flows act on it.
+      .runJavaScriptOnDocumentStart([{ script: ONLINE_PATCH, scriptRules: ['*'] }])
       .javaScriptAccess(true)
       .domStorageAccess(true)
       // x.com's chat client keeps its session state in browser storage; ArkWeb
@@ -1629,6 +1672,9 @@ struct MainTabs {
         this.progress = 100;
         this.refreshing = false;
         this.finishFirstLoad();
+        // A page that rendered was served, so the connection is up — this is
+        // what keeps the injected navigator.onLine patch honest.
+        this.setOnlineFlag(true);
         if (event && event.url) {
           this.syncFromUrl(event.url);
           this.applyPageChrome(event.url);
@@ -1662,6 +1708,7 @@ struct MainTabs {
         this.progress = 100;
         this.refreshing = false;
         this.finishFirstLoad();
+        this.setOnlineFlag(false);
       })
       .onRenderExited((event) => {
         // The render process is restarted by the system; recover by loading the
@@ -1780,7 +1827,7 @@ struct MainTabs {
         .opacity(this.webComposer ? 1 : 0)
         .onControllerAttached(() => {
           try {
-            this.composeController.setCustomUserAgent(userAgentFor(false));
+            this.composeController.setCustomUserAgent(this.userAgent());
           } catch (err) {
           }
         })

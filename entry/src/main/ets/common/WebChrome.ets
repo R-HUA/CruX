@@ -33,6 +33,26 @@ const CHROME_CSS: string =
 // empty on the mobile web.
 export const OWN_HANDLE_SCRIPT: string = '(window.__otOwn?window.__otOwn():"")';
 
+// ArkWeb reports navigator.onLine as false on some images even while the page
+// is being served over a working connection (reproduced on both the foldable
+// and the 2in1 emulator: navigator.connection said "4g" and every request
+// succeeded while navigator.onLine stayed false). x.com believes the flag:
+// the Chat inbox answered "Disconnected" and rendered "Empty inbox" with no
+// conversations until it was told the browser was online again.
+//
+// The shell is the side that actually knows: a document that was served is, by
+// definition, being served. So the flag is rewritten at document start, before
+// any page script reads it, and the shell can still correct it downwards with
+// window.__otOnline = false when the main frame really fails (see MainTabs).
+export const ONLINE_PATCH: string =
+  '(function(){try{' +
+  'var otIsOnline=function(){try{return window.__otOnline!==false;}catch(e){return true;}};' +
+  'try{Object.defineProperty(Navigator.prototype,"onLine",' +
+  '{configurable:true,get:otIsOnline});}catch(e){}' +
+  'try{Object.defineProperty(window.navigator,"onLine",' +
+  '{configurable:true,get:otIsOnline});}catch(e){}' +
+  '}catch(e){}})();';
+
 // How often the chrome pass may re-run when it is reacting to page mutations.
 // The first pass stays immediate (no double chrome on first paint); only the
 // re-runs are paced. x.com mutates its DOM continuously — timelines, and far
@@ -76,9 +96,27 @@ export function chromeScript(ownHandle: string, tabRoot: boolean, band: number):
     // On a tab root the shell owns search, so the page's own search box goes
     // whatever row it landed in (it sits much lower on a wide layout than the
     // phone-tuned top band would cover).
-    'if(s&&(root||T(s)))H(s);' +
+    // Hiding the field alone leaves its pill behind as an empty rounded
+    // rectangle, so the row that holds it goes too. The walk up stops at
+    // anything taller than a search row, narrower than one, or already
+    // holding the tab strip — those are containers the shell does not own.
+    'if(s&&(root||T(s))){' +
+    'var se=s.parentElement,g2=0,bestS=null;' +
+    'while(se&&se!==document.body&&g2++<8){var sr=R(se);' +
+    'if(!sr||sr.width<200||sr.width>620||sr.height>90)break;' +
+    'try{if(se.querySelector(\'[role="tablist"]\'))break;}catch(_){}' +
+    'if(sr.height>=30)bestS=se;' +
+    'se=se.parentElement;}' +
+    'if(bestS)H(bestS);' +
+    'H(s);}' +
     'var links=QA(\'a[href^="/settings"],a[href="/messages/compose"],a[href^="/premium"],a[href^="/i/premium"],a[href="/login"]\');' +
-    'for(var i=0;i<links.length;i++){if(T(links[i]))H(links[i]);}' +
+    // Only icon-only chrome goes: this rule exists for the header's own gear
+    // and pencil, which carry no text. A *settings page* puts its own rows in
+    // the same shape near the top (x.com's "Filters" / "Preferences" pivots),
+    // and hiding those left the page showing nothing but its description.
+    'for(var i=0;i<links.length;i++){try{' +
+    'var lt=(links[i].innerText||\'\').replace(/\\s+/g,\'\');' +
+    'if(lt.length===0&&T(links[i]))H(links[i]);}catch(_){}}' +
     'var logo=Q(\'a[href="/home"]\')||Q(\'a[href="/"]\')||Q(\'svg[aria-label="X"]\')||Q(\'a[aria-label="X"]\')||Q(\'a[aria-label="Home"]\');' +
     'if(logo){var lk=logo;try{lk=logo.closest(\'a\')||logo;}catch(_){}' +
     'if(root||T(lk))H(lk);}' +
@@ -98,6 +136,14 @@ export function chromeScript(ownHandle: string, tabRoot: boolean, band: number):
     'if(best)H(best);}' +
     'var hdrs=QA(\'header,div[role="banner"]\');' +
     'for(var hb=0;hb<hdrs.length;hb++){try{' +
+    // A banner that is as tall as the page and sits against the left edge is
+    // not a header row at all: it is x.com's own navigation column (the desktop
+    // side nav, and the whole left rail on x.com/i/chat). Its inner nav is
+    // already removed by the stylesheet, which would otherwise leave the column
+    // standing with only its X logo and its empty width behind it. The shell's
+    // rail is that navigation, so the column goes with it.
+    'var cb=R(hdrs[hb]);' +
+    'if(cb&&cb.height>=200&&cb.width<=360&&cb.left<=8){H(hdrs[hb]);continue;}' +
     'if(hdrs[hb].querySelector(\'[role="tablist"]\'))continue;' +
     'var htxt=(hdrs[hb].innerText||\'\').replace(/\\s+/g,\'\');' +
     'if(htxt.length>=100)continue;' +

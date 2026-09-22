@@ -10,6 +10,11 @@
 # AppGallery release, swap in the AGC-issued .p12/.cer/.p7b for this bundle.
 #
 # Usage: scripts/sign-hap.sh [unsigned.hap] [out.hap]
+#
+# The default output name follows the app's own versionName (AppScope/app.json5),
+# so a release artifact cannot end up carrying the wrong version in its file
+# name, and the checksum the release ships is written next to the HAP here
+# instead of being produced by hand afterwards.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -17,8 +22,11 @@ SDK_LIB="${OH_SDK_LIB:-$HOME/Developer/command-line-tools/sdk/default/openharmon
 JAVA_BIN="${JAVA_BIN:-/opt/homebrew/opt/openjdk@17/bin/java}"
 KEYTOOL_BIN="${KEYTOOL_BIN:-/opt/homebrew/opt/openjdk@17/bin/keytool}"
 
+APP_VERSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["app"]["versionName"])' \
+  "$REPO_ROOT/AppScope/app.json5")"
+
 IN_HAP="${1:-$REPO_ROOT/entry/build/default/outputs/default/entry-default-unsigned.hap}"
-OUT_HAP="${2:-$REPO_ROOT/dist/OpenTwit-Web-1.0.0-signed.hap}"
+OUT_HAP="${2:-$REPO_ROOT/dist/OpenTwit-Web-$APP_VERSION-signed.hap}"
 
 BUNDLE_NAME="com.opentwit.web"
 KEYSTORE="$SDK_LIB/OpenHarmony.p12"
@@ -34,7 +42,7 @@ trap 'rm -rf "$WORK"' EXIT
 [ -f "$IN_HAP" ] || { echo "missing input hap: $IN_HAP" >&2; exit 1; }
 [ -f "$KEYSTORE" ] || { echo "missing keystore: $KEYSTORE" >&2; exit 1; }
 
-echo "== 1/5 app signing cert chain"
+echo "== 1/6 app signing cert chain"
 # The keystore holds the app key together with a self-signed copy of its
 # certificate; the certificate devices trust is the CA-issued one embedded in
 # the profile template. Same public key, so that is the chain to sign with.
@@ -51,7 +59,7 @@ PY
   -storetype PKCS12 -storepass "$STORE_PWD" -rfc -file "$WORK/root.pem" >/dev/null
 cat "$WORK/app_leaf.pem" "$WORK/ca.pem" "$WORK/root.pem" > "$WORK/app_chain.pem"
 
-echo "== 2/5 provisioning profile for $BUNDLE_NAME"
+echo "== 2/6 provisioning profile for $BUNDLE_NAME"
 python3 - "$SDK_LIB" "$WORK" "$BUNDLE_NAME" <<'PY'
 import json, sys, time, uuid, pathlib
 lib, work, bundle = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3]
@@ -64,14 +72,14 @@ json.dump(profile, open(work / 'profile.json', 'w'), indent=4)
 print('  bundle:', bundle, '| distribution:', profile['app-distribution-type'])
 PY
 
-echo "== 3/5 sign the profile"
+echo "== 3/6 sign the profile"
 "$JAVA_BIN" -jar "$SIGN_TOOL" sign-profile \
   -mode localSign -keyAlias "$PROFILE_ALIAS" -keyPwd "$STORE_PWD" \
   -profileCertFile "$PROFILE_CERT" -inFile "$WORK/profile.json" \
   -signAlg SHA256withECDSA -keystoreFile "$KEYSTORE" -keystorePwd "$STORE_PWD" \
   -outFile "$WORK/profile.p7b" 2>&1 | tail -2
 
-echo "== 4/5 sign the hap"
+echo "== 4/6 sign the hap"
 mkdir -p "$(dirname "$OUT_HAP")"
 "$JAVA_BIN" -jar "$SIGN_TOOL" sign-app \
   -mode localSign -keyAlias "$APP_ALIAS" -keyPwd "$STORE_PWD" \
@@ -80,7 +88,12 @@ mkdir -p "$(dirname "$OUT_HAP")"
   -keystorePwd "$STORE_PWD" -inForm zip -compatibleVersion 12 \
   -outFile "$OUT_HAP" 2>&1 | tail -2
 
-echo "== 5/5 verify"
+echo "== 5/6 verify"
 "$JAVA_BIN" -jar "$SIGN_TOOL" verify-app -inFile "$OUT_HAP" \
   -outCertChain "$WORK/verify-chain.cer" -outProfile "$WORK/verify-profile.p7b" 2>&1 | tail -3
-ls -la "$OUT_HAP"
+
+echo "== 6/6 checksum"
+# Same shape as the release's checksum asset: "<hash>  <path from the repo root>".
+printf '%s  %s\n' "$(shasum -a 256 "$OUT_HAP" | awk '{print $1}')" "${OUT_HAP#"$REPO_ROOT"/}" \
+  > "$OUT_HAP.sha256"
+ls -la "$OUT_HAP" "$OUT_HAP.sha256"
