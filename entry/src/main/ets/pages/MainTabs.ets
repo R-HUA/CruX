@@ -3,8 +3,11 @@ import mediaquery from '@ohos.mediaquery';
 import { preferences } from '@kit.ArkData';
 import { photoAccessHelper } from '@kit.MediaLibraryKit';
 import { abilityAccessCtrl, common, PermissionRequestResult, Permissions } from '@kit.AbilityKit';
+import { BusinessError } from '@kit.BasicServicesKit';
+import { notificationManager } from '@kit.NotificationKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { SymbolGlyphModifier } from '@kit.ArkUI';
+import { KeyCode } from '@kit.InputKit';
 import { vibrator } from '@kit.SensorServiceKit';
 import {
   BAR_HEIGHT, FONT_FAMILY, PROGRESS_HEIGHT, RAIL_WIDTH, RADIUS, S12, S16, S4, S8, TOUCH_TARGET,
@@ -20,7 +23,7 @@ import {
 import {
   OWN_HANDLE_SCRIPT, chromeScript, chromeFlagScript, scrollToTopScript,
   CLICK_POST_BUTTON_SCRIPT, PROFILE_BOOTSTRAP_SCRIPT, fillComposerScript,
-  HOME_TAB_SCRIPT, selectHomeTabScript, AVATAR_SCRIPT
+  HOME_TAB_SCRIPT, selectHomeTabScript, AVATAR_SCRIPT, UNREAD_COUNTS_SCRIPT
 } from '../common/WebChrome';
 
 // OpenTwit-Web: the real x.com web app inside a fully native HarmonyOS shell.
@@ -43,10 +46,29 @@ const PREFS_NAME: string = 'opentwit_web';
 const OWN_HANDLE_KEY: string = 'own_handle';
 const AVATAR_KEY: string = 'own_avatar';
 const DESKTOP_MODE_KEY: string = 'desktop_site';
+// The composer's text, kept in ArkData preferences so a draft survives the
+// sheet closing and the app being killed.
+const COMPOSE_DRAFT_KEY: string = 'compose_draft';
+const NOTIFICATION_ASKED_KEY: string = 'notification_asked';
 const LOCATION_PERMISSIONS: Permissions[] = ['ohos.permission.LOCATION'];
 const FIRST_LOAD_TIMEOUT_MS: number = 15000;
 // The page's title and history only settle a moment after it navigates.
 const PAGE_STATE_DELAY_MS: number = 700;
+// How often the shell re-reads the unread counters from the page. x.com counts
+// arrive over its own streaming connection, so a poll is what keeps the tab
+// badges and the launcher badge in step with the account.
+const BADGE_REFRESH_MS: number = 30000;
+// A page that is mid-load has no navigation to read yet, so the first answer
+// can be "not yet" (see UNREAD_COUNTS_SCRIPT). Ask again a few times instead of
+// leaving the badges blank until the next tick.
+const BADGE_RETRY_MS: number = 1200;
+const BADGE_RETRY_LIMIT: number = 6;
+// After the notification prompt, keep watching for a while in case the user
+// allows it from Settings rather than in the dialog.
+const NOTIFICATION_POLL_MS: number = 5000;
+const NOTIFICATION_POLL_LIMIT: number = 6;
+// The composer writes its draft a moment after the last keystroke.
+const DRAFT_SAVE_DEBOUNCE_MS: number = 700;
 
 // Bridge exposed to the page as window.otNative. x.com is a single-page app, so
 // its navigations never fire the Web component's load callbacks; the injected
@@ -98,9 +120,11 @@ struct MainTabs {
   // web history to go back to. The shell draws the header for every page, so
   // these are what the native title bar shows.
   @State refreshing: boolean = false;
-  // Unread notifications, read from the page title ("(3) Home / X"). Shown as a
-  // native badge so the count does not depend on the web UI being on screen.
-  @State unreadCount: number = 0;
+  // Unread items, read from the page's own navigation entries. Both the tab bar
+  // and the launcher icon show them, so the count does not depend on the web UI
+  // being on screen.
+  @State unreadNotifications: number = 0;
+  @State unreadMessages: number = 0;
   @State pageTitle: string = '';
   @State canGoBack: boolean = false;
   private controller: web_webview.WebviewController = new web_webview.WebviewController();
@@ -108,6 +132,16 @@ struct MainTabs {
   private wideListener: mediaquery.MediaQueryListener | undefined = undefined;
   private bridge: PageBridge = new PageBridge();
   private firstLoadTimer: number = -1;
+  private badgeTimer: number = -1;
+  private badgeRetryTimer: number = -1;
+  private badgeRetries: number = 0;
+  private draftSaveTimer: number = -1;
+  // Whether the notification prompt (the one that lets the icon carry a badge)
+  // has been shown, so a decline is respected and never repeated.
+  private notificationAsked: boolean = false;
+  // Last count handed to the launcher, so the shell only calls out when it
+  // actually changes.
+  private badgeShown: number = -1;
 
   async aboutToAppear(): Promise<void> {
     this.bridge.setHandler((url: string) => {
@@ -118,6 +152,7 @@ struct MainTabs {
     });
     this.applyBreakpoints();
     this.armFirstLoadTimeout();
+    this.armBadgeRefresh();
     try {
       const ctx: common.Context | undefined = this.getUIContext().getHostContext();
       if (ctx !== undefined) {
@@ -130,6 +165,11 @@ struct MainTabs {
         if (avatar !== '') {
           this.avatarUrl = avatar;
         }
+        const draft: string = await prefs.get(COMPOSE_DRAFT_KEY, '') as string;
+        if (draft !== '') {
+          this.draft = draft;
+        }
+        this.notificationAsked = await prefs.get(NOTIFICATION_ASKED_KEY, false) as boolean;
       }
     } catch (err) {
       hilog.warn(DOMAIN, TAG, 'preferences unavailable: %{public}s', JSON.stringify(err));
@@ -141,6 +181,20 @@ struct MainTabs {
       clearTimeout(this.firstLoadTimer);
       this.firstLoadTimer = -1;
     }
+    if (this.badgeTimer !== -1) {
+      clearInterval(this.badgeTimer);
+      this.badgeTimer = -1;
+    }
+    if (this.badgeRetryTimer !== -1) {
+      clearTimeout(this.badgeRetryTimer);
+      this.badgeRetryTimer = -1;
+    }
+    if (this.draftSaveTimer !== -1) {
+      clearTimeout(this.draftSaveTimer);
+      this.draftSaveTimer = -1;
+      // Leaving the app is a good moment to make sure the draft is on disk.
+      this.saveDraft();
+    }
     if (this.wideListener !== undefined) {
       try {
         this.wideListener.off('change');
@@ -148,6 +202,13 @@ struct MainTabs {
       }
       this.wideListener = undefined;
     }
+  }
+
+  // Coming back to the app is the moment the counts are most likely to be stale
+  // (the page kept running in the background), so re-read them here as well as
+  // on the timer.
+  onPageShow(): void {
+    this.refreshBadges();
   }
 
   // A page that never finishes loading must not leave the first-load spinner up
@@ -185,6 +246,11 @@ struct MainTabs {
   // Short tick on tab change — HarmonyOS expects light tactile confirmation for
   // navigation, and a device without a motor simply rejects the request.
   private tick(): void {
+    // 2in1 desktops have no motor, and the SDK marks vibration as a capability
+    // that is not present on every device type.
+    if (!canIUse('SystemCapability.Sensors.MiscDevice')) {
+      return;
+    }
     try {
       vibrator.startVibration({ type: 'time', duration: 10 }, { id: 0, usage: 'unknown' })
         .catch((err: Error) => {
@@ -595,24 +661,172 @@ struct MainTabs {
     }
   }
 
-  // x.com prefixes the unread count: "(3) Home / X".
-  private static unreadCountOf(title: string): number {
-    if (title.length < 3 || title.charAt(0) !== '(') {
-      return 0;
+  // Unread counters, straight off the page's own navigation entries. The page
+  // is the only thing that knows the account's counts, and it already publishes
+  // them for its own (hidden) tab row — see UNREAD_COUNTS_SCRIPT.
+  //
+  // A negative count means the page has not told us yet (still loading, or its
+  // navigation has not hydrated), so the previous value stands and the read is
+  // retried. Moving between tabs used to wipe the badges because a mid-reload
+  // read came back empty and was taken at face value.
+  private refreshBadges(): void {
+    try {
+      this.controller.runJavaScript(UNREAD_COUNTS_SCRIPT).then((raw: string) => {
+        this.applyBadgeCounts(MainTabs.unquote(raw));
+      }, (err: BusinessError) => {
+        hilog.debug(DOMAIN, TAG, 'badge read failed: %{public}d %{public}s', err.code, err.message);
+        this.retryBadgeRead();
+      });
+    } catch (err) {
+      this.retryBadgeRead();
     }
-    const close: number = title.indexOf(')');
-    if (close < 2 || close > 5) {
-      return 0;
+  }
+
+  private applyBadgeCounts(counts: string): void {
+    const cut: number = counts.indexOf('/');
+    if (cut <= 0) {
+      this.retryBadgeRead();
+      return;
     }
-    let digits: string = '';
-    for (let i: number = 1; i < close; i++) {
-      const ch: string = title.charAt(i);
-      if (ch < '0' || ch > '9') {
-        return 0;
+    const notifications: number = Number.parseInt(counts.substring(0, cut), 10);
+    const messages: number = Number.parseInt(counts.substring(cut + 1), 10);
+    if (Number.isNaN(notifications) || Number.isNaN(messages)) {
+      this.retryBadgeRead();
+      return;
+    }
+    if (notifications >= 0) {
+      this.unreadNotifications = notifications;
+    }
+    if (messages >= 0) {
+      this.unreadMessages = messages;
+    }
+    if (notifications < 0 || messages < 0) {
+      this.retryBadgeRead();
+    } else {
+      this.badgeRetries = 0;
+    }
+    this.syncLauncherBadge();
+  }
+
+  // Ask again shortly — bounded, and only while the page still owes an answer.
+  private retryBadgeRead(): void {
+    if (this.badgeRetryTimer !== -1 || this.badgeRetries >= BADGE_RETRY_LIMIT) {
+      return;
+    }
+    this.badgeRetries++;
+    this.badgeRetryTimer = setTimeout(() => {
+      this.badgeRetryTimer = -1;
+      this.refreshBadges();
+    }, BADGE_RETRY_MS);
+  }
+
+  // Keep the launcher icon's own badge in step with what the tab bar shows, so
+  // the count is visible without opening the app (HarmonyOS draws the badge on
+  // the desktop icon or the folder the icon sits in).
+  private syncLauncherBadge(): void {
+    const total: number = this.unreadNotifications + this.unreadMessages;
+    if (total === this.badgeShown) {
+      return;
+    }
+    if (total > 0 && !this.notificationsAllowed()) {
+      // HarmonyOS treats the app-icon badge as a notification surface — its own
+      // permission dialog lists "角标 / badge" among the reminder modes — so
+      // nothing lands on the icon until the account allows notifications.
+      this.askForNotificationsOnce();
+      return;
+    }
+    this.badgeShown = total;
+    hilog.info(DOMAIN, TAG, 'launcher badge -> %{public}d', total);
+    try {
+      notificationManager.setBadgeNumber(total)
+        .then(() => {
+          hilog.info(DOMAIN, TAG, 'launcher badge accepted: %{public}d', total);
+        })
+        .catch((err: BusinessError) => {
+          hilog.warn(DOMAIN, TAG, 'launcher badge rejected: %{public}d %{public}s', err.code, err.message);
+        });
+    } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'launcher badge unavailable: %{public}s', JSON.stringify(err));
+    }
+  }
+
+  private notificationsAllowed(): boolean {
+    try {
+      return notificationManager.isNotificationEnabledSync();
+    } catch (err) {
+      return false;
+    }
+  }
+
+  // Asked once, in context — when there is finally something to badge — and
+  // never again after a decline. The tab bar badges do not depend on it, so
+  // saying no only costs the launcher icon.
+  private askForNotificationsOnce(): void {
+    if (this.notificationAsked) {
+      return;
+    }
+    this.notificationAsked = true;
+    this.saveNotificationAsked();
+    this.retryLauncherBadgeWhenAllowed(0);
+    const host: common.Context | undefined = this.getUIContext().getHostContext();
+    if (host === undefined) {
+      return;
+    }
+    try {
+      notificationManager.requestEnableNotification(host as common.UIAbilityContext)
+        .then(() => {
+          hilog.info(DOMAIN, TAG, '%{public}s', 'notifications allowed for the icon badge');
+          this.badgeShown = -1;
+          this.syncLauncherBadge();
+        })
+        .catch((err: BusinessError) => {
+          hilog.info(DOMAIN, TAG, 'notifications declined (%{public}d): icon badge stays off', err.code);
+        });
+    } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'notification request failed: %{public}s', JSON.stringify(err));
+    }
+  }
+
+  // The user may allow notifications in Settings instead of in our dialog. Keep
+  // checking for a while so the icon picks the count up without a relaunch.
+  private retryLauncherBadgeWhenAllowed(attempt: number): void {
+    if (attempt >= NOTIFICATION_POLL_LIMIT) {
+      return;
+    }
+    setTimeout(() => {
+      if (this.notificationsAllowed()) {
+        this.badgeShown = -1;
+        this.syncLauncherBadge();
+        return;
       }
-      digits += ch;
+      this.retryLauncherBadgeWhenAllowed(attempt + 1);
+    }, NOTIFICATION_POLL_MS);
+  }
+
+  private armBadgeRefresh(): void {
+    if (this.badgeTimer !== -1) {
+      clearInterval(this.badgeTimer);
     }
-    return digits === '' ? 0 : Number.parseInt(digits, 10);
+    this.badgeTimer = setInterval(() => {
+      this.badgeRetries = 0;
+      this.refreshBadges();
+    }, BADGE_REFRESH_MS);
+  }
+
+  // Badge for a tab bar item: the count lives on Notifications and Messages,
+  // and clears while that tab is the one on screen — the same thing the stock
+  // app does when you open the tab and read it.
+  private badgeCount(index: number): number {
+    if (index === this.currentIndex) {
+      return 0;
+    }
+    if (index === 2) {
+      return this.unreadNotifications;
+    }
+    if (index === 3) {
+      return this.unreadMessages;
+    }
+    return 0;
   }
 
   private static stripSiteSuffix(raw: string): string {
@@ -639,7 +853,6 @@ struct MainTabs {
       this.controller.runJavaScript('document.title').then((raw: string) => {
         const title: string = MainTabs.unquote(raw);
         this.pageTitle = MainTabs.stripSiteSuffix(title);
-        this.unreadCount = MainTabs.unreadCountOf(title);
       });
     } catch (err) {
     }
@@ -691,6 +904,7 @@ struct MainTabs {
   private schedulePageStateRead(): void {
     setTimeout(() => {
       this.readPageState();
+      this.refreshBadges();
     }, PAGE_STATE_DELAY_MS);
   }
 
@@ -778,10 +992,79 @@ struct MainTabs {
   private openCompose(): void {
     // A fresh controller per sheet: the sheet's WebView is destroyed on close.
     this.composeController = new web_webview.WebviewController();
-    this.draft = '';
+    // Whatever was typed last time is still here (see COMPOSE_DRAFT_KEY); the
+    // composer opens with the draft in place instead of an empty box.
     this.webComposer = false;
     this.posting = false;
     this.sheetOpen = true;
+  }
+
+  // Drafts are saved as you type, so closing the sheet — or the app — cannot
+  // lose what was written.
+  private scheduleDraftSave(): void {
+    if (this.draftSaveTimer !== -1) {
+      clearTimeout(this.draftSaveTimer);
+    }
+    this.draftSaveTimer = setTimeout(() => {
+      this.draftSaveTimer = -1;
+      this.saveDraft();
+    }, DRAFT_SAVE_DEBOUNCE_MS);
+  }
+
+  private saveDraft(): void {
+    this.putPreference(COMPOSE_DRAFT_KEY, this.draft);
+  }
+
+  private saveNotificationAsked(): void {
+    this.putPreference(NOTIFICATION_ASKED_KEY, true);
+  }
+
+  // Desktop keyboards: Escape leaves the composer and Ctrl/Cmd+Enter posts —
+  // the two shortcuts every client of this kind has, and on a 2in1 they are
+  // faster than reaching for the sheet's buttons. Returns true when the key is
+  // consumed so it does not also reach the editor.
+  private composeKey(event: KeyEvent): boolean {
+    if (event.type !== KeyType.Down) {
+      return false;
+    }
+    if (event.keyCode === KeyCode.KEYCODE_ESCAPE) {
+      this.sheetOpen = false;
+      return true;
+    }
+    if (event.keyCode !== KeyCode.KEYCODE_ENTER) {
+      return false;
+    }
+    if (event.metaKey === 1 || MainTabs.ctrlDown(event)) {
+      this.postFromSheet();
+      return true;
+    }
+    return false;
+  }
+
+  private static ctrlDown(event: KeyEvent): boolean {
+    try {
+      // Optional on the type: it is absent on older devices and under a stylus.
+      if (event.getModifierKeyState === undefined) {
+        return false;
+      }
+      return event.getModifierKeyState(['Ctrl']);
+    } catch (err) {
+      return false;
+    }
+  }
+
+  private async putPreference(key: string, value: preferences.ValueType): Promise<void> {
+    try {
+      const ctx: common.Context | undefined = this.getUIContext().getHostContext();
+      if (ctx === undefined) {
+        return;
+      }
+      const prefs: preferences.Preferences = await preferences.getPreferences(ctx, PREFS_NAME);
+      await prefs.put(key, value);
+      await prefs.flush();
+    } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'preference write failed: %{public}s', JSON.stringify(err));
+    }
   }
 
   // Native "Post": type the draft into the page's own editor, then press the
@@ -817,6 +1100,9 @@ struct MainTabs {
         this.tick();
         this.toast($r('app.string.compose_post_sent'));
         this.sheetOpen = false;
+        // The draft is now a post; clear what was saved for next time.
+        this.draft = '';
+        this.saveDraft();
       } else {
         // The text is already in the page's editor; showing it lets the user
         // finish there (media, polls, threads) without retyping.
@@ -928,6 +1214,9 @@ struct MainTabs {
     .width(TOUCH_TARGET)
     .height(TOUCH_TARGET)
     .justifyContent(FlexAlign.Center)
+    // Pointer devices (2in1 / tablet with a mouse) get the hover the phone
+    // never needed.
+    .hoverEffect(HoverEffect.Highlight)
     .accessibilityText($r('app.string.menu_account'))
     .accessibilityLevel('yes')
     .bindMenu(this.accountMenu)
@@ -1017,6 +1306,7 @@ struct MainTabs {
     .height('100%')
     .justifyContent(FlexAlign.Center)
     .padding({ left: S12, right: S12 })
+    .hoverEffect(HoverEffect.Highlight)
     .accessibilityText(label)
     .accessibilityLevel('yes')
     .onClick(() => {
@@ -1155,7 +1445,7 @@ struct MainTabs {
   navItem(index: number) {
     Column({ space: S4 }) {
       Badge({
-        count: (index === 2 && this.currentIndex !== 2) ? this.unreadCount : 0,
+        count: this.badgeCount(index),
         position: BadgePosition.RightTop,
         style: { fontSize: 10, badgeSize: 16 }
       }) {
@@ -1180,6 +1470,8 @@ struct MainTabs {
     .width(this.isWide ? RAIL_WIDTH : undefined)
     .height(this.isWide ? TOUCH_TARGET + S16 : undefined)
     .layoutWeight(this.isWide ? 0 : 1)
+    // Mouse hover, so the rail reads as a desktop navigation rail on 2in1.
+    .hoverEffect(HoverEffect.Highlight)
     .accessibilityText(this.tabLabel(index))
     .accessibilityDescription(this.tabLabel(index))
     .accessibilityLevel('yes')
@@ -1566,6 +1858,13 @@ struct MainTabs {
           .fontSize(18)
           .backgroundColor(Color.Transparent)
           .padding({ left: S16, right: S16, top: S12 })
+          .onChange(() => {
+            this.scheduleDraftSave();
+          })
+          // Pre-IME: the editor would otherwise swallow Enter (it is a newline
+          // there), so Ctrl/Cmd+Enter has to be handled before the input method
+          // and the editor ever see the key.
+          .onKeyPreIme((event: KeyEvent) => this.composeKey(event))
           .defaultFocus(true)
       }
       .width('100%')
@@ -1578,6 +1877,8 @@ struct MainTabs {
     .borderRadius({ topLeft: RADIUS, topRight: RADIUS })
     .clip(true)
     .backgroundColor($r('sys.color.ohos_id_color_background'))
+    // Escape works from anywhere in the sheet, not only from the editor.
+    .onKeyEvent((event: KeyEvent) => this.composeKey(event))
   }
 
   build() {

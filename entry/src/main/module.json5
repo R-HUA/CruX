@@ -6,7 +6,8 @@
     "mainElement": "EntryAbility",
     "deviceTypes": [
       "default",
-      "tablet"
+      "tablet",
+      "2in1"
     ],
     "deliveryWithInstall": true,
     "installationFree": false,
@@ -21,6 +22,17 @@
         "startWindowIcon": "$media:app_icon",
         "startWindowBackground": "$color:start_window_background",
         "exported": true,
+        // Free-form window on 2in1 (PC): the shell is responsive, so it is
+        // allowed to be resized and floated. The floor is where the phone
+        // bottom-bar layout stops being usable; the ceiling is left to the
+        // platform so the app fills an ultrawide window if the user wants that.
+        "supportWindowMode": [
+          "fullscreen",
+          "split",
+          "floating"
+        ],
+        "minWindowWidth": 360,
+        "minWindowHeight": 480,
         "skills": [
           {
             "entities": [

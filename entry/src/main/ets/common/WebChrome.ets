@@ -33,6 +33,13 @@ const CHROME_CSS: string =
 // empty on the mobile web.
 export const OWN_HANDLE_SCRIPT: string = '(window.__otOwn?window.__otOwn():"")';
 
+// How often the chrome pass may re-run when it is reacting to page mutations.
+// The first pass stays immediate (no double chrome on first paint); only the
+// re-runs are paced. x.com mutates its DOM continuously — timelines, and far
+// more so on the chat screen — and every pass walks the document and forces
+// layout, so an unpaced observer is a lot of work for nothing.
+const CHROME_OBSERVER_MS: number = 250;
+
 export function chromeScript(ownHandle: string, tabRoot: boolean, band: number): string {
   // The shell draws the header on every page, so the page's own header rows are
   // always removed. "band" is how far down the page its header can sit — the
@@ -109,6 +116,9 @@ export function chromeScript(ownHandle: string, tabRoot: boolean, band: number):
     // this is installed here and re-run by the observer below instead of being
     // read once when the page first reports that it finished loading.
     'window.__otOwn=function(){try{' +
+    // Once the handle is known there is nothing left to look for, and this runs
+    // on every page mutation otherwise.
+    'if(window.__otHandleValue){return window.__otHandleValue;}' +
     'var as=document.querySelectorAll("a[href]");' +
     'for(var i=0;i<as.length;i++){' +
     'var k=as[i].getAttribute("data-testid")||"";' +
@@ -134,9 +144,13 @@ export function chromeScript(ownHandle: string, tabRoot: boolean, band: number):
     'window.addEventListener("popstate",function(){otTell();});' +
     'window.addEventListener("hashchange",function(){otTell();});}' +
     'window.__otHideTop=true;' +
-    'if(!window.__otObs){window.__otObs=new MutationObserver(' +
-    'function(){try{window.__otApplyTop&&window.__otApplyTop();' +
-    'window.__otOwn&&window.__otOwn();}catch(e){}});' +
+    'if(!window.__otObs){window.__otPend=0;' +
+    'window.__otPass=function(){window.__otPend=0;try{' +
+    'window.__otApplyTop&&window.__otApplyTop();' +
+    'window.__otOwn&&window.__otOwn();}catch(e){}};' +
+    'window.__otObs=new MutationObserver(function(){' +
+    'if(window.__otPend){return;}window.__otPend=1;' +
+    'setTimeout(window.__otPass,' + CHROME_OBSERVER_MS + ');});' +
     'try{window.__otObs.observe(document.documentElement,{childList:true,subtree:true});}catch(e){}}' +
     'window.__otApplyTop();' +
     'window.__otOwn();' +
@@ -189,6 +203,55 @@ export const AVATAR_SCRIPT: string =
   'var r=im[i].getBoundingClientRect();' +
   'if(r.width>=60){return String(im[i].getAttribute("src")||"");}}' +
   'return "";}catch(e){return "";}})()';
+
+// Unread counters for the shell's own tab bar and for the launcher badge.
+//
+// The counts belong to x.com, and the page already publishes them twice, so the
+// shell reads rather than guesses: every navigation entry carries the number in
+// its accessible label — x.com's own templates are "Notifications (%d unread
+// notifications)" and "Direct Messages (%d unread conversations)" — and the
+// tabs that draw a numeric badge put the same number in a text node. The
+// wording follows the page language while the number stays a number, so this
+// parses the digits out of either form. The title is the last resort for
+// notifications, which x.com prefixes on every route: "(3) Home / X".
+//
+// Returns "<notifications>/<messages>". A count is 0 when the page has that
+// navigation entry and nothing unread, and **-1 when there is no such entry at
+// all** — a page that is still loading or has not hydrated its navigation yet.
+// The shell keeps the last known count on -1 rather than treating "not yet" as
+// "nothing unread", which is what made the badges drop out while moving between
+// tabs.
+export const UNREAD_COUNTS_SCRIPT: string =
+  '(function(){try{' +
+  // An Arabic page formats counts with Arabic-Indic digits; normalise before
+  // parsing so the number survives a localised page.
+  'function dg(v){return String(v)' +
+  '.replace(/[\\u0660-\\u0669]/g,function(c){return String(c.charCodeAt(0)-1632);})' +
+  '.replace(/[\\u06f0-\\u06f9]/g,function(c){return String(c.charCodeAt(0)-1776);});}' +
+  'function cnt(sel){' +
+  'var ns=document.querySelectorAll(sel);' +
+  'if(!ns.length){return -1;}' +
+  'for(var i=0;i<ns.length;i++){' +
+  'var lab=dg(ns[i].getAttribute("aria-label")||"");' +
+  'var m=lab.match(/\\(\\s*(\\d{1,4})/)||lab.match(/^\\s*(\\d{1,4})\\s*$/);' +
+  'if(!m){' +
+  'var kids=ns[i].querySelectorAll("*");' +
+  'for(var k=0;k<kids.length;k++){' +
+  'var t=dg((kids[k].textContent||"").trim());' +
+  'if(/^\\d{1,4}$/.test(t)){m=[t,t];break;}}}' +
+  'if(m){var n=parseInt(m[1],10);if(n>0){return n;}}}' +
+  'return 0;}' +
+  // The mobile web puts both counts on its own (hidden) tab row; the desktop
+  // layout keeps them on the side navigation. Both are matched by href so a
+  // renamed test id cannot break the read.
+  'var n=cnt(\'a[href="/notifications"],[data-testid="AppTabBar_Notifications_Link"]\');' +
+  'var m=cnt(\'a[href="/messages"],a[href="/i/chat"],' +
+  '[data-testid="AppTabBar_DirectMessage_Link"],[data-testid="AppTabBar_Messages_Link"]\');' +
+  // x.com prefixes the notification count on every route it knows about:
+  // "(3) Home / X". Only consulted when the navigation entry itself is missing.
+  'if(n<0){var tm=dg(document.title||"").match(/^\\((\\d{1,4})\\)/);if(tm){n=parseInt(tm[1],10);}}' +
+  'return n+"/"+m;' +
+  '}catch(e){return "";}})()';
 
 // Native "Post" action for the compose sheet: clicks x.com's own submit button.
 // Returns 'missing' when the page has not rendered one yet, so the shell can

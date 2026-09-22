@@ -1,0 +1,156 @@
+{
+  "string": [
+    {
+      "name": "tab_home",
+      "value": "الرئيسية"
+    },
+    {
+      "name": "tab_explore",
+      "value": "استكشاف"
+    },
+    {
+      "name": "tab_notifications",
+      "value": "الإشعارات"
+    },
+    {
+      "name": "tab_messages",
+      "value": "الرسائل"
+    },
+    {
+      "name": "tab_profile",
+      "value": "الملف الشخصي"
+    },
+    {
+      "name": "search_placeholder",
+      "value": "ابحث في X"
+    },
+    {
+      "name": "home_for_you",
+      "value": "لك"
+    },
+    {
+      "name": "home_following",
+      "value": "المتابَعة"
+    },
+    {
+      "name": "menu_account",
+      "value": "الحساب"
+    },
+    {
+      "name": "menu_view_profile",
+      "value": "الملف الشخصي"
+    },
+    {
+      "name": "menu_bookmarks",
+      "value": "الإشارات المرجعية"
+    },
+    {
+      "name": "menu_lists",
+      "value": "القوائم"
+    },
+    {
+      "name": "menu_settings",
+      "value": "الإعدادات والخصوصية"
+    },
+    {
+      "name": "menu_notification_settings",
+      "value": "إعدادات الإشعارات"
+    },
+    {
+      "name": "menu_new_message",
+      "value": "رسالة جديدة"
+    },
+    {
+      "name": "menu_create_account",
+      "value": "إنشاء حساب"
+    },
+    {
+      "name": "compose_title",
+      "value": "منشور جديد"
+    },
+    {
+      "name": "compose_post",
+      "value": "نشر"
+    },
+    {
+      "name": "compose_cancel",
+      "value": "إلغاء"
+    },
+    {
+      "name": "compose_post_sent",
+      "value": "تم نشر المنشور"
+    },
+    {
+      "name": "compose_post_missing",
+      "value": "لا يوجد ما يمكن نشره بعد"
+    },
+    {
+      "name": "compose_placeholder",
+      "value": "ماذا يجري؟"
+    },
+    {
+      "name": "compose_counter",
+      "value": "%d / 280"
+    },
+    {
+      "name": "compose_more",
+      "value": "وسائط والمزيد"
+    },
+    {
+      "name": "compose_web_fallback",
+      "value": "جارٍ فتح المحرر الكامل"
+    },
+    {
+      "name": "vibrate_reason",
+      "value": "يمنح OpenTwit استجابة لمسية خفيفة عند تبديل علامات التبويب."
+    },
+    {
+      "name": "error_title",
+      "value": "تعذّر تحميل X"
+    },
+    {
+      "name": "error_message",
+      "value": "تحقّق من اتصالك بالإنترنت ثم حاول مرة أخرى."
+    },
+    {
+      "name": "retry",
+      "value": "إعادة المحاولة"
+    },
+    {
+      "name": "location_dialog_title",
+      "value": "السماح بالوصول إلى الموقع؟"
+    },
+    {
+      "name": "location_dialog_message",
+      "value": "تريد إحدى صفحات x.com استخدام موقعك. اسمح بذلك فقط إذا أردت نشر منشورات تحمل موقعك."
+    },
+    {
+      "name": "allow",
+      "value": "السماح"
+    },
+    {
+      "name": "deny",
+      "value": "عدم السماح"
+    },
+    {
+      "name": "file_selector_error",
+      "value": "تعذّر فتح منتقي الملفات."
+    },
+    {
+      "name": "internet_reason",
+      "value": "يحمّل OpenTwit واجهة Twitter الكاملة (x.com) داخل التطبيق."
+    },
+    {
+      "name": "location_reason",
+      "value": "قد تطلب صفحات x.com موقعك لإنشاء منشورات تحمل موقعك."
+    },
+    {
+      "name": "back",
+      "value": "رجوع"
+    },
+    {
+      "name": "post",
+      "value": "منشور"
+    }
+  ]
+}
