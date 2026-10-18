@@ -67,9 +67,9 @@ export const OWN_HANDLE_SCRIPT: string = `(function(){
 const CHROME_OBSERVER_MS: number = 250;
 
 /** 原生控件和网页去重共用路由判定，不以账号元素是否存在决定界面。 */
-export function chromeScript(nativeNavigation: boolean, nativeHeader: boolean): string {
-  return '(function(nav,header){try{' +
-    'window.__otNativeNavigation=nav;window.__otNativeHeader=header;' +
+export function chromeScript(nativeNavigation: boolean, nativeHeader: boolean, url: string): string {
+  return '(function(nav,header,url){try{' +
+    'window.__otNativeNavigation=nav;window.__otNativeHeader=header;window.__otChromeUrl=url;' +
     'var css=document.getElementById(\'ot-hidenav\');' +
     'if(!css){css=document.createElement(\'style\');css.id=\'ot-hidenav\';' +
     'document.head.appendChild(css);}' +
@@ -77,7 +77,7 @@ export function chromeScript(nativeNavigation: boolean, nativeHeader: boolean): 
     'var p=location.pathname.replace(/\\/$/,"")||"/";' +
     'var auth=document.querySelector(\'input[autocomplete="username"],input[autocomplete="current-password"],input[autocomplete="one-time-code"]\');' +
     'var rules=auth?"":' + JSON.stringify(WEB_SAFE_AREA_CSS) + ';' +
-    'if(window.__otNativeNavigation&&!auth){rules+=' + JSON.stringify(CHROME_CSS) + ';' +
+    'if(window.__otNativeNavigation&&!auth&&window.__otChromeUrl===String(location.href)){rules+=' + JSON.stringify(CHROME_CSS) + ';' +
     'if(window.__otNativeHeader){rules+=' + JSON.stringify(HEADER_CSS) + ';' +
     'if(p==="/home")rules+=' + JSON.stringify(HOME_TABS_CSS) + ';}}' +
     'if(css.textContent!==rules)css.textContent=rules;' +
@@ -90,7 +90,8 @@ export function chromeScript(nativeNavigation: boolean, nativeHeader: boolean): 
     // callbacks. Hook the history API and report every change to the native
     // bridge so the header, tab bar and back button stay in step.
     'if(!window.__otHist){window.__otHist=1;' +
-    'function otTell(){try{if(window.otNative&&window.otNative.onUrlChange){' +
+    // SPA 地址已变化时先释放旧页规则，不能等待异步原生回调才显示详情顶部。
+    'function otTell(){try{window.__otApplyTop();if(window.otNative&&window.otNative.onUrlChange){' +
     'window.otNative.onUrlChange("main",String(window.location.href));}}catch(_){}}' +
     'var otPush=history.pushState;' +
     'history.pushState=function(){var r=otPush.apply(this,arguments);otTell();return r;};' +
@@ -108,15 +109,15 @@ export function chromeScript(nativeNavigation: boolean, nativeHeader: boolean): 
     'try{window.__otObs.observe(document.documentElement,{childList:true,subtree:true});}catch(e){}' +
     'window.addEventListener("pagehide",function(e){if(!e.persisted){window.__otObs.disconnect();clearTimeout(window.__otTimer);}}, {once:true});}' +
     'window.__otApplyTop();' +
-    '}catch(e){}})(' + nativeNavigation + ',' + nativeHeader + ');';
+    '}catch(e){}})(' + nativeNavigation + ',' + nativeHeader + ',' + JSON.stringify(url) + ');';
 }
 
 // Cheap follow-up used on in-page (SPA) navigations, which do not always fire
 // onPageEnd: flips the tab-root flag and re-runs the removal pass.
-export function chromeFlagScript(nativeNavigation: boolean, nativeHeader: boolean): string {
-  return '(function(nav,header){try{window.__otNativeNavigation=nav;window.__otNativeHeader=header;' +
+export function chromeFlagScript(nativeNavigation: boolean, nativeHeader: boolean, url: string): string {
+  return '(function(nav,header,url){try{window.__otNativeNavigation=nav;window.__otNativeHeader=header;window.__otChromeUrl=url;' +
     'window.__otApplyTop&&window.__otApplyTop();}catch(e){}})(' +
-    nativeNavigation + ',' + nativeHeader + ');';
+    nativeNavigation + ',' + nativeHeader + ',' + JSON.stringify(url) + ');';
 }
 
 export function scrollToTopScript(): string {

@@ -677,7 +677,7 @@ struct MainTabs {
     if (this.rawWeb || !/^https:\/\/(www\.)?(x|twitter)\.com(\/|$)/.test(url)) { return; }
     const navigation: boolean = usesNativeNavigation(url);
     try {
-      this.controller.runJavaScript(chromeScript(navigation, usesNativeHeader(url)));
+      this.controller.runJavaScript(chromeScript(navigation, usesNativeHeader(url), url));
     } catch (err) {
     }
   }
@@ -686,7 +686,7 @@ struct MainTabs {
     if (this.rawWeb) { return; }
     try {
       const navigation: boolean = usesNativeNavigation(url);
-      this.controller.runJavaScript(chromeFlagScript(navigation, usesNativeHeader(url)));
+      this.controller.runJavaScript(chromeFlagScript(navigation, usesNativeHeader(url), url));
     } catch (err) {
     }
   }

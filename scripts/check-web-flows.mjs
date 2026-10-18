@@ -28,7 +28,7 @@ for(const path of ['/explore','/search?q=中文','/i/flow/login','/alice']){
   assert.equal(routes.usesNativeHeader('https://x.com'+path),false,path);
 }
 assert.equal(routes.usesNativeHeader('https://x.com/home'),true);
-const scripts = load('WebChrome', ['fillComposerScript','CLICK_POST_BUTTON_SCRIPT','POST_RESULT_SCRIPT','chromeScript','OWN_HANDLE_SCRIPT','profileBootstrapScript','clickRouteScript']);
+const scripts = load('WebChrome', ['fillComposerScript','CLICK_POST_BUTTON_SCRIPT','POST_RESULT_SCRIPT','chromeScript','chromeFlagScript','OWN_HANDLE_SCRIPT','profileBootstrapScript','clickRouteScript']);
 // 测试真实注入串，避免只测试一份复制的实现。
 for (const value of ['中文\n第二段😀 https://x.com', '  两侧空格  ', 'a\r\nb']) {
   let text = '';
@@ -40,7 +40,7 @@ assert.equal(vm.runInNewContext(scripts.fillComposerScript('12345678完整正文
   document:{querySelector:()=>({focus(){},innerText:'12345678截断'}),execCommand:()=>true}
 }),'mismatch');
 assert.equal(vm.runInNewContext(scripts.fillComposerScript('内容'),{document:{querySelector:()=>null}}),'missing');
-new vm.Script(scripts.chromeScript(true,true));
+new vm.Script(scripts.chromeScript(true,true,'https://x.com/home'));
 // 当前移动网页资料入口是无 href 的按钮，原生导航不能依赖它返回账号名。
 let profileClicks=0;
 const profileLink={textContent:'Profile',getAttribute:name=>name==='href'?'/alice':null,
@@ -81,21 +81,32 @@ const chromeContext={window:{location,addEventListener(){},otNative:{onUrlChange
     querySelector:()=>authVisible?{}:null,
     querySelectorAll:()=>[]},
   MutationObserver:class{observe(){}disconnect(){}},setTimeout(){},clearTimeout(){}};
-vm.runInNewContext(scripts.chromeScript(true,true),chromeContext);
+vm.runInNewContext(scripts.chromeScript(true,true,location.href),chromeContext);
 assert.match(cssText,/TopNavBar/);assert.match(cssText,/FloatingActionButtons_Tweet_Button/);
 const initialWrites=cssWrites;
 chromeContext.window.__otApplyTop();assert.equal(cssWrites,initialWrites);
 authVisible=true;chromeContext.window.__otApplyTop();assert.equal(cssText,'');
+// 首页进入详情时，即使原生回调尚未返回或旧回调迟到，也不能隐藏网页返回和标题。
+authVisible=false;location.pathname='/alice/status/123';location.href='https://x.com/alice/status/123';
+chromeContext.history.pushState();
+assert.doesNotMatch(cssText,/display:none/);
+vm.runInNewContext(scripts.chromeScript(true,true,'https://x.com/home'),chromeContext);
+assert.doesNotMatch(cssText,/display:none/);
+vm.runInNewContext(scripts.chromeFlagScript(true,true,'https://x.com/home'),chromeContext);
+assert.doesNotMatch(cssText,/display:none/);
+vm.runInNewContext(scripts.chromeFlagScript(true,false,location.href),chromeContext);
+assert.doesNotMatch(cssText,/TopNavBar|role='banner'/);
+assert.match(cssText,/FloatingActionButtons_Tweet_Button/);
 // 搜索页必须保留网页输入框及候选列表，仍只去重底部导航和发帖入口。
 authVisible=false;location.pathname='/search';location.href='https://x.com/search?q=中文';
-vm.runInNewContext(scripts.chromeScript(true,false),chromeContext);
+vm.runInNewContext(scripts.chromeScript(true,false,location.href),chromeContext);
 assert.doesNotMatch(cssText,/TopNavBar|role='banner'|tablist/);
 assert.match(cssText,/FloatingActionButtons_Tweet_Button/);
-authVisible=false;vm.runInNewContext(scripts.chromeScript(false,false),chromeContext);
+authVisible=false;vm.runInNewContext(scripts.chromeScript(false,false,location.href),chromeContext);
 assert.doesNotMatch(cssText,/display:none/);
 // 视频遮罩应铺到底；避让放进内容内部，不能影响登录、图片和未知页面。
 location.pathname='/alice/status/123/mediaViewer';
-vm.runInNewContext(scripts.chromeScript(false,false),chromeContext);
+vm.runInNewContext(scripts.chromeScript(false,false,location.href),chromeContext);
 assert.match(cssText,/bottom:0!important;padding-bottom:env\(safe-area-inset-bottom\)/);
 assert.doesNotMatch(cssText,/display:none/);
 assert.match(cssText,/>:last-child\{margin-bottom:4px/);
