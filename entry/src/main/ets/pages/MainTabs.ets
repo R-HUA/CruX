@@ -1817,6 +1817,8 @@ struct MainTabs {
     Web({ src: TWITTER_ROUTES[0], controller: this.controller })
       .width('100%')
       .height('100%')
+      // 网页遮罩和背景延伸至手势区，交互元素由网页安全区样式避让。
+      .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.BOTTOM])
       // Injected at document start, so the page's history hook always finds it.
       .javaScriptProxy({
         object: this.bridge,
@@ -1937,6 +1939,8 @@ struct MainTabs {
             }
             .width('100%')
             .height('100%')
+            // Web 位于刷新容器内，两者须使用相同的绘制扩展边界。
+            .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.BOTTOM])
             .pullToRefresh(true)
             .onRefreshing(() => {
               this.refreshing = true;
