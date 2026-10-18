@@ -26,7 +26,14 @@ const CHROME_CSS: string =
 const HEADER_CSS: string =
   "header[role='banner'],[data-testid='TopNavBar']{display:none!important}";
 const HOME_TABS_CSS: string =
-  "[data-testid='ScrollSnap-SwipeableList']:has([data-testid='ScrollSnap-List'][role='tablist']){display:none!important}";
+  // 多图轮播也使用 tablist，只隐藏含真实 tab 的导航，排除帖子内容。
+  "nav[role='navigation'] [data-testid='ScrollSnap-SwipeableList']:has([role='tablist'] [role='tab']):not(article *){display:none!important}";
+
+// 底部背景不避让，控件只保留一次手势区和小间距；共用规则不依赖某条媒体地址。
+const WEB_SAFE_AREA_CSS: string =
+  "[data-testid^='immersive-tweet-ui-content-container-']{bottom:0!important;" +
+  "padding-bottom:env(safe-area-inset-bottom)!important}" +
+  "[data-testid^='immersive-tweet-ui-content-container-']>:last-child{margin-bottom:4px!important}";
 
 // 仅从明确的本人资料入口读取账号；读不到时不能推断用户已退出登录。
 export const OWN_HANDLE_SCRIPT: string = `(function(){
@@ -69,9 +76,10 @@ export function chromeScript(nativeNavigation: boolean, nativeHeader: boolean): 
     'window.__otApplyTop=function(){' +
     'var p=location.pathname.replace(/\\/$/,"")||"/";' +
     'var auth=document.querySelector(\'input[autocomplete="username"],input[autocomplete="current-password"],input[autocomplete="one-time-code"]\');' +
-    'var rules=window.__otNativeNavigation&&!auth?' + JSON.stringify(CHROME_CSS) + ':"";' +
-    'if(rules&&window.__otNativeHeader){rules+=' + JSON.stringify(HEADER_CSS) + ';' +
-    'if(p==="/home")rules+=' + JSON.stringify(HOME_TABS_CSS) + ';}' +
+    'var rules=auth?"":' + JSON.stringify(WEB_SAFE_AREA_CSS) + ';' +
+    'if(window.__otNativeNavigation&&!auth){rules+=' + JSON.stringify(CHROME_CSS) + ';' +
+    'if(window.__otNativeHeader){rules+=' + JSON.stringify(HEADER_CSS) + ';' +
+    'if(p==="/home")rules+=' + JSON.stringify(HOME_TABS_CSS) + ';}}' +
     'if(css.textContent!==rules)css.textContent=rules;' +
     'if(window.__otAuth!==Boolean(auth)){' +
     'window.__otAuth=Boolean(auth);' +

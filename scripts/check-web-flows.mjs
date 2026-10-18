@@ -91,7 +91,19 @@ authVisible=false;location.pathname='/search';location.href='https://x.com/searc
 vm.runInNewContext(scripts.chromeScript(true,false),chromeContext);
 assert.doesNotMatch(cssText,/TopNavBar|role='banner'|tablist/);
 assert.match(cssText,/FloatingActionButtons_Tweet_Button/);
-authVisible=false;vm.runInNewContext(scripts.chromeScript(false,false),chromeContext);assert.equal(cssText,'');
+authVisible=false;vm.runInNewContext(scripts.chromeScript(false,false),chromeContext);
+assert.doesNotMatch(cssText,/display:none/);
+// 视频遮罩应铺到底；避让放进内容内部，不能影响登录、图片和未知页面。
+location.pathname='/alice/status/123/mediaViewer';
+vm.runInNewContext(scripts.chromeScript(false,false),chromeContext);
+assert.match(cssText,/bottom:0!important;padding-bottom:env\(safe-area-inset-bottom\)/);
+assert.doesNotMatch(cssText,/display:none/);
+assert.match(cssText,/>:last-child\{margin-bottom:4px/);
+const safeAreaCss=cssText;
+authVisible=true;chromeContext.window.__otApplyTop();assert.equal(cssText,'');
+authVisible=false;location.pathname='/alice/status/123/photo/1';
+chromeContext.window.__otApplyTop();assert.equal(cssText,safeAreaCss);
+location.pathname='/unknown/path';chromeContext.window.__otApplyTop();assert.equal(cssText,safeAreaCss);
 
 function posting({ disabled=false, missing=false, throws=false }={}) {
   let clicks=0; let observe; let timeout; let toasts=[];
