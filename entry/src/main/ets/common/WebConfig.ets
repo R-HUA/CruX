@@ -6,10 +6,8 @@ export const TWITTER_BASE: string = 'https://x.com';
 export const TWITTER_HOME: string = 'https://x.com/home';
 export const TWITTER_EXPLORE: string = 'https://x.com/explore';
 export const TWITTER_NOTIFICATIONS: string = 'https://x.com/notifications';
-// Direct messages. The mobile web routes DMs through /messages (the "Messages"
-// inbox); /i/chat is the separate encrypted Chat product, which shows an empty
-// inbox until a chat is started from the native X app.
-export const TWITTER_MESSAGES: string = 'https://x.com/messages';
+// 与当前账号网页底栏的真实私信入口保持一致。
+export const TWITTER_MESSAGES: string = 'https://x.com/i/chat';
 export const TWITTER_SETTINGS: string = 'https://x.com/settings';
 export const TWITTER_BOOKMARKS: string = 'https://x.com/i/bookmarks';
 export const TWITTER_COMPOSE: string = 'https://x.com/compose/post';
@@ -47,10 +45,6 @@ export const TWITTER_UA_DESKTOP: string =
 
 export function userAgentFor(desktop: boolean): string {
   return desktop ? TWITTER_UA_DESKTOP : TWITTER_UA;
-}
-
-export function searchUrl(query: string): string {
-  return TWITTER_BASE + '/search?q=' + encodeURIComponent(query);
 }
 
 export function profileUrl(handle: string): string {
@@ -186,11 +180,25 @@ export function profileHandleForUrl(url: string): string {
   return seg;
 }
 
-// Tab roots whose web top chrome (logo row / search row) is hidden because
-// the native header already covers it. Subpages keep their web header
-// (back button, profile name) since native has no back control.
+// 标签根页面用于返回顺序判定，搜索页仍保留网页搜索交互。
 export function isTabRootPath(path: string): boolean {
   return path === '/' || path === '/home' || path === '/explore' ||
-    path === '/notifications' || path === '/messages' ||
+    path === '/search' || path === '/notifications' || path === '/messages' ||
     path === '/i/chat' || path === '/settings/profile';
+}
+
+/** 只在已支持的业务页面提供原生导航，登录和未知页面保留网页界面。 */
+export function usesNativeNavigation(url: string): boolean {
+  const path: string = pathOf(url);
+  return path !== '/' && path.indexOf('/settings') !== 0 &&
+    (routeIndexForUrl(url) >= 0 ||
+      (/^https:\/\/(www\.)?(x|twitter)\.com\//i.test(url) &&
+        /^\/[a-z0-9_]{1,15}\/status\/\d+\/?$/.test(path)));
+}
+
+/** 搜索框和候选项由网页一起管理，避免原生输入与网页搜索状态分离。 */
+export function usesNativeHeader(url: string): boolean {
+  const path: string = pathOf(url);
+  return usesNativeNavigation(url) && isTabRootPath(path) &&
+    path !== '/explore' && path !== '/search';
 }

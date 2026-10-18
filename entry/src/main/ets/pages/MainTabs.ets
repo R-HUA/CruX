@@ -15,29 +15,19 @@ import {
 } from '../common/Theme';
 import {
   TWITTER_ROUTES, TWITTER_COMPOSE, TWITTER_UA,
-  TWITTER_SIGNUP, TWITTER_DM_COMPOSE, TWITTER_NOTIF_SETTINGS, TWITTER_EDIT_PROFILE,
+  TWITTER_DM_COMPOSE, TWITTER_NOTIF_SETTINGS, TWITTER_EDIT_PROFILE,
   TWITTER_SETTINGS, TWITTER_BOOKMARKS,
-  searchUrl, profileUrl, listsUrl, pathOf, routeIndexForUrl, profileHandleForUrl,
-  isTabRootPath, userAgentFor
+  profileUrl, listsUrl, pathOf, routeIndexForUrl, profileHandleForUrl,
+  isTabRootPath, usesNativeNavigation, usesNativeHeader, userAgentFor
 } from '../common/WebConfig';
 import {
   OWN_HANDLE_SCRIPT, chromeScript, chromeFlagScript, scrollToTopScript,
-  CLICK_POST_BUTTON_SCRIPT, POST_RESULT_SCRIPT, PROFILE_BOOTSTRAP_SCRIPT, fillComposerScript,
+  CLICK_POST_BUTTON_SCRIPT, POST_RESULT_SCRIPT, profileBootstrapScript, clickRouteScript, fillComposerScript,
   HOME_TAB_SCRIPT, selectHomeTabScript, AVATAR_SCRIPT, UNREAD_COUNTS_SCRIPT
 } from '../common/WebChrome';
 
-// OpenTwit-Web: the real x.com web app inside a fully native HarmonyOS shell.
-//
-// The shell owns all app chrome — Navigation title (with the current x.com path
-// as subtitle) and per-tab menus, native Search on Explore, a bottom bar that
-// turns into a side rail on wide layouts, a native compose bottom sheet, a
-// native compose FAB, native progress / first-load / offline / retry states,
-// native back handling, tactile tab switching, and system colours so light/dark
-// come from the OS. x.com supplies content only; its own top nav, bottom nav and
-// floating compose button are removed by the injected scripts in WebChrome.ets.
-//
-// The single shared WebView lives outside any Tabs on purpose: Tabs destroys its
-// inactive TabContent, which would reload x.com on every tab switch.
+// 原生层提供导航、纯文字编辑与系统交互，网页保留搜索及业务页面。
+// 主 WebView 独立于标签内容，避免切换标签时销毁网页和会话。
 
 const DOMAIN: number = 0x0A11;
 const TAG: string = 'OpenTwit';
@@ -94,7 +84,6 @@ struct MainTabs {
   @State currentIndex: number = 0;
   @State progress: number = 0;
   @State hasError: boolean = false;
-  @State searchText: string = '';
   @State ownHandle: string = '';
   // Signed-in avatar, read off the account's own profile page and cached, so
   // the Home header can show the real account picture like the stock app.
@@ -434,15 +423,12 @@ struct MainTabs {
     });
   }
 
-  // The signed-in handle is only published inside the account menu on the
-  // mobile web, so this opens that menu, reads the handle and closes it again —
-  // behind a native panel, so what the user sees is a HarmonyOS spinner. It
-  // runs at most once per install; the handle is then persisted.
+  /** 手机网页通过账号抽屉进入本人资料，不使用缓存账号猜测当前身份。 */
   private bootstrapProfile(): void {
     this.discovering = true;
     let pending: Promise<string> | undefined = undefined;
     try {
-      pending = this.controller.runJavaScript(PROFILE_BOOTSTRAP_SCRIPT);
+      pending = this.controller.runJavaScript(profileBootstrapScript(true));
     } catch (err) {
       pending = undefined;
     }
@@ -461,7 +447,7 @@ struct MainTabs {
         } catch (err) {
           this.finishBootstrap('');
         }
-      }, BOOTSTRAP_SETTLE_MS + 1600);
+      }, BOOTSTRAP_SETTLE_MS);
     }).catch(() => {
       this.finishBootstrap('');
     });
@@ -470,10 +456,10 @@ struct MainTabs {
   private finishBootstrap(handle: string): void {
     this.discovering = false;
     if (handle !== '') {
-      this.acceptHandle(handle, true);
+      this.acceptHandle(handle, false);
       return;
     }
-    this.finishDiscover(true);
+    this.toast($r('app.string.account_unconfirmed'));
   }
 
   private acceptHandle(handle: string, navigate: boolean): void {
@@ -483,8 +469,7 @@ struct MainTabs {
     this.finishDiscover(navigate);
   }
 
-  // A signed-out visitor is sent to the profile editor too: x.com redirects
-  // that URL to its own login flow, so the shell does not have to guess.
+  // 无法确认本人入口时明确报错，避免误跳资料编辑页。
   private finishDiscover(navigate: boolean): void {
     if (!navigate) {
       return;
@@ -497,7 +482,15 @@ struct MainTabs {
     this.toast($r('app.string.account_unconfirmed'));
   }
 
-  private loadWeb(url: string): void {
+  private async loadWeb(url: string): Promise<void> {
+    try {
+      const result: string = MainTabs.unquote(await this.controller.runJavaScript(clickRouteScript(url)));
+      if (result === 'clicked') { this.hasError = false; return; }
+    } catch (err) {
+      hilog.error(DOMAIN, TAG, 'event=page_navigation_failed error=%{public}s', JSON.stringify(err));
+      this.toast($r('app.string.operation_failed'));
+      return;
+    }
     this.hasError = false;
     this.progress = 0;
     try {
@@ -567,14 +560,19 @@ struct MainTabs {
     this.schedulePageStateRead();
   }
 
-  private openOwnProfile(): void {
+  private async openOwnProfile(): Promise<void> {
     this.hasError = false;
-    if (this.ownHandle !== '') {
-      this.viewingHandle = this.ownHandle;
-      this.loadWeb(profileUrl(this.ownHandle));
+    // 搜索结果页没有账号抽屉入口，先经网页首页确认当前账号，不能套用旧账号。
+    if (!this.isHomeRoot()) {
+      this.discovering = true;
+      await this.loadWeb(TWITTER_ROUTES[0]);
+      setTimeout(() => {
+        this.discovering = false;
+        if (this.isHomeRoot()) { this.discoverOwnProfile(true); }
+        else { this.toast($r('app.string.account_unconfirmed')); }
+      }, PAGE_STATE_DELAY_MS);
       return;
     }
-    this.progress = 0;
     this.discoverOwnProfile(true);
   }
 
@@ -669,17 +667,17 @@ struct MainTabs {
     }
   }
 
-  // How far down the page the page's own header can sit. A phone keeps its
-  // header in the top strip; a wide layout pushes it well below the fold.
-  private chromeBand(): number {
-    return this.isWide ? 300 : 140;
+  /** 账号读取失败不应使原生界面消失；登录与未知路由交给网页。 */
+  private showsNativeNavigation(): boolean {
+    return !this.rawWeb && !this.fullScreen && !this.authenticationPage &&
+      usesNativeNavigation(this.currentUrl);
   }
 
   private applyPageChrome(url: string): void {
     if (this.rawWeb || !/^https:\/\/(www\.)?(x|twitter)\.com(\/|$)/.test(url)) { return; }
-    const root: boolean = isTabRootPath(pathOf(url));
+    const navigation: boolean = usesNativeNavigation(url);
     try {
-      this.controller.runJavaScript(chromeScript(this.ownHandle, root, this.chromeBand()));
+      this.controller.runJavaScript(chromeScript(navigation, usesNativeHeader(url)));
     } catch (err) {
     }
   }
@@ -687,7 +685,8 @@ struct MainTabs {
   private updateChromeFlag(url: string): void {
     if (this.rawWeb) { return; }
     try {
-      this.controller.runJavaScript(chromeFlagScript(isTabRootPath(pathOf(url)), this.chromeBand()));
+      const navigation: boolean = usesNativeNavigation(url);
+      this.controller.runJavaScript(chromeFlagScript(navigation, usesNativeHeader(url)));
     } catch (err) {
     }
   }
@@ -1078,7 +1077,7 @@ struct MainTabs {
     if (/^[A-Za-z0-9_]{1,15}$/.test(direct)) { return direct; }
     this.discovering = true;
     try {
-      const result = MainTabs.unquote(await this.controller.runJavaScript(PROFILE_BOOTSTRAP_SCRIPT));
+      const result = MainTabs.unquote(await this.controller.runJavaScript(profileBootstrapScript(false)));
       if (result !== 'armed') { return ''; }
       await new Promise<void>((resolve) => { setTimeout(resolve, BOOTSTRAP_SETTLE_MS); });
       const handle = MainTabs.unquote(await this.controller.runJavaScript('window.__otBoot||""'));
@@ -1367,8 +1366,6 @@ struct MainTabs {
       }
       if (this.isHomeRoot()) {
         this.homeTimelineTabs()
-      } else if (this.isExploreSurface()) {
-        this.headerSearch()
       } else {
         this.headerTitles()
       }
@@ -1398,12 +1395,6 @@ struct MainTabs {
 
   private isHomeRoot(): boolean {
     return this.currentPath === '/' || this.currentPath === '/home';
-  }
-
-  // Explore owns the native search field, including its result pages.
-  private isExploreSurface(): boolean {
-    return this.currentPath === '/explore' || this.currentPath.indexOf('/explore/') === 0 ||
-      this.currentPath === '/search' || this.currentPath.indexOf('/search') === 0;
   }
 
   @Builder
@@ -1456,7 +1447,6 @@ struct MainTabs {
   @Builder
   accountMenu() {
     Menu() {
-      if (this.ownHandle !== '') {
         MenuItem({
           content: $r('app.string.menu_view_profile'),
           symbolStartIcon: new SymbolGlyphModifier($r('sys.symbol.person_fill'))
@@ -1471,20 +1461,13 @@ struct MainTabs {
           .onClick(() => {
             this.loadWeb(TWITTER_BOOKMARKS);
           })
+      if (this.ownHandle !== '') {
         MenuItem({
           content: $r('app.string.menu_lists'),
           symbolStartIcon: new SymbolGlyphModifier($r('sys.symbol.list_bullet_square_fill'))
         })
           .onClick(() => {
             this.loadWeb(listsUrl(this.ownHandle));
-          })
-      } else {
-        MenuItem({
-          content: $r('app.string.menu_create_account'),
-          symbolStartIcon: new SymbolGlyphModifier($r('sys.symbol.person_badge_plus'))
-        })
-          .onClick(() => {
-            this.loadWeb(TWITTER_SIGNUP);
           })
       }
       MenuItem({
@@ -1542,30 +1525,6 @@ struct MainTabs {
     .onClick(() => {
       this.selectHomeTab(index);
     })
-  }
-
-  @Builder
-  headerSearch() {
-    Row() {
-      Search({ value: $$this.searchText, placeholder: $r('app.string.search_placeholder') })
-        .width('100%')
-        .height(38)
-        .placeholderFont({ size: 15, family: FONT_FAMILY })
-        .textFont({ size: 15, family: FONT_FAMILY })
-        .onChange((value: string) => {
-          this.searchText = value;
-        })
-        .onSubmit((value: string) => {
-          this.searchText = value;
-          if (value.trim() !== '') {
-            this.loadWeb(searchUrl(value.trim()));
-          }
-        })
-    }
-    .layoutWeight(1)
-    .height('100%')
-    .alignItems(VerticalAlign.Center)
-    .padding({ right: S8 })
   }
 
   @Builder
@@ -1893,6 +1852,11 @@ struct MainTabs {
           if (event && event.request && !event.request.isMainFrame()) {
             return;
           }
+          // 页面内跳转取消旧请求，不代表当前页面加载失败。
+          if (event && event.error.getErrorCode() === -3) { return; }
+          if (event) {
+            hilog.error(DOMAIN, TAG, 'event=main_frame_failed code=%{public}d', event.error.getErrorCode());
+          }
         } catch (err) {
         }
         this.hasError = true;
@@ -1928,9 +1892,6 @@ struct MainTabs {
         }
 
         // Single shared WebView — always visible regardless of tab.
-        if (this.hasError) {
-          this.errorState()
-        } else {
           Column() {
             // HarmonyOS pull-to-refresh drives the WebView directly, so the
             // header does not need a refresh button.
@@ -1949,7 +1910,6 @@ struct MainTabs {
           }
           .width('100%')
           .layoutWeight(1)
-        }
       }
       .width('100%')
       .height('100%')
@@ -1989,7 +1949,7 @@ struct MainTabs {
 
       // Native compose entry point, like the stock app: on the four content
       // tabs (never on Profile), and only once a page is on screen.
-      if (!this.rawWeb && !this.fullScreen && !this.authenticationPage && this.ownHandle !== '' && this.currentIndex !== 4 && !this.hasError && this.firstLoadDone) {
+      if (this.showsNativeNavigation() && this.currentIndex !== 4 && !this.hasError && this.firstLoadDone) {
         this.composeFab()
       }
     }
@@ -2138,7 +2098,7 @@ struct MainTabs {
       Flex({
         direction: this.isWide ? FlexDirection.Row : FlexDirection.ColumnReverse
       }) {
-        if (!this.rawWeb && !this.fullScreen && !this.authenticationPage && this.ownHandle !== '') { this.navBar() }
+        if (this.showsNativeNavigation()) { this.navBar() }
         this.webArea()
       }
       .width('100%')
@@ -2148,7 +2108,7 @@ struct MainTabs {
     .height('100%')
     .title(this.navTitleBar())
     .titleMode(NavigationTitleMode.Mini)
-    .hideTitleBar(this.fullScreen || this.rawWeb || this.authenticationPage || this.ownHandle === '')
+    .hideTitleBar(!this.showsNativeNavigation() || !usesNativeHeader(this.currentUrl))
     // Navigation defaults to Split mode on wide windows, which would reserve a
     // left pane for the title bar and squeeze our own rail + WebView into it.
     // The shell owns the wide layout, so keep Navigation in Stack mode.

@@ -1,9 +1,5 @@
 // OpenTwit-Web runs the real x.com web app inside a native HarmonyOS shell.
-// "Native" means the shell owns every piece of app chrome: title bar, menus,
-// search field, tab bar / rail, compose sheet, progress, error and empty states.
-// The scripts below remove x.com's own copy of that chrome (its top nav, its
-// bottom nav and its floating compose button) so the two never double up, and
-// they report page state back to the shell.
+// 原生只替代已支持业务页面的导航和编辑入口，其余页面保留网页界面。
 //
 // All scripts are injected as strings through WebviewController.runJavaScript.
 
@@ -26,12 +22,35 @@ const CHROME_CSS: string =
   "[data-testid='SideNav_AccountSwitcher_Button']{display:none!important}" +
   FONT_CSS;
 
-// Handle of the account the page is signed in as, or ''. Exposed by the
-// observer below as window.__otOwn(), which re-scans on every DOM mutation:
-// x.com hydrates the navigation client-side, so the account links do not exist
-// yet when onPageEnd fires and a single synchronous read always comes back
-// empty on the mobile web.
-export const OWN_HANDLE_SCRIPT: string = '(window.__otOwn?window.__otOwn():"")';
+// 仅移除原生标题栏已替代的已知组件，不按位置隐藏网页内容。
+const HEADER_CSS: string =
+  "header[role='banner'],[data-testid='TopNavBar']{display:none!important}";
+const HOME_TABS_CSS: string =
+  "[data-testid='ScrollSnap-SwipeableList']:has([data-testid='ScrollSnap-List'][role='tablist']){display:none!important}";
+
+// 仅从明确的本人资料入口读取账号；读不到时不能推断用户已退出登录。
+export const OWN_HANDLE_SCRIPT: string = `(function(){
+  var links=document.querySelectorAll('a[data-testid="AppTabBar_Profile_Link"],a[data-testid="DashButton_ProfileIcon_Link"]');
+  for(var i=0;i<links.length;i++){
+    var href=links[i].getAttribute('href')||'';
+    if(/^\\/[A-Za-z0-9_]{1,15}$/.test(href))return href.substring(1);
+  }
+  var dialogs=document.querySelectorAll('[role="dialog"]');
+  var found='';
+  for(var d=0;d<dialogs.length;d++){
+    var profiles=dialogs[d].querySelectorAll('a[href]');
+    for(var j=0;j<profiles.length;j++){
+      var path=profiles[j].getAttribute('href')||'';
+      if(!/^\\/[A-Za-z0-9_]{1,15}$/.test(path))continue;
+      var handle=path.substring(1);
+      var label=(profiles[j].getAttribute('aria-label')||profiles[j].textContent||'').trim();
+      if(!/^(Profile|个人资料|個人資料)$/.test(label))continue;
+      if(found&&found.toLowerCase()!==handle.toLowerCase())return '';
+      found=handle;
+    }
+  }
+  return found;
+})()`;
 
 // How often the chrome pass may re-run when it is reacting to page mutations.
 // The first pass stays immediate (no double chrome on first paint); only the
@@ -40,43 +59,24 @@ export const OWN_HANDLE_SCRIPT: string = '(window.__otOwn?window.__otOwn():"")';
 // layout, so an unpaced observer is a lot of work for nothing.
 const CHROME_OBSERVER_MS: number = 250;
 
-export function chromeScript(ownHandle: string, tabRoot: boolean, band: number): string {
-  // The shell draws the header on every page, so the page's own header rows are
-  // always removed. "band" is how far down the page its header can sit — the
-  // same row is near the top on a phone and much lower on a wide layout.
-  return '(function(root,handle,B){try{' +
-    'window.__otHandle=handle;window.__otBand=B;' +
+/** 原生控件和网页去重共用路由判定，不以账号元素是否存在决定界面。 */
+export function chromeScript(nativeNavigation: boolean, nativeHeader: boolean): string {
+  return '(function(nav,header){try{' +
+    'window.__otNativeNavigation=nav;window.__otNativeHeader=header;' +
     'var css=document.getElementById(\'ot-hidenav\');' +
     'if(!css){css=document.createElement(\'style\');css.id=\'ot-hidenav\';' +
-    'css.textContent="' + CHROME_CSS + '";document.head.appendChild(css);}' +
+    'document.head.appendChild(css);}' +
     'window.__otApplyTop=function(){' +
     'var p=location.pathname.replace(/\\/$/,"")||"/";' +
-    'var active=["/","/home","/explore","/search","/notifications","/messages","/i/chat"].indexOf(p)>=0;' +
     'var auth=document.querySelector(\'input[autocomplete="username"],input[autocomplete="current-password"],input[autocomplete="one-time-code"]\');' +
-    'var account=window.__otOwn?window.__otOwn():"";' +
-    'var rules=active&&!auth&&account?' + JSON.stringify(CHROME_CSS) + ':"";' +
+    'var rules=window.__otNativeNavigation&&!auth?' + JSON.stringify(CHROME_CSS) + ':"";' +
+    'if(rules&&window.__otNativeHeader){rules+=' + JSON.stringify(HEADER_CSS) + ';' +
+    'if(p==="/home")rules+=' + JSON.stringify(HOME_TABS_CSS) + ';}' +
     'if(css.textContent!==rules)css.textContent=rules;' +
-    'if(window.__otAuth!==Boolean(auth)||window.__otAccount!==account){' +
-    'window.__otAuth=Boolean(auth);window.__otAccount=account;' +
+    'if(window.__otAuth!==Boolean(auth)){' +
+    'window.__otAuth=Boolean(auth);' +
     'if(window.otNative)window.otNative.onUrlChange("main",String(location.href));}};' +
-    // Own-account handle. The page renders its navigation after hydration, so
-    // this is installed here and re-run by the observer below instead of being
-    // read once when the page first reports that it finished loading.
-    'window.__otOwn=function(){try{' +
-    // Once the handle is known there is nothing left to look for, and this runs
-    // on every page mutation otherwise.
-
-    'var as=document.querySelectorAll("a[href]");' +
-    'for(var i=0;i<as.length;i++){' +
-    'var k=as[i].getAttribute("data-testid")||"";' +
-    'if(k!=="AppTabBar_Profile_Link"&&k!=="DashButton_ProfileIcon_Link"&&k!=="SideNav_AccountSwitcher_Button")continue;' +
-    'var h=as[i].getAttribute("href")||"";' +
-    'if(h.charAt(0)!=="/"||h.length<2||h.length>16)continue;' +
-    'var ok=1;' +
-    'for(var j=1;j<h.length;j++){var c=h.charCodeAt(j);' +
-    'if(!((c>=97&&c<=122)||(c>=65&&c<=90)||(c>=48&&c<=57)||c===95)){ok=0;break;}}' +
-    'if(ok){window.__otHandleValue=h.substring(1);return window.__otHandleValue;}}' +
-    '}catch(e){}return "";};' +
+    'window.__otOwn=function(){return ' + OWN_HANDLE_SCRIPT + ';};' +
     // x.com navigates like an app (history.pushState), which does not reload
     // the page and therefore never reaches the shell through the Web component
     // callbacks. Hook the history API and report every change to the native
@@ -90,31 +90,45 @@ export function chromeScript(ownHandle: string, tabRoot: boolean, band: number):
     'history.replaceState=function(){var r=otRep.apply(this,arguments);otTell();return r;};' +
     'window.addEventListener("popstate",function(){otTell();});' +
     'window.addEventListener("hashchange",function(){otTell();});}' +
-    'window.__otHideTop=true;' +
     'if(!window.__otObs){window.__otPend=0;' +
     'window.__otPass=function(){window.__otPend=0;try{' +
     'window.__otApplyTop&&window.__otApplyTop();' +
-    'window.__otOwn&&window.__otOwn();}catch(e){}};' +
+    '}catch(e){}};' +
     'window.__otObs=new MutationObserver(function(){' +
     'if(window.__otPend){return;}window.__otPend=1;' +
     'window.__otTimer=setTimeout(window.__otPass,' + CHROME_OBSERVER_MS + ');});' +
     'try{window.__otObs.observe(document.documentElement,{childList:true,subtree:true});}catch(e){}' +
     'window.addEventListener("pagehide",function(e){if(!e.persisted){window.__otObs.disconnect();clearTimeout(window.__otTimer);}}, {once:true});}' +
     'window.__otApplyTop();' +
-    'window.__otOwn();' +
-    '}catch(e){}})(' + (tabRoot ? 'true' : 'false') + ',\'' + ownHandle + '\',' + band + ');';
+    '}catch(e){}})(' + nativeNavigation + ',' + nativeHeader + ');';
 }
 
 // Cheap follow-up used on in-page (SPA) navigations, which do not always fire
 // onPageEnd: flips the tab-root flag and re-runs the removal pass.
-export function chromeFlagScript(tabRoot: boolean, band: number): string {
-  return '(function(f,B){try{window.__otHideTop=f;window.__otBand=B;' +
+export function chromeFlagScript(nativeNavigation: boolean, nativeHeader: boolean): string {
+  return '(function(nav,header){try{window.__otNativeNavigation=nav;window.__otNativeHeader=header;' +
     'window.__otApplyTop&&window.__otApplyTop();}catch(e){}})(' +
-    (tabRoot ? 'true' : 'false') + ',' + band + ');';
+    nativeNavigation + ',' + nativeHeader + ');';
 }
 
 export function scrollToTopScript(): string {
   return 'window.scrollTo({top:0,behavior:"smooth"});';
+}
+
+/** 复用网页现有链接的路由事件，避免原生标签每次重载整个文档。 */
+export function clickRouteScript(url: string): string {
+  return `(function(target){
+    var wanted=new URL(target,location.href);
+    var links=document.querySelectorAll('a[href]');
+    for(var i=0;i<links.length;i++){
+      var link=new URL(links[i].getAttribute('href'),location.href);
+      if(link.origin===wanted.origin&&link.pathname===wanted.pathname&&link.search===wanted.search&&
+        links[i].getAttribute('target')!=='_blank'){
+        links[i].click();return 'clicked';
+      }
+    }
+    return 'missing';
+  })(` + JSON.stringify(url) + ')';
 }
 
 // The shell draws the "For you / Following" switcher natively on Home. x.com
@@ -258,35 +272,24 @@ export function fillComposerScript(text: string): string {
     '}catch(err){return \'error\';}})(' + JSON.stringify(text) + ');';
 }
 
-// The mobile web renders the account entry as a button with no href, so the
-// handle only exists inside the account menu that button opens. This opens the
-// menu, reads the handle, closes it again, and leaves the answer in
-// window.__otBoot. The shell covers the page with a native panel while it runs,
-// so the user sees a HarmonyOS spinner rather than a menu flashing open.
-export const PROFILE_BOOTSTRAP_SCRIPT: string =
-  '(function(){try{' +
+/** 移动网页需打开账号抽屉才能确认本人资料入口，导航沿用网页点击事件。 */
+export function profileBootstrapScript(navigate: boolean): string {
+  return '(function(navigate){try{' +
   'var btn=null;' +
-  'var ds=document.querySelectorAll("[data-testid]");' +
-  'for(var i=0;i<ds.length;i++){' +
-  'if((ds[i].getAttribute("data-testid")||"")==="DashButton_ProfileIcon_Link"){btn=ds[i];break;}}' +
+  'btn=document.querySelector("[data-testid=DashButton_ProfileIcon_Link],[data-testid=SideNav_AccountSwitcher_Button]");' +
   'window.__otBoot="";' +
   'if(!btn){return "nobutton";}' +
-  'try{btn.click();}catch(e){return "noclick";}' +
+  'var opened=!document.querySelector("[role=dialog]");' +
+  'if(opened){try{btn.click();}catch(e){return "noclick";}}' +
   'setTimeout(function(){try{' +
-  'var r={"/home":1,"/explore":1,"/notifications":1,"/messages":1,"/i":1,"/grok":1,' +
-  '"/communities":1,"/premium":1,"/jobs":1,"/login":1,"/signup":1,"/settings":1,' +
-  '"/logout":1,"/compose":1,"/search":1,"/tos":1,"/privacy":1,"/about":1,"/intent":1};' +
-  'var as=document.querySelectorAll("a[data-testid=AppTabBar_Profile_Link],a[data-testid=DashButton_ProfileIcon_Link]");' +
-  'for(var j=0;j<as.length;j++){' +
-  'var h=as[j].getAttribute("href")||"";' +
-  'if(h.charAt(0)!=="/"||h.length<2||h.length>16){continue;}' +
-  'if(r[h]){continue;}' +
-  'var ok=1;' +
-  'for(var k=1;k<h.length;k++){var c=h.charCodeAt(k);' +
-  'if(!((c>=97&&c<=122)||(c>=65&&c<=90)||(c>=48&&c<=57)||c===95)){ok=0;break;}}' +
-  'if(ok){window.__otBoot=h.substring(1);break;}}' +
-  'window.__otBootAll=(window.__otBoot||"none")+"/"+as.length;' +
-  'try{btn.click();}catch(e){}' +
+  'window.__otBoot=' + OWN_HANDLE_SCRIPT + ';' +
+  'if(navigate&&window.__otBoot){var links=document.querySelectorAll("[role=dialog] a[href]");' +
+  'for(var i=0;i<links.length;i++){if(links[i].getAttribute("href").toLowerCase()==="/"+window.__otBoot.toLowerCase()){' +
+  'links[i].click();return;}}}' +
+  'if(opened){var dialog=document.querySelector("[role=dialog]");' +
+  'if(dialog){var close=dialog.querySelector("[data-testid=app-bar-close]");' +
+  'if(close)close.click();else btn.click();}}' +
   '}catch(e){window.__otBoot="";}},1500);' +
   'return "armed";' +
-  '}catch(e){window.__otBoot="";return "err";}})()';
+  '}catch(e){window.__otBoot="";return "err";}})(' + navigate + ')';
+}
