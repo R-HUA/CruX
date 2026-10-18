@@ -1957,6 +1957,8 @@ struct MainTabs {
     .height('100%')
     .flexGrow(1)
     .flexShrink(1)
+    // 遮罩与网页共用底部绘制边界；不额外增加内容留白，按钮由网页安全区避让。
+    .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.BOTTOM])
     .backgroundColor($r('sys.color.ohos_id_color_background'))
   }
 
