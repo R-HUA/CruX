@@ -5,7 +5,7 @@
       {
         "name": "default",
         "compatibleSdkVersion": 24,
-        "compileSdkVersion": 24,
+        "compileSdkVersion": "26.0.0",
         "targetSdkVersion": 24
       }
     ],
