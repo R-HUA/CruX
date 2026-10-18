@@ -33,26 +33,6 @@ const CHROME_CSS: string =
 // empty on the mobile web.
 export const OWN_HANDLE_SCRIPT: string = '(window.__otOwn?window.__otOwn():"")';
 
-// ArkWeb reports navigator.onLine as false on some images even while the page
-// is being served over a working connection (reproduced on both the foldable
-// and the 2in1 emulator: navigator.connection said "4g" and every request
-// succeeded while navigator.onLine stayed false). x.com believes the flag:
-// the Chat inbox answered "Disconnected" and rendered "Empty inbox" with no
-// conversations until it was told the browser was online again.
-//
-// The shell is the side that actually knows: a document that was served is, by
-// definition, being served. So the flag is rewritten at document start, before
-// any page script reads it, and the shell can still correct it downwards with
-// window.__otOnline = false when the main frame really fails (see MainTabs).
-export const ONLINE_PATCH: string =
-  '(function(){try{' +
-  'var otIsOnline=function(){try{return window.__otOnline!==false;}catch(e){return true;}};' +
-  'try{Object.defineProperty(Navigator.prototype,"onLine",' +
-  '{configurable:true,get:otIsOnline});}catch(e){}' +
-  'try{Object.defineProperty(window.navigator,"onLine",' +
-  '{configurable:true,get:otIsOnline});}catch(e){}' +
-  '}catch(e){}})();';
-
 // How often the chrome pass may re-run when it is reacting to page mutations.
 // The first pass stays immediate (no double chrome on first paint); only the
 // re-runs are paced. x.com mutates its DOM continuously — timelines, and far
@@ -69,102 +49,23 @@ export function chromeScript(ownHandle: string, tabRoot: boolean, band: number):
     'var css=document.getElementById(\'ot-hidenav\');' +
     'if(!css){css=document.createElement(\'style\');css.id=\'ot-hidenav\';' +
     'css.textContent="' + CHROME_CSS + '";document.head.appendChild(css);}' +
-    'window.__otApplyTop=function(){try{' +
-    'var b=window.__otBand||B;' +
-    'function H(e){try{if(!e||e.hasAttribute(\'data-ot-hide\'))return;' +
-    'e.style.display=\'none\';e.setAttribute(\'data-ot-hide\',\'1\');}catch(_){}}' +
-    'function R(e){try{return e.getBoundingClientRect();}catch(_){return null;}}' +
-    'function T(e){var r=R(e);return r&&r.top<=b&&r.height>0&&r.height<160;}' +
-    'function Q(s){try{return document.querySelector(s);}catch(_){return null;}}' +
-    'function QA(s){try{return document.querySelectorAll(s);}catch(_){return [];}}' +
-    'var hid=QA(\'[data-ot-hide]\');' +
-    'var need=!hid||!hid.length;' +
-    'if(!need){' +
-    'var probes=[\'[data-testid^="SearchBox"]\',\'form[role="search"]\',\'a[href^="/settings"]\',' +
-    '\'a[href="/messages/compose"]\',\'a[href="/home"]\',\'a[href="/"]\',' +
-    '\'svg[aria-label="X"]\',\'a[aria-label="X"]\',\'a[aria-label="Home"]\',' +
-    '\'a[href^="/premium"]\',\'a[href^="/i/premium"]\',\'a[href="/login"]\',' +
-    '\'div[data-testid="TopNavBar"]\',\'[aria-label="TopNavBar"]\'];' +
-    'for(var p=0;p<probes.length;p++){var pe=Q(probes[p]);if(!pe)continue;' +
-    'var pr=R(pe);' +
-    'if(pr&&pr.top<=b&&pr.height>8&&pr.width>0&&pe.style.display!==\'none\'){need=1;break;}}}' +
-    'if(!need)return;' +
-    'for(var u=0;u<hid.length;u++){try{hid[u].style.display=\'\';hid[u].removeAttribute(\'data-ot-hide\');}catch(_){}}' +
-    'var tnb=Q(\'div[data-testid="TopNavBar"]\')||Q(\'[aria-label="TopNavBar"]\');' +
-    'if(tnb){var tnt=0;try{tnt=tnb.querySelector(\'[role="tablist"]\')?1:0;}catch(_){} if(!tnt&&T(tnb))H(tnb);}' +
-    'var s=Q(\'[data-testid^="SearchBox"]\')||Q(\'form[role="search"]\')||Q(\'[role="combobox"]\');' +
-    // On a tab root the shell owns search, so the page's own search box goes
-    // whatever row it landed in (it sits much lower on a wide layout than the
-    // phone-tuned top band would cover).
-    // Hiding the field alone leaves its pill behind as an empty rounded
-    // rectangle, so the row that holds it goes too. The walk up stops at
-    // anything taller than a search row, narrower than one, or already
-    // holding the tab strip — those are containers the shell does not own.
-    'if(s&&(root||T(s))){' +
-    'var se=s.parentElement,g2=0,bestS=null;' +
-    'while(se&&se!==document.body&&g2++<8){var sr=R(se);' +
-    'if(!sr||sr.width<200||sr.width>620||sr.height>90)break;' +
-    'try{if(se.querySelector(\'[role="tablist"]\'))break;}catch(_){}' +
-    'if(sr.height>=30)bestS=se;' +
-    'se=se.parentElement;}' +
-    'if(bestS)H(bestS);' +
-    'H(s);}' +
-    'var links=QA(\'a[href^="/settings"],a[href="/messages/compose"],a[href^="/premium"],a[href^="/i/premium"],a[href="/login"]\');' +
-    // Only icon-only chrome goes: this rule exists for the header's own gear
-    // and pencil, which carry no text. A *settings page* puts its own rows in
-    // the same shape near the top (x.com's "Filters" / "Preferences" pivots),
-    // and hiding those left the page showing nothing but its description.
-    'for(var i=0;i<links.length;i++){try{' +
-    'var lt=(links[i].innerText||\'\').replace(/\\s+/g,\'\');' +
-    'if(lt.length===0&&T(links[i]))H(links[i]);}catch(_){}}' +
-    'var logo=Q(\'a[href="/home"]\')||Q(\'a[href="/"]\')||Q(\'svg[aria-label="X"]\')||Q(\'a[aria-label="X"]\')||Q(\'a[aria-label="Home"]\');' +
-    'if(logo){var lk=logo;try{lk=logo.closest(\'a\')||logo;}catch(_){}' +
-    'if(root||T(lk))H(lk);}' +
-    'if(window.__otHandle){' +
-    'var als=QA(\'a[href]\');' +
-    'for(var j=0;j<als.length;j++){try{var h=als[j].getAttribute(\'href\');' +
-    'if(!h||h.toLowerCase()!==\'/\'+window.__otHandle)continue;' +
-    'if(!als[j].querySelector(\'img\'))continue;' +
-    'if(T(als[j]))H(als[j]);}catch(_){}}}' +
-    'var ac=Q(\'[data-testid^="SearchBox"]\')||Q(\'form[role="search"]\')||Q(\'a[href="/home"]\')||Q(\'a[href="/"]\')||Q(\'svg[aria-label="X"]\');' +
-    'if(ac){var ce=ac,guard=0,best=null;' +
-    'while(ce&&ce!==document.body&&guard++<10){var cr=R(ce);' +
-    'if(!cr||cr.height<=0||cr.height>=220||cr.top>b)break;' +
-    'try{if(ce.querySelector(\'[role="tablist"]\'))break;}catch(_){}' +
-    'try{if((ce.innerText||\'\').replace(/\\s+/g,\'\').length<60)best=ce;}catch(_){}' +
-    'ce=ce.parentElement;}' +
-    'if(best)H(best);}' +
-    'var hdrs=QA(\'header,div[role="banner"]\');' +
-    'for(var hb=0;hb<hdrs.length;hb++){try{' +
-    // A banner that is as tall as the page and sits against the left edge is
-    // not a header row at all: it is x.com's own navigation column (the desktop
-    // side nav, and the whole left rail on x.com/i/chat). Its inner nav is
-    // already removed by the stylesheet, which would otherwise leave the column
-    // standing with only its X logo and its empty width behind it. The shell's
-    // rail is that navigation, so the column goes with it.
-    'var cb=R(hdrs[hb]);' +
-    'if(cb&&cb.height>=200&&cb.width<=360&&cb.left<=8){H(hdrs[hb]);continue;}' +
-    'if(hdrs[hb].querySelector(\'[role="tablist"]\'))continue;' +
-    'var htxt=(hdrs[hb].innerText||\'\').replace(/\\s+/g,\'\');' +
-    'if(htxt.length>=100)continue;' +
-    'if(T(hdrs[hb]))H(hdrs[hb]);}catch(_){}}' +
-    // The page's own back bar (wide layouts keep one that sits outside the
-    // header/banner rules). Its row goes; the tab row under it stays.
-    'var bk=Q(\'[data-testid="app-bar-back"]\');' +
-    'if(bk){var bp=bk.parentElement;if(bp&&T(bp))H(bp);}' +
-    'var heads=QA(\'h1,h2\');' +
-    'for(var m=0;m<heads.length;m++){try{var t=(heads[m].textContent||\'\').trim().toLowerCase();' +
-    'if(t!==\'home\'&&t!==\'explore\'&&t!==\'notifications\'&&t!==\'messages\'&&t!==\'profile\')continue;' +
-    'var hr=R(heads[m]);' +
-    'if(hr&&hr.top<=b&&hr.height>8&&hr.height<160)H(heads[m]);}catch(_){}}' +
-    '}catch(e){}};' +
+    'window.__otApplyTop=function(){' +
+    'var p=location.pathname.replace(/\\/$/,"")||"/";' +
+    'var active=["/","/home","/explore","/search","/notifications","/messages","/i/chat"].indexOf(p)>=0;' +
+    'var auth=document.querySelector(\'input[autocomplete="username"],input[autocomplete="current-password"],input[autocomplete="one-time-code"]\');' +
+    'var account=window.__otOwn?window.__otOwn():"";' +
+    'var rules=active&&!auth&&account?' + JSON.stringify(CHROME_CSS) + ':"";' +
+    'if(css.textContent!==rules)css.textContent=rules;' +
+    'if(window.__otAuth!==Boolean(auth)||window.__otAccount!==account){' +
+    'window.__otAuth=Boolean(auth);window.__otAccount=account;' +
+    'if(window.otNative)window.otNative.onUrlChange("main",String(location.href));}};' +
     // Own-account handle. The page renders its navigation after hydration, so
     // this is installed here and re-run by the observer below instead of being
     // read once when the page first reports that it finished loading.
     'window.__otOwn=function(){try{' +
     // Once the handle is known there is nothing left to look for, and this runs
     // on every page mutation otherwise.
-    'if(window.__otHandleValue){return window.__otHandleValue;}' +
+
     'var as=document.querySelectorAll("a[href]");' +
     'for(var i=0;i<as.length;i++){' +
     'var k=as[i].getAttribute("data-testid")||"";' +
@@ -175,14 +76,14 @@ export function chromeScript(ownHandle: string, tabRoot: boolean, band: number):
     'for(var j=1;j<h.length;j++){var c=h.charCodeAt(j);' +
     'if(!((c>=97&&c<=122)||(c>=65&&c<=90)||(c>=48&&c<=57)||c===95)){ok=0;break;}}' +
     'if(ok){window.__otHandleValue=h.substring(1);return window.__otHandleValue;}}' +
-    '}catch(e){}return window.__otHandleValue||"";};' +
+    '}catch(e){}return "";};' +
     // x.com navigates like an app (history.pushState), which does not reload
     // the page and therefore never reaches the shell through the Web component
     // callbacks. Hook the history API and report every change to the native
     // bridge so the header, tab bar and back button stay in step.
     'if(!window.__otHist){window.__otHist=1;' +
     'function otTell(){try{if(window.otNative&&window.otNative.onUrlChange){' +
-    'window.otNative.onUrlChange(String(window.location.href));}}catch(_){}}' +
+    'window.otNative.onUrlChange("main",String(window.location.href));}}catch(_){}}' +
     'var otPush=history.pushState;' +
     'history.pushState=function(){var r=otPush.apply(this,arguments);otTell();return r;};' +
     'var otRep=history.replaceState;' +
@@ -196,8 +97,9 @@ export function chromeScript(ownHandle: string, tabRoot: boolean, band: number):
     'window.__otOwn&&window.__otOwn();}catch(e){}};' +
     'window.__otObs=new MutationObserver(function(){' +
     'if(window.__otPend){return;}window.__otPend=1;' +
-    'setTimeout(window.__otPass,' + CHROME_OBSERVER_MS + ');});' +
-    'try{window.__otObs.observe(document.documentElement,{childList:true,subtree:true});}catch(e){}}' +
+    'window.__otTimer=setTimeout(window.__otPass,' + CHROME_OBSERVER_MS + ');});' +
+    'try{window.__otObs.observe(document.documentElement,{childList:true,subtree:true});}catch(e){}' +
+    'window.addEventListener("pagehide",function(e){if(!e.persisted){window.__otObs.disconnect();clearTimeout(window.__otTimer);}}, {once:true});}' +
     'window.__otApplyTop();' +
     'window.__otOwn();' +
     '}catch(e){}})(' + (tabRoot ? 'true' : 'false') + ',\'' + ownHandle + '\',' + band + ');';
@@ -302,14 +204,33 @@ export const UNREAD_COUNTS_SCRIPT: string =
 // Native "Post" action for the compose sheet: clicks x.com's own submit button.
 // Returns 'missing' when the page has not rendered one yet, so the shell can
 // tell the user instead of failing silently.
-export const CLICK_POST_BUTTON_SCRIPT: string =
-  '(function(){try{' +
-  'var b=document.querySelector(\'[data-testid="tweetButton"]\')||' +
-  'document.querySelector(\'[data-testid="tweetButtonInline"]\')||' +
-  'document.querySelector(\'button[data-testid="tweetButton"]\');' +
-  'if(!b)return \'missing\';' +
-  'if(b.getAttribute(\'aria-disabled\')===\'true\'||b.disabled)return \'disabled\';' +
-  'b.click();return \'ok\';}catch(e){return \'error\';}})()';
+/** 仅网页在本次提交后生成的成功提示与帖子链接可确认发布。 */
+export const CLICK_POST_BUTTON_SCRIPT: string = `(function(){
+  var b=document.querySelector('[data-testid="tweetButton"]')||document.querySelector('[data-testid="tweetButtonInline"]');
+  if(!b)return 'missing';
+  if(b.disabled||b.getAttribute('aria-disabled')==='true')return 'disabled';
+  if(window.__otPostState==='submitted'||window.__otPostState==='unknown')return 'unknown';
+  var before=new Set(Array.from(document.querySelectorAll('[data-testid="toast"]')));
+  window.__otPostState='submitted';
+  var observer=new MutationObserver(function(){
+    var toasts=document.querySelectorAll('[data-testid="toast"]');
+    for(var i=0;i<toasts.length;i++){
+      var t=toasts[i];
+      if(before.has(t))continue;
+      var text=t.textContent||'';
+      var link=t.querySelector('a[href*="/status/"]');
+      if(link && /Your post was sent|Your Tweet was sent|帖子已发送|帖子已發送|推文已发送|推文已發送/.test(text)){
+        window.__otPostState='confirmed';observer.disconnect();return;
+      }
+    }
+  });
+  observer.observe(document.documentElement,{childList:true,subtree:true,characterData:true});
+  window.addEventListener('pagehide',function(){observer.disconnect();},{once:true});
+  setTimeout(function(){observer.disconnect();if(window.__otPostState==='submitted')window.__otPostState='unknown';},15000);
+  try{b.click();return 'submitted';}catch(e){observer.disconnect();window.__otPostState='unknown';return 'unknown';}
+})()`;
+
+export const POST_RESULT_SCRIPT: string = 'window.__otPostState||"unknown"';
 
 // Pushes the text typed in the native composer into x.com's own editor, so the
 // native sheet posts through the real web session (DraftJS state, character
@@ -333,8 +254,7 @@ export function fillComposerScript(text: string): string {
     'if(!ok){e.textContent=t;' +
     'try{e.dispatchEvent(new InputEvent(\'input\',{bubbles:true,inputType:\'insertText\',data:t}));}catch(_){}}' +
     'var got=(e.innerText||e.textContent||\'\');' +
-    'var head=t.substring(0,t.length>8?8:t.length);' +
-    'return (head===\'\'||got.indexOf(head)>=0)?\'ok\':\'empty\';' +
+    'return got.replace(/\\r\\n?/g,"\\n")===t.replace(/\\r\\n?/g,"\\n")?\'ok\':\'mismatch\';' +
     '}catch(err){return \'error\';}})(' + JSON.stringify(text) + ');';
 }
 
@@ -356,7 +276,7 @@ export const PROFILE_BOOTSTRAP_SCRIPT: string =
   'var r={"/home":1,"/explore":1,"/notifications":1,"/messages":1,"/i":1,"/grok":1,' +
   '"/communities":1,"/premium":1,"/jobs":1,"/login":1,"/signup":1,"/settings":1,' +
   '"/logout":1,"/compose":1,"/search":1,"/tos":1,"/privacy":1,"/about":1,"/intent":1};' +
-  'var as=document.querySelectorAll("a[href]");' +
+  'var as=document.querySelectorAll("a[data-testid=AppTabBar_Profile_Link],a[data-testid=DashButton_ProfileIcon_Link]");' +
   'for(var j=0;j<as.length;j++){' +
   'var h=as[j].getAttribute("href")||"";' +
   'if(h.charAt(0)!=="/"||h.length<2||h.length>16){continue;}' +

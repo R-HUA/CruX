@@ -151,6 +151,110 @@
     {
       "name": "post",
       "value": "منشور"
+    },
+    {
+      "name": "file_select_failed",
+      "value": "تعذر اختيار الملف"
+    },
+    {
+      "name": "file_saved",
+      "value": "تم حفظ الملف"
+    },
+    {
+      "name": "file_save_failed",
+      "value": "تعذر حفظ الملف"
+    },
+    {
+      "name": "share_page",
+      "value": "مشاركة"
+    },
+    {
+      "name": "editor_failed",
+      "value": "توقف محرر الويب. احتفظ بالمسودة وأعد فتحه"
+    },
+    {
+      "name": "account_unconfirmed",
+      "value": "أكد الحساب الحالي في الموقع أولاً"
+    },
+    {
+      "name": "account_changed",
+      "value": "تغير الحساب. أغلق المحرر وأعد فتحه"
+    },
+    {
+      "name": "draft_read_failed",
+      "value": "تعذر تحميل المسودة"
+    },
+    {
+      "name": "draft_save_failed",
+      "value": "تعذر حفظ المسودة. أبق المحرر مفتوحاً"
+    },
+    {
+      "name": "legacy_draft_title",
+      "value": "استعادة المسودة"
+    },
+    {
+      "name": "legacy_draft_message",
+      "value": "هل تريد استخدام المسودة الحالية مع هذا الحساب؟"
+    },
+    {
+      "name": "use_draft",
+      "value": "استخدام المسودة"
+    },
+    {
+      "name": "keep_editing",
+      "value": "متابعة التحرير"
+    },
+    {
+      "name": "close_editor",
+      "value": "إغلاق"
+    },
+    {
+      "name": "close_web_draft",
+      "value": "قد تفقد المحتوى غير المرسل. هل تريد إغلاق المحرر؟"
+    },
+    {
+      "name": "compose_fill_failed",
+      "value": "لم ينقل النص بالكامل. حاول مجدداً عندما يصبح المحرر جاهزاً"
+    },
+    {
+      "name": "compose_submit_unavailable",
+      "value": "النشر غير متاح. تحقق من النص أو استخدم محرر الويب"
+    },
+    {
+      "name": "operation_failed",
+      "value": "فشلت العملية. حاول مجدداً"
+    },
+    {
+      "name": "post_unknown",
+      "value": "نتيجة النشر غير معروفة. تحقق من ملفك قبل الإرسال مجدداً"
+    },
+    {
+      "name": "post_unknown_title",
+      "value": "التحقق من نتيجة النشر"
+    },
+    {
+      "name": "post_check_message",
+      "value": "تحقق من ملفك أولاً. أزل القيد فقط بعد التأكد من عدم النشر. ستبقى المسودة محفوظة."
+    },
+    {
+      "name": "post_checked",
+      "value": "تأكدت من عدم النشر"
+    },
+    {
+      "name": "post_verify",
+      "value": "التحقق من النتيجة المعلقة"
+    },
+    {
+      "name": "raw_mode",
+      "value": "الموقع الأصلي"
+    },
+    {
+      "name": "native_mode",
+      "value": "واجهة التطبيق"
+    },
+    {
+      "name": "file_cleanup_failed",
+      "value": "تعذر حذف الملف المؤقت. تحقق من الملف المحفوظ"
     }
   ]
 }

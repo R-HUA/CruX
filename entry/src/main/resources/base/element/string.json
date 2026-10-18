@@ -151,6 +151,110 @@
     {
       "name": "post",
       "value": "Post"
+    },
+    {
+      "name": "account_unconfirmed",
+      "value": "Confirm the current account on the website first"
+    },
+    {
+      "name": "account_changed",
+      "value": "The account changed. Close and reopen the editor"
+    },
+    {
+      "name": "draft_read_failed",
+      "value": "Could not load the draft"
+    },
+    {
+      "name": "draft_save_failed",
+      "value": "Could not save the draft. Keep the editor open"
+    },
+    {
+      "name": "legacy_draft_title",
+      "value": "Restore existing draft"
+    },
+    {
+      "name": "legacy_draft_message",
+      "value": "Use the existing draft with the current account?"
+    },
+    {
+      "name": "use_draft",
+      "value": "Use draft"
+    },
+    {
+      "name": "keep_editing",
+      "value": "Keep editing"
+    },
+    {
+      "name": "close_editor",
+      "value": "Close"
+    },
+    {
+      "name": "close_web_draft",
+      "value": "Unsent web content may be lost. Close the editor?"
+    },
+    {
+      "name": "compose_fill_failed",
+      "value": "The full text was not transferred. Try again when the editor is ready"
+    },
+    {
+      "name": "compose_submit_unavailable",
+      "value": "Posting is unavailable. Check the text or use the web editor"
+    },
+    {
+      "name": "operation_failed",
+      "value": "Operation failed. Try again"
+    },
+    {
+      "name": "post_unknown",
+      "value": "Posting result is unknown. Check your profile before sending again"
+    },
+    {
+      "name": "post_unknown_title",
+      "value": "Check posting result"
+    },
+    {
+      "name": "post_check_message",
+      "value": "Check your profile first. Unlock only after confirming the post was not published. The draft will be kept."
+    },
+    {
+      "name": "post_checked",
+      "value": "Confirmed not published"
+    },
+    {
+      "name": "post_verify",
+      "value": "Resolve pending result"
+    },
+    {
+      "name": "raw_mode",
+      "value": "Original website"
+    },
+    {
+      "name": "native_mode",
+      "value": "App interface"
+    },
+    {
+      "name": "file_select_failed",
+      "value": "File selection failed"
+    },
+    {
+      "name": "file_saved",
+      "value": "File saved"
+    },
+    {
+      "name": "file_save_failed",
+      "value": "Could not save the file"
+    },
+    {
+      "name": "share_page",
+      "value": "Share"
+    },
+    {
+      "name": "editor_failed",
+      "value": "The web editor stopped. Keep your draft and reopen it"
+    },
+    {
+      "name": "file_cleanup_failed",
+      "value": "Temporary file cleanup failed. Check the saved file"
     }
   ]
 }
