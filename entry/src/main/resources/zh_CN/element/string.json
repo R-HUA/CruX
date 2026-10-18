@@ -151,6 +151,110 @@
     {
       "name": "post",
       "value": "帖子"
+    },
+    {
+      "name": "account_unconfirmed",
+      "value": "请先在网页中确认当前账号"
+    },
+    {
+      "name": "account_changed",
+      "value": "账号已变化，请关闭后重新打开编辑器"
+    },
+    {
+      "name": "draft_read_failed",
+      "value": "草稿读取失败"
+    },
+    {
+      "name": "draft_save_failed",
+      "value": "草稿保存失败，请勿关闭编辑器"
+    },
+    {
+      "name": "legacy_draft_title",
+      "value": "恢复已有草稿"
+    },
+    {
+      "name": "legacy_draft_message",
+      "value": "将已有草稿用于当前账号？"
+    },
+    {
+      "name": "use_draft",
+      "value": "使用草稿"
+    },
+    {
+      "name": "keep_editing",
+      "value": "继续编辑"
+    },
+    {
+      "name": "close_editor",
+      "value": "关闭"
+    },
+    {
+      "name": "close_web_draft",
+      "value": "网页中的未发送内容可能丢失，确定关闭？"
+    },
+    {
+      "name": "compose_fill_failed",
+      "value": "正文未完整传入，请稍后手动重试"
+    },
+    {
+      "name": "compose_submit_unavailable",
+      "value": "网页暂时无法发布，请检查正文或使用网页编辑器"
+    },
+    {
+      "name": "operation_failed",
+      "value": "操作失败，请重试"
+    },
+    {
+      "name": "post_unknown",
+      "value": "发布结果待确认，请先查看个人主页，勿重复发送"
+    },
+    {
+      "name": "post_unknown_title",
+      "value": "确认发布结果"
+    },
+    {
+      "name": "post_check_message",
+      "value": "请先关闭编辑器并查看个人主页。仅在确认未发布后解除限制；正文将保留。"
+    },
+    {
+      "name": "post_checked",
+      "value": "已确认未发布"
+    },
+    {
+      "name": "post_verify",
+      "value": "处理待确认结果"
+    },
+    {
+      "name": "raw_mode",
+      "value": "原始网页"
+    },
+    {
+      "name": "native_mode",
+      "value": "返回应用界面"
+    },
+    {
+      "name": "file_select_failed",
+      "value": "文件选择失败"
+    },
+    {
+      "name": "file_saved",
+      "value": "文件已保存"
+    },
+    {
+      "name": "file_save_failed",
+      "value": "文件保存失败"
+    },
+    {
+      "name": "share_page",
+      "value": "分享"
+    },
+    {
+      "name": "editor_failed",
+      "value": "网页编辑器已停止，请保留草稿并重新打开"
+    },
+    {
+      "name": "file_cleanup_failed",
+      "value": "临时文件清理失败，请检查保存结果"
     }
   ]
 }

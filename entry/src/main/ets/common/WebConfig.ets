@@ -24,7 +24,7 @@ export const TWITTER_ROUTES: string[] = [
   TWITTER_EXPLORE,
   TWITTER_NOTIFICATIONS,
   TWITTER_MESSAGES,
-  TWITTER_EDIT_PROFILE
+  TWITTER_HOME
 ];
 
 // Tab labels are localised resources, not literals: the shell renders them in
@@ -92,6 +92,9 @@ export function pathOf(url: string): string {
 
 // Single-segment product roots that are NOT profiles.
 const RESERVED_ROOTS: Record<string, boolean> = {
+  '/settings': true,
+  '/i': true,
+  '/compose': true,
   '/grok': true,
   '/communities': true,
   '/premium': true,
@@ -120,6 +123,9 @@ const RESERVED_ROOTS: Record<string, boolean> = {
 // bar in sync. Returns -1 when the page belongs to no tab (tweet detail,
 // lists, …) so the highlight stays put instead of snapping to Home.
 export function routeIndexForUrl(url: string): number {
+  if (!/^https:\/\/(www\.)?(x|twitter)\.com([/?#]|$)/i.test(url)) {
+    return -1;
+  }
   const path: string = pathOf(url);
   if (path === '/' || path === '/home') {
     return 0;
@@ -155,6 +161,9 @@ export function routeIndexForUrl(url: string): number {
 
 // Handle segment for profile pages (/someuser), else ''.
 export function profileHandleForUrl(url: string): string {
+  if (!/^https:\/\/(www\.)?(x|twitter)\.com([/?#]|$)/i.test(url)) {
+    return '';
+  }
   const path: string = pathOf(url);
   if (path.indexOf('/', 1) >= 0 || path.length < 2 || path.length > 16) {
     return '';

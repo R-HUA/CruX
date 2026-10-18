@@ -16,7 +16,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const chrome = join(here, '..', 'entry', 'src', 'main', 'ets', 'common', 'WebChrome.ets');
 
 function extractScript() {
-  const source = readFileSync(chrome, 'utf8');
+  const source = readFileSync(chrome, 'utf8').replace(/\r\n/g, '\n');
   const marker = 'export const UNREAD_COUNTS_SCRIPT: string =';
   const start = source.indexOf(marker);
   if (start < 0) {

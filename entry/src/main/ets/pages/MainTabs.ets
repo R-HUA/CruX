@@ -1,12 +1,12 @@
 import web_webview from '@ohos.web.webview';
 import mediaquery from '@ohos.mediaquery';
 import { preferences } from '@kit.ArkData';
-import { photoAccessHelper } from '@kit.MediaLibraryKit';
+import { isSiteUrl, isAuthUrl, mediaAcceptTypes, chooseMedia, sharePage, installDownloads } from '../common/WebSystem';
 import { abilityAccessCtrl, common, PermissionRequestResult, Permissions } from '@kit.AbilityKit';
 import { BusinessError, deviceInfo } from '@kit.BasicServicesKit';
 import { notificationManager } from '@kit.NotificationKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
-import { SymbolGlyphModifier } from '@kit.ArkUI';
+import { SymbolGlyphModifier, window } from '@kit.ArkUI';
 import { KeyCode } from '@kit.InputKit';
 import { vibrator } from '@kit.SensorServiceKit';
 import {
@@ -22,9 +22,8 @@ import {
 } from '../common/WebConfig';
 import {
   OWN_HANDLE_SCRIPT, chromeScript, chromeFlagScript, scrollToTopScript,
-  CLICK_POST_BUTTON_SCRIPT, PROFILE_BOOTSTRAP_SCRIPT, fillComposerScript,
-  HOME_TAB_SCRIPT, selectHomeTabScript, AVATAR_SCRIPT, UNREAD_COUNTS_SCRIPT,
-  ONLINE_PATCH
+  CLICK_POST_BUTTON_SCRIPT, POST_RESULT_SCRIPT, PROFILE_BOOTSTRAP_SCRIPT, fillComposerScript,
+  HOME_TAB_SCRIPT, selectHomeTabScript, AVATAR_SCRIPT, UNREAD_COUNTS_SCRIPT
 } from '../common/WebChrome';
 
 // OpenTwit-Web: the real x.com web app inside a fully native HarmonyOS shell.
@@ -82,8 +81,8 @@ class PageBridge {
     this.handler = handler;
   }
 
-  onUrlChange(url: string): void {
-    this.handler(url);
+  onUrlChange(source: string, url: string): void {
+    if (source === 'main') { this.handler(url); }
   }
 }
 // How long the account menu needs before it has rendered its links.
@@ -115,6 +114,23 @@ struct MainTabs {
   @State draft: string = '';
   @State webComposer: boolean = false;
   @State posting: boolean = false;
+  @State rawWeb: boolean = false;
+  @State authenticationPage: boolean = false;
+  @State fullScreen: boolean = false;
+  @StorageLink('appBackground') @Watch('onBackgroundChanged') appBackground: boolean = false;
+  private fullScreenHandler: FullScreenExitHandler | undefined = undefined;
+  private fullScreenWindow: window.Window | undefined = undefined;
+  private previousLayoutFullScreen: boolean = false;
+  private downloadDelegate: web_webview.WebDownloadDelegate | undefined = undefined;
+  private composeDownloadDelegate: web_webview.WebDownloadDelegate | undefined = undefined;
+  @State postUncertain: boolean = false;
+  @State composeMessage: ResourceStr = '';
+  private composeOwner: string = '';
+  private legacyDraft: string = '';
+  private postTimer: number = -1;
+  private postChecks: number = 0;
+  private draftWrite: Promise<void> = Promise.resolve();
+  private openingCompose: boolean = false;
   // True while the shell is reading the signed-in handle behind a native panel.
   @State discovering: boolean = false;
   // The page's own title (x.com's " / X" suffix stripped) and whether there is
@@ -146,6 +162,7 @@ struct MainTabs {
 
   async aboutToAppear(): Promise<void> {
     this.bridge.setHandler((url: string) => {
+      if (this.rawWeb) { return; }
       this.syncFromUrl(url);
       this.updateChromeFlag(url);
       this.applyPageChrome(url);
@@ -158,18 +175,7 @@ struct MainTabs {
       const ctx: common.Context | undefined = this.getUIContext().getHostContext();
       if (ctx !== undefined) {
         const prefs: preferences.Preferences = await preferences.getPreferences(ctx, PREFS_NAME);
-        const saved: string = await prefs.get(OWN_HANDLE_KEY, '') as string;
-        if (saved !== '') {
-          this.ownHandle = saved;
-        }
-        const avatar: string = await prefs.get(AVATAR_KEY, '') as string;
-        if (avatar !== '') {
-          this.avatarUrl = avatar;
-        }
-        const draft: string = await prefs.get(COMPOSE_DRAFT_KEY, '') as string;
-        if (draft !== '') {
-          this.draft = draft;
-        }
+        this.legacyDraft = await prefs.get(COMPOSE_DRAFT_KEY, '') as string;
         this.notificationAsked = await prefs.get(NOTIFICATION_ASKED_KEY, false) as boolean;
       }
     } catch (err) {
@@ -178,6 +184,7 @@ struct MainTabs {
   }
 
   aboutToDisappear(): void {
+    this.stopPostCheck();
     if (this.firstLoadTimer !== -1) {
       clearTimeout(this.firstLoadTimer);
       this.firstLoadTimer = -1;
@@ -208,6 +215,10 @@ struct MainTabs {
   // Coming back to the app is the moment the counts are most likely to be stale
   // (the page kept running in the background), so re-read them here as well as
   // on the timer.
+  onBackgroundChanged(): void {
+    if (this.appBackground && this.composeOwner !== '' && !this.posting && !this.webComposer) { this.saveDraft(); }
+  }
+
   onPageShow(): void {
     this.refreshBadges();
   }
@@ -272,8 +283,9 @@ struct MainTabs {
   // Home tab, and only then let the system close the app (HarmonyOS UX
   // requirement — back must not drop the user out of a page they can leave).
   onBackPress(): boolean {
+    if (this.fullScreenHandler !== undefined) { this.fullScreenHandler.exitFullScreen(); return true; }
     if (this.sheetOpen) {
-      this.sheetOpen = false;
+      this.closeCompose();
       return true;
     }
     try {
@@ -377,10 +389,7 @@ struct MainTabs {
   }
 
   private discoverOwnProfile(navigate: boolean): void {
-    if (this.ownHandle !== '') {
-      this.finishDiscover(navigate);
-      return;
-    }
+    if (this.rawWeb) { return; }
     // Fast path: a layout that links the account directly (the desktop sidebar
     // does; the mobile web does not).
     let pending: Promise<string> | undefined = undefined;
@@ -454,6 +463,7 @@ struct MainTabs {
   }
 
   private acceptHandle(handle: string, navigate: boolean): void {
+    if (this.ownHandle !== handle) { this.avatarUrl = ''; }
     this.ownHandle = handle;
     this.saveOwnHandle(handle);
     this.finishDiscover(navigate);
@@ -470,18 +480,14 @@ struct MainTabs {
       this.loadWeb(profileUrl(this.ownHandle));
       return;
     }
-    this.loadWeb(TWITTER_EDIT_PROFILE);
+    this.toast($r('app.string.account_unconfirmed'));
   }
 
   private loadWeb(url: string): void {
     this.hasError = false;
     this.progress = 0;
     try {
-      // x.com refuses e-mail sign-up on its mobile web path, so that flow is
-      // loaded with a desktop user agent. No user-facing switch: the shell
-      // picks what the page needs.
-      this.controller.setCustomUserAgent(
-        userAgentFor(deviceInfo.deviceType === '2in1' || url.indexOf('/i/flow/signup') >= 0));
+      this.controller.setCustomUserAgent(this.rawWeb ? web_webview.WebviewController.getDefaultUserAgent() : this.userAgent());
     } catch (err) {
       hilog.warn(DOMAIN, TAG, 'UA switch failed: %{public}s', JSON.stringify(err));
     }
@@ -499,15 +505,6 @@ struct MainTabs {
   // against.
   private userAgent(): string {
     return userAgentFor(deviceInfo.deviceType === '2in1');
-  }
-
-  // Feeds the document-start navigator.onLine patch (see ONLINE_PATCH). The
-  // shell only ever corrects it downwards, when the main frame really failed.
-  private setOnlineFlag(online: boolean): void {
-    try {
-      this.controller.runJavaScript('window.__otOnline=' + (online ? 'true' : 'false') + ';');
-    } catch (err) {
-    }
   }
 
   private syncFromUrl(url: string): void {
@@ -534,8 +531,6 @@ struct MainTabs {
       return;
     }
     this.tick();
-    this.currentIndex = index;
-    this.viewingHandle = '';
     this.loadWeb(TWITTER_ROUTES[index]);
   }
 
@@ -555,12 +550,10 @@ struct MainTabs {
     } catch (err) {
     }
     this.tick();
-    this.homeTabIndex = index;
     this.schedulePageStateRead();
   }
 
   private openOwnProfile(): void {
-    this.currentIndex = 4;
     this.hasError = false;
     if (this.ownHandle !== '') {
       this.viewingHandle = this.ownHandle;
@@ -656,7 +649,9 @@ struct MainTabs {
     try {
       this.controller.refresh();
     } catch (err) {
-      this.loadWeb(TWITTER_ROUTES[this.currentIndex]);
+      this.hasError = true;
+      this.refreshing = false;
+      hilog.error(DOMAIN, TAG, 'event=refresh_failed error=%{public}s', JSON.stringify(err));
     }
   }
 
@@ -667,6 +662,7 @@ struct MainTabs {
   }
 
   private applyPageChrome(url: string): void {
+    if (this.rawWeb || !/^https:\/\/(www\.)?(x|twitter)\.com(\/|$)/.test(url)) { return; }
     const root: boolean = isTabRootPath(pathOf(url));
     try {
       this.controller.runJavaScript(chromeScript(this.ownHandle, root, this.chromeBand()));
@@ -675,6 +671,7 @@ struct MainTabs {
   }
 
   private updateChromeFlag(url: string): void {
+    if (this.rawWeb) { return; }
     try {
       this.controller.runJavaScript(chromeFlagScript(isTabRootPath(pathOf(url)), this.chromeBand()));
     } catch (err) {
@@ -690,6 +687,7 @@ struct MainTabs {
   // retried. Moving between tabs used to wipe the badges because a mid-reload
   // read came back empty and was taken at face value.
   private refreshBadges(): void {
+    if (this.rawWeb) { return; }
     try {
       this.controller.runJavaScript(UNREAD_COUNTS_SCRIPT).then((raw: string) => {
         this.applyBadgeCounts(MainTabs.unquote(raw));
@@ -870,6 +868,18 @@ struct MainTabs {
   // name from the document title instead (e.g. "Abhi (@Abhi_Flex) / X").
   private readPageState(): void {
     try {
+      this.controller.runJavaScript('Boolean(document.querySelector(\'input[autocomplete="username"],input[autocomplete="current-password"],input[autocomplete="one-time-code"]\'))')
+        .then((raw: string) => {
+          this.authenticationPage = raw === 'true';
+          if (this.authenticationPage) {
+            this.ownHandle = '';
+            this.avatarUrl = '';
+            this.unreadNotifications = 0;
+            this.unreadMessages = 0;
+          } else { this.discoverOwnProfile(false); }
+        }).catch((err: Error) => {
+          hilog.warn(DOMAIN, TAG, 'event=auth_page_read_failed error=%{public}s', err.message);
+        });
       this.controller.runJavaScript('document.title').then((raw: string) => {
         const title: string = MainTabs.unquote(raw);
         this.pageTitle = MainTabs.stripSiteSuffix(title);
@@ -922,7 +932,9 @@ struct MainTabs {
   }
 
   private schedulePageStateRead(): void {
+    if (this.rawWeb) { return; }
     setTimeout(() => {
+      if (this.rawWeb) { return; }
       this.readPageState();
       this.refreshBadges();
     }, PAGE_STATE_DELAY_MS);
@@ -930,16 +942,7 @@ struct MainTabs {
 
 
   private goBack(): void {
-    try {
-      if (this.controller.accessBackward()) {
-        this.controller.backward();
-        return;
-      }
-    } catch (err) {
-    }
-    if (this.currentIndex !== 0) {
-      this.goRoute(0);
-    }
+    this.onBackPress();
   }
 
   // Never auto-grant: the user decides, and only then do we ask the system for
@@ -985,38 +988,198 @@ struct MainTabs {
     }
   }
 
-  // x.com's composer and profile editor ask for files through the WebView file
-  // selector; wiring it to the system picker is what makes uploads work.
-  private openFileSelector(event: OnShowFileSelectorEvent): void {
+  private openFileSelector(event: OnShowFileSelectorEvent): boolean {
+    const mode = event.fileSelector.getMode();
+    if (mode !== FileSelectorMode.FileOpenMode && mode !== FileSelectorMode.FileOpenMultipleMode) { return false; }
+    const types = mediaAcceptTypes(event.fileSelector.getAcceptType());
+    if (types.length === 0 || event.fileSelector.isCapture()) { return false; }
+    chooseMedia(event, types, () => { this.toast($r('app.string.file_select_failed')); })
+      .catch((err: Error) => {
+        hilog.error(DOMAIN, TAG, 'event=file_select_callback_failed error=%{public}s', err.message);
+        this.toast($r('app.string.file_select_failed'));
+      });
+    return true;
+  }
+
+  private async openExternal(target: string): Promise<void> {
     try {
-      const multiple: boolean =
-        event.fileSelector.getMode() === FileSelectorMode.FileOpenMultipleMode;
-      const options: photoAccessHelper.PhotoSelectOptions =
-        new photoAccessHelper.PhotoSelectOptions();
-      options.MIMEType = photoAccessHelper.PhotoViewMIMETypes.IMAGE_VIDEO_TYPE;
-      options.maxSelectNumber = multiple ? 10 : 1;
-      new photoAccessHelper.PhotoViewPicker().select(options)
-        .then((result: photoAccessHelper.PhotoSelectResult) => {
-          event.result.handleFileList(result.photoUris);
-        })
-        .catch((err: Error) => {
-          hilog.warn(DOMAIN, TAG, 'file picker cancelled: %{public}s', err.message);
-          event.result.handleFileList([]);
-        });
+      const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      await ctx.startAbility({ action: 'ohos.want.action.viewData', uri: target });
     } catch (err) {
-      hilog.error(DOMAIN, TAG, 'file selector failed: %{public}s', JSON.stringify(err));
-      event.result.handleFileList([]);
+      hilog.error(DOMAIN, TAG, 'event=external_link_failed error=%{public}s', JSON.stringify(err));
+      this.toast($r('app.string.operation_failed'));
     }
   }
 
-  private openCompose(): void {
-    // A fresh controller per sheet: the sheet's WebView is destroyed on close.
-    this.composeController = new web_webview.WebviewController();
-    // Whatever was typed last time is still here (see COMPOSE_DRAFT_KEY); the
-    // composer opens with the draft in place instead of an empty box.
-    this.webComposer = false;
-    this.posting = false;
-    this.sheetOpen = true;
+  private interceptExternal(event: OnLoadInterceptEvent): boolean {
+    const target = event.data.getRequestUrl();
+    if (!event.data.isMainFrame() || isSiteUrl(target) || isAuthUrl(target)) { return false; }
+    if (/^https?:\/\//i.test(target)) { this.openExternal(target); return true; }
+    return false;
+  }
+
+  private async shareCurrentPage(): Promise<void> {
+    try {
+      const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      await sharePage(ctx, this.currentUrl || TWITTER_ROUTES[0]);
+    } catch (err) {
+      hilog.error(DOMAIN, TAG, 'event=share_failed error=%{public}s', JSON.stringify(err));
+      this.toast($r('app.string.operation_failed'));
+    }
+  }
+
+  private reportDownload(result: string): void {
+    if (result === 'cancelled') { return; }
+    this.toast(result === 'saved' ? $r('app.string.file_saved') :
+      result === 'cleanup_failed' ? $r('app.string.file_cleanup_failed') : $r('app.string.file_save_failed'));
+  }
+
+  private async enterFullScreen(handler: FullScreenExitHandler): Promise<void> {
+    this.fullScreenHandler = handler;
+    this.fullScreen = true;
+    try {
+      const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      const main = await window.getLastWindow(ctx);
+      if (!this.fullScreen) { return; }
+      this.fullScreenWindow = main;
+      this.previousLayoutFullScreen = main.getWindowProperties().isLayoutFullScreen;
+      await main.setWindowLayoutFullScreen(true);
+      if (!this.fullScreen) { return; }
+      await main.setWindowSystemBarEnable([]);
+    } catch (err) {
+      hilog.error(DOMAIN, TAG, 'event=fullscreen_enter_failed error=%{public}s', JSON.stringify(err));
+      handler.exitFullScreen();
+      this.toast($r('app.string.operation_failed'));
+    }
+  }
+
+  private async exitFullScreen(): Promise<void> {
+    this.fullScreen = false;
+    this.fullScreenHandler = undefined;
+    try {
+      if (this.fullScreenWindow !== undefined) {
+        await this.fullScreenWindow.setWindowLayoutFullScreen(this.previousLayoutFullScreen);
+        await this.fullScreenWindow.setWindowSystemBarEnable(['status', 'navigation']);
+        this.fullScreenWindow = undefined;
+      }
+    } catch (err) {
+      hilog.error(DOMAIN, TAG, 'event=fullscreen_exit_failed error=%{public}s', JSON.stringify(err));
+      this.toast($r('app.string.operation_failed'));
+    }
+  }
+
+  /** 账号必须由当前网页确认，缓存不能决定草稿归属。 */
+  private async confirmCurrentAccount(): Promise<string> {
+    const direct = MainTabs.unquote(await this.controller.runJavaScript(OWN_HANDLE_SCRIPT));
+    if (/^[A-Za-z0-9_]{1,15}$/.test(direct)) { return direct; }
+    this.discovering = true;
+    try {
+      const result = MainTabs.unquote(await this.controller.runJavaScript(PROFILE_BOOTSTRAP_SCRIPT));
+      if (result !== 'armed') { return ''; }
+      await new Promise<void>((resolve) => { setTimeout(resolve, BOOTSTRAP_SETTLE_MS); });
+      const handle = MainTabs.unquote(await this.controller.runJavaScript('window.__otBoot||""'));
+      return /^[A-Za-z0-9_]{1,15}$/.test(handle) ? handle : '';
+    } finally {
+      this.discovering = false;
+    }
+  }
+
+  /** 当前账号确认后才读取其草稿，旧草稿需要用户确认归属。 */
+  private async openCompose(): Promise<void> {
+    if (this.openingCompose || this.sheetOpen) { return; }
+    this.openingCompose = true;
+    try {
+      const handle: string = await this.confirmCurrentAccount();
+      if (!/^[A-Za-z0-9_]{1,15}$/.test(handle)) {
+        this.toast($r('app.string.account_unconfirmed'));
+        return;
+      }
+      this.composeOwner = handle.toLowerCase();
+      this.ownHandle = handle;
+      const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      const prefs = await preferences.getPreferences(ctx, PREFS_NAME);
+      this.draft = await prefs.get(COMPOSE_DRAFT_KEY + ':' + this.composeOwner, '') as string;
+      this.postUncertain = await prefs.get('post_pending:' + this.composeOwner, false) as boolean;
+      this.composeMessage = this.postUncertain ? $r('app.string.post_unknown') : '';
+      this.composeController = new web_webview.WebviewController();
+      this.webComposer = false;
+      this.posting = false;
+      this.sheetOpen = true;
+      if (this.legacyDraft !== '' && this.draft === '') {
+        this.getUIContext().showAlertDialog({
+          title: $r('app.string.legacy_draft_title'),
+          message: $r('app.string.legacy_draft_message'),
+          primaryButton: { value: $r('app.string.compose_cancel'), action: () => {} },
+          secondaryButton: { value: $r('app.string.use_draft'), action: () => { this.adoptLegacyDraft(); } }
+        });
+      }
+    } catch (err) {
+      hilog.error(DOMAIN, TAG, 'event=compose_open_failed error=%{public}s', JSON.stringify(err));
+      this.toast($r('app.string.draft_read_failed'));
+    } finally {
+      this.openingCompose = false;
+    }
+  }
+
+  private async adoptLegacyDraft(): Promise<void> {
+    this.draft = this.legacyDraft;
+    try {
+      await this.persistDraft();
+      await this.putPreference(COMPOSE_DRAFT_KEY, '');
+      this.legacyDraft = '';
+    } catch (err) {
+      this.toast($r('app.string.draft_save_failed'));
+    }
+  }
+
+  private persistDraft(): Promise<void> {
+    if (this.composeOwner === '') { return Promise.resolve(); }
+    const key = COMPOSE_DRAFT_KEY + ':' + this.composeOwner;
+    const value = this.draft;
+    // 顺序写入防止较早的防抖任务覆盖后续草稿；每次失败仍由调用方显示。
+    const save = (): Promise<void> => this.putPreference(key, value);
+    this.draftWrite = this.draftWrite.then(save, save);
+    return this.draftWrite;
+  }
+
+  private closeCompose(): void {
+    if (this.posting) { return; }
+    if (this.webComposer) {
+      this.getUIContext().showAlertDialog({
+        title: $r('app.string.compose_cancel'),
+        message: $r('app.string.close_web_draft'),
+        primaryButton: { value: $r('app.string.keep_editing'), action: () => {} },
+        secondaryButton: { value: $r('app.string.close_editor'), action: () => { this.saveAndClose(); } }
+      });
+      return;
+    }
+    this.saveAndClose();
+  }
+
+  private async saveAndClose(): Promise<void> {
+    try {
+      await this.persistDraft();
+      this.stopPostCheck();
+      this.sheetOpen = false;
+    } catch (err) {
+      this.toast($r('app.string.draft_save_failed'));
+    }
+  }
+
+  private stopPostCheck(): void {
+    if (this.postTimer !== -1) { clearTimeout(this.postTimer); this.postTimer = -1; }
+  }
+
+  private async switchWebMode(): Promise<void> {
+    if (this.sheetOpen) { this.closeCompose(); return; }
+    try {
+      await this.persistDraft();
+      this.rawWeb = !this.rawWeb;
+      this.controller.setCustomUserAgent(this.rawWeb ? web_webview.WebviewController.getDefaultUserAgent() : this.userAgent());
+      this.controller.loadUrl(this.currentUrl || TWITTER_ROUTES[0]);
+    } catch (err) {
+      this.toast($r('app.string.operation_failed'));
+    }
   }
 
   // Drafts are saved as you type, so closing the sheet — or the app — cannot
@@ -1032,11 +1195,16 @@ struct MainTabs {
   }
 
   private saveDraft(): void {
-    this.putPreference(COMPOSE_DRAFT_KEY, this.draft);
+    this.persistDraft().catch((err: Error) => {
+      hilog.error(DOMAIN, TAG, 'event=draft_save_failed error=%{public}s', err.message);
+      this.toast($r('app.string.draft_save_failed'));
+    });
   }
 
   private saveNotificationAsked(): void {
-    this.putPreference(NOTIFICATION_ASKED_KEY, true);
+    this.putPreference(NOTIFICATION_ASKED_KEY, true).catch((err: Error) => {
+      hilog.warn(DOMAIN, TAG, 'event=preference_save_failed error=%{public}s', err.message);
+    });
   }
 
   // Desktop keyboards: Escape leaves the composer and Ctrl/Cmd+Enter posts —
@@ -1048,7 +1216,7 @@ struct MainTabs {
       return false;
     }
     if (event.keyCode === KeyCode.KEYCODE_ESCAPE) {
-      this.sheetOpen = false;
+      this.closeCompose();
       return true;
     }
     if (event.keyCode !== KeyCode.KEYCODE_ENTER) {
@@ -1076,69 +1244,124 @@ struct MainTabs {
   private async putPreference(key: string, value: preferences.ValueType): Promise<void> {
     try {
       const ctx: common.Context | undefined = this.getUIContext().getHostContext();
-      if (ctx === undefined) {
-        return;
-      }
+      if (ctx === undefined) { throw new Error('Context unavailable'); }
       const prefs: preferences.Preferences = await preferences.getPreferences(ctx, PREFS_NAME);
       await prefs.put(key, value);
       await prefs.flush();
     } catch (err) {
-      hilog.warn(DOMAIN, TAG, 'preference write failed: %{public}s', JSON.stringify(err));
+      hilog.error(DOMAIN, TAG, 'event=preference_write_failed error=%{public}s', JSON.stringify(err));
+      throw err as Error;
     }
   }
 
-  // Native "Post": type the draft into the page's own editor, then press the
-  // page's own submit button. The whole composer is HarmonyOS UI — only the
-  // submit goes through x.com, so the post is a real post.
-  private postFromSheet(): void {
-    const text: string = this.draft.trim();
-    if (text === '' || this.posting) {
-      return;
-    }
+  /** 先保存提交意图；未知结果不得自动重发或清空草稿。 */
+  private async postFromSheet(): Promise<void> {
+    if (this.draft.trim() === '' || this.posting || this.postUncertain || this.webComposer) { return; }
     this.posting = true;
-    let pending: Promise<string> | undefined = undefined;
+    this.composeMessage = '';
+    if (this.draftSaveTimer !== -1) { clearTimeout(this.draftSaveTimer); this.draftSaveTimer = -1; }
     try {
-      pending = this.composeController.runJavaScript(fillComposerScript(text));
+      await this.persistDraft();
+      const account = await this.confirmCurrentAccount();
+      if (account.toLowerCase() !== this.composeOwner) {
+        this.composeMessage = $r('app.string.account_changed');
+        this.posting = false;
+        return;
+      }
+      const filled = MainTabs.unquote(await this.composeController.runJavaScript(fillComposerScript(this.draft)));
+      if (filled !== 'ok') {
+        this.composeMessage = $r('app.string.compose_fill_failed');
+        this.posting = false;
+        return;
+      }
+      await this.putPreference('post_pending:' + this.composeOwner, true);
+      this.postUncertain = true;
+      const result = MainTabs.unquote(await this.composeController.runJavaScript(CLICK_POST_BUTTON_SCRIPT));
+      if (result === 'missing' || result === 'disabled') {
+        await this.putPreference('post_pending:' + this.composeOwner, false);
+        this.postUncertain = false;
+        this.posting = false;
+        this.composeMessage = $r('app.string.compose_submit_unavailable');
+        return;
+      }
+      if (result !== 'submitted') { this.markPostUnknown(); return; }
+      this.postChecks = 0;
+      this.checkPostResult();
     } catch (err) {
-      pending = undefined;
-    }
-    if (pending === undefined) {
+      hilog.error(DOMAIN, TAG, 'event=post_failed error=%{public}s', JSON.stringify(err));
       this.posting = false;
-      this.openWebComposer();
-      return;
+      this.composeMessage = this.postUncertain ? $r('app.string.post_unknown') : $r('app.string.operation_failed');
     }
-    (pending as Promise<string>).then((filled: string) => {
-      if (MainTabs.unquote(filled) !== 'ok') {
-        // The page's composer is not ready: hand the draft to the web composer
-        // rather than dropping it.
-        return '';
-      }
-      return this.composeController.runJavaScript(CLICK_POST_BUTTON_SCRIPT) as Promise<string>;
-    }).then((result: string) => {
-      this.posting = false;
-      if (MainTabs.unquote(result) === 'ok') {
-        this.tick();
-        this.toast($r('app.string.compose_post_sent'));
-        this.sheetOpen = false;
-        // The draft is now a post; clear what was saved for next time.
+  }
+
+  private async checkPostResult(): Promise<void> {
+    try {
+      const result = MainTabs.unquote(await this.composeController.runJavaScript(POST_RESULT_SCRIPT));
+      if (result === 'confirmed') {
+        // 先落盘清除草稿，再解除待确认标记，避免进程退出后重复发送。
+        await this.draftWrite;
+        await this.putPreference(COMPOSE_DRAFT_KEY + ':' + this.composeOwner, '');
+        await this.putPreference('post_pending:' + this.composeOwner, false);
+        if (this.draftSaveTimer !== -1) { clearTimeout(this.draftSaveTimer); this.draftSaveTimer = -1; }
         this.draft = '';
-        this.saveDraft();
-      } else {
-        // The text is already in the page's editor; showing it lets the user
-        // finish there (media, polls, threads) without retyping.
-        this.openWebComposer();
+        this.postUncertain = false;
+        this.posting = false;
+        this.sheetOpen = false;
+        this.toast($r('app.string.compose_post_sent'));
+        return;
       }
-    }).catch(() => {
-      this.posting = false;
-      this.openWebComposer();
+      if (result === 'unknown' || ++this.postChecks >= 16) { this.markPostUnknown(); return; }
+      this.postTimer = setTimeout(() => { this.checkPostResult(); }, 1000);
+    } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'event=post_result_unknown error=%{public}s', JSON.stringify(err));
+      this.markPostUnknown();
+    }
+  }
+
+  private markPostUnknown(): void {
+    this.stopPostCheck();
+    this.posting = false;
+    this.postUncertain = true;
+    this.composeMessage = $r('app.string.post_unknown');
+  }
+
+  private async resolveUnknownPost(): Promise<void> {
+    this.getUIContext().showAlertDialog({
+      title: $r('app.string.post_unknown_title'),
+      message: $r('app.string.post_check_message'),
+      primaryButton: { value: $r('app.string.compose_cancel'), action: () => {} },
+      secondaryButton: { value: $r('app.string.post_checked'), action: () => { this.clearPendingPost(); } }
     });
   }
 
-  private openWebComposer(): void {
-    this.posting = false;
-    this.webComposer = true;
-    if (this.draft.trim() !== '') {
-      this.toast($r('app.string.compose_web_fallback'));
+  private async clearPendingPost(): Promise<void> {
+    try {
+      await this.putPreference('post_pending:' + this.composeOwner, false);
+      this.postUncertain = false;
+      this.composeMessage = '';
+      this.composeController.loadUrl(TWITTER_COMPOSE);
+    } catch (err) { this.toast($r('app.string.operation_failed')); }
+  }
+
+  private async openWebComposer(): Promise<void> {
+    if (this.posting || this.postUncertain) { return; }
+    this.posting = true;
+    try {
+      await this.persistDraft();
+      if (this.draft !== '') {
+        const result = MainTabs.unquote(await this.composeController.runJavaScript(fillComposerScript(this.draft)));
+        if (result !== 'ok') { this.composeMessage = $r('app.string.compose_fill_failed'); return; }
+      }
+      // 移交成功后只有网页拥有当前编辑内容，避免网页发布后再次恢复旧稿。
+      if (this.draftSaveTimer !== -1) { clearTimeout(this.draftSaveTimer); this.draftSaveTimer = -1; }
+      await this.draftWrite;
+      await this.putPreference(COMPOSE_DRAFT_KEY + ':' + this.composeOwner, '');
+      this.draft = '';
+      this.webComposer = true;
+    } catch (err) {
+      this.composeMessage = $r('app.string.operation_failed');
+    } finally {
+      this.posting = false;
     }
   }
 
@@ -1147,6 +1370,24 @@ struct MainTabs {
   // trailing action. Every icon here is one the stock app also puts in a
   // header; anything already reachable from the tab bar, the page body or the
   // account menu stays out.
+  @Builder
+  shellTitle() {
+    Row() {
+      if (this.rawWeb || this.ownHandle === '') {
+        Button($r('app.string.back')).onClick(() => { this.goBack(); })
+        Blank()
+      } else {
+        Column() { this.navTitleBar() }.layoutWeight(1)
+      }
+      Button($r('app.string.share_page')).id('page-share')
+        .buttonStyle(ButtonStyleMode.TEXTUAL)
+        .onClick(() => { this.shareCurrentPage(); })
+      Button(this.rawWeb ? $r('app.string.native_mode') : $r('app.string.raw_mode'))
+        .buttonStyle(ButtonStyleMode.TEXTUAL)
+        .onClick(() => { this.switchWebMode(); })
+    }.width('100%')
+  }
+
   @Builder
   navTitleBar() {
     Row({ space: 0 }) {
@@ -1618,34 +1859,25 @@ struct MainTabs {
         // userAgent() on the attribute is deprecated; the controller API is the
         // supported way and can only run once the controller is bound.
         try {
-          this.controller.setCustomUserAgent(this.userAgent());
+          this.controller.setCustomUserAgent(this.rawWeb ? web_webview.WebviewController.getDefaultUserAgent() : this.userAgent());
+          this.downloadDelegate = installDownloads(this.controller,
+            this.getUIContext().getHostContext() as common.UIAbilityContext,
+            (result: string) => { this.reportDownload(result); });
         } catch (err) {
           hilog.warn(DOMAIN, TAG, 'custom UA rejected: %{public}s', JSON.stringify(err));
         }
       })
-      // x.com opens some flows — the Google and Apple sign-in hand-offs, and
-      // links that leave the site — in a new tab. ArkWeb blocks the renderer
-      // until this event is answered, which is why those links used to look
-      // dead; the shell deliberately has one WebView, so the target is loaded
-      // here and no second window is created.
       .onWindowNew((event: OnWindowNewEvent) => {
-        try {
-          const target: string = event.targetUrl;
-          try {
-            event.handler.setWebController(null);
-          } catch (err) {
-            hilog.warn(DOMAIN, TAG, 'new-window hand-off failed: %{public}s', JSON.stringify(err));
-          }
-          if (target !== '') {
-            hilog.info(DOMAIN, TAG, 'new-window request served in place: %{public}s', target);
-            this.loadWeb(target);
-          }
-        } catch (err) {
-        }
+        event.handler.setWebController(null);
+        if (isSiteUrl(event.targetUrl) || isAuthUrl(event.targetUrl)) {
+          this.loadWeb(event.targetUrl);
+        } else if (/^https?:\/\//i.test(event.targetUrl)) {
+          this.openExternal(event.targetUrl);
+        } else { this.toast($r('app.string.operation_failed')); }
       })
-      // Runs before any page script: ArkWeb's own navigator.onLine is wrong on
-      // these images, and x.com's Chat and sign-in flows act on it.
-      .runJavaScriptOnDocumentStart([{ script: ONLINE_PATCH, scriptRules: ['*'] }])
+      .onLoadIntercept((event) => this.interceptExternal(event))
+      .onFullScreenEnter((event) => { this.enterFullScreen(event.handler); })
+      .onFullScreenExit(() => { this.exitFullScreen(); })
       .javaScriptAccess(true)
       .domStorageAccess(true)
       // x.com's chat client keeps its session state in browser storage; ArkWeb
@@ -1672,28 +1904,15 @@ struct MainTabs {
         this.progress = 100;
         this.refreshing = false;
         this.finishFirstLoad();
-        // A page that rendered was served, so the connection is up — this is
-        // what keeps the injected navigator.onLine patch honest.
-        this.setOnlineFlag(true);
         if (event && event.url) {
           this.syncFromUrl(event.url);
           this.applyPageChrome(event.url);
         }
+        if (this.rawWeb) { return; }
         this.schedulePageStateRead();
         if (this.ownHandle === '') {
           this.discoverOwnProfile(false);
         }
-      })
-      .onLoadIntercept((event) => {
-        try {
-          const url: string = event.data.getRequestUrl();
-          if (url !== '' && (url.indexOf('x.com') >= 0 || url.indexOf('twitter.com') >= 0)) {
-            this.syncFromUrl(url);
-            this.updateChromeFlag(url);
-          }
-        } catch (err) {
-        }
-        return false;
       })
       .onErrorReceive((event) => {
         // Subresource failures (images, analytics) are normal on x.com — only
@@ -1708,19 +1927,11 @@ struct MainTabs {
         this.progress = 100;
         this.refreshing = false;
         this.finishFirstLoad();
-        this.setOnlineFlag(false);
       })
       .onRenderExited((event) => {
-        // The render process is restarted by the system; recover by loading the
-        // page again instead of dumping the user on an error card.
-        hilog.warn(DOMAIN, TAG, 'render exited: %{public}s', JSON.stringify(event));
-        this.hasError = false;
-        this.progress = 0;
-        try {
-          this.controller.refresh();
-        } catch (err) {
-          this.hasError = true;
-        }
+        hilog.error(DOMAIN, TAG, 'event=render_exit detail=%{public}s', JSON.stringify(event));
+        this.hasError = true;
+        this.finishFirstLoad();
       })
       .onGeolocationShow((event) => {
         if (event && event.geolocation) {
@@ -1728,8 +1939,7 @@ struct MainTabs {
         }
       })
       .onShowFileSelector((event) => {
-        this.openFileSelector(event);
-        return true;
+        return this.openFileSelector(event);
       })
   }
 
@@ -1771,6 +1981,8 @@ struct MainTabs {
       .height('100%')
       .backgroundColor($r('sys.color.ohos_id_color_background'))
 
+      if (this.hasError) { this.errorState() }
+
       if (!this.firstLoadDone) {
         Column() {
           LoadingProgress()
@@ -1803,7 +2015,7 @@ struct MainTabs {
 
       // Native compose entry point, like the stock app: on the four content
       // tabs (never on Profile), and only once a page is on screen.
-      if (this.currentIndex !== 4 && !this.hasError && this.firstLoadDone) {
+      if (!this.rawWeb && !this.fullScreen && !this.authenticationPage && this.ownHandle !== '' && this.currentIndex !== 4 && !this.hasError && this.firstLoadDone) {
         this.composeFab()
       }
     }
@@ -1828,19 +2040,29 @@ struct MainTabs {
         .onControllerAttached(() => {
           try {
             this.composeController.setCustomUserAgent(this.userAgent());
+            this.composeDownloadDelegate = installDownloads(this.composeController,
+              this.getUIContext().getHostContext() as common.UIAbilityContext,
+              (result: string) => { this.reportDownload(result); });
           } catch (err) {
           }
         })
+        .onLoadIntercept((event) => this.interceptExternal(event))
+        .onFullScreenEnter((event) => { this.enterFullScreen(event.handler); })
+        .onFullScreenExit(() => { this.exitFullScreen(); })
+        .onRenderExited(() => {
+          if (this.posting) { this.markPostUnknown(); }
+          this.composeMessage = $r('app.string.editor_failed');
+        })
         .javaScriptAccess(true)
         .domStorageAccess(true)
+        .databaseAccess(true)
         .fileAccess(false)
         .mixedMode(MixedMode.Compatible)
         .cacheMode(CacheMode.Default)
         .zoomAccess(false)
         .darkMode(WebDarkMode.Auto)
         .onShowFileSelector((event) => {
-          this.openFileSelector(event);
-          return true;
+          return this.openFileSelector(event);
         })
 
       Column({ space: 0 }) {
@@ -1850,7 +2072,7 @@ struct MainTabs {
             .fontFamily(FONT_FAMILY)
             .fontColor($r('sys.color.ohos_id_color_text_primary'))
             .onClick(() => {
-              this.sheetOpen = false;
+              this.closeCompose();
             })
           Blank()
           Text($r('app.string.compose_title'))
@@ -1862,7 +2084,7 @@ struct MainTabs {
           Button($r('app.string.compose_post'))
             .buttonStyle(ButtonStyleMode.EMPHASIZED)
             .fontFamily(FONT_FAMILY)
-            .enabled(this.draft.trim() !== '' && !this.posting)
+            .enabled(this.draft.trim() !== '' && !this.posting && !this.postUncertain)
             .onClick(() => {
               this.postFromSheet();
             })
@@ -1898,6 +2120,12 @@ struct MainTabs {
         .padding({ left: S16, right: S8, top: S4, bottom: S4 })
         .alignItems(VerticalAlign.Center)
 
+        if (this.composeMessage !== '') {
+          Text(this.composeMessage).fontSize(14).padding(S12)
+        }
+        if (this.postUncertain) {
+          Button($r('app.string.post_verify')).onClick(() => { this.resolveUnknownPost(); })
+        }
         TextArea({ text: $$this.draft, placeholder: $r('app.string.compose_placeholder') })
           .width('100%')
           .layoutWeight(1)
@@ -1905,6 +2133,7 @@ struct MainTabs {
           .fontSize(18)
           .backgroundColor(Color.Transparent)
           .padding({ left: S16, right: S16, top: S12 })
+          .enabled(!this.posting && !this.postUncertain)
           .onChange(() => {
             this.scheduleDraftSave();
           })
@@ -1935,7 +2164,7 @@ struct MainTabs {
       Flex({
         direction: this.isWide ? FlexDirection.Row : FlexDirection.ColumnReverse
       }) {
-        this.navBar()
+        if (!this.rawWeb && !this.fullScreen && !this.authenticationPage && this.ownHandle !== '') { this.navBar() }
         this.webArea()
       }
       .width('100%')
@@ -1943,8 +2172,9 @@ struct MainTabs {
     }
     .width('100%')
     .height('100%')
-    .title(this.navTitleBar())
+    .title(this.shellTitle())
     .titleMode(NavigationTitleMode.Mini)
+    .hideTitleBar(this.fullScreen)
     // Navigation defaults to Split mode on wide windows, which would reserve a
     // left pane for the title bar and squeeze our own rail + WebView into it.
     // The shell owns the wide layout, so keep Navigation in Stack mode.
@@ -1953,8 +2183,10 @@ struct MainTabs {
     .backgroundColor($r('sys.color.ohos_id_color_background'))
     .bindSheet($$this.sheetOpen, this.composeSheet(), {
       height: SheetSize.LARGE,
+      width: this.isWide ? 640 : '100%',
       dragBar: true,
       showClose: false,
+      shouldDismiss: (() => { this.closeCompose(); }),
       blurStyle: BlurStyle.COMPONENT_ULTRA_THICK
     })
   }
