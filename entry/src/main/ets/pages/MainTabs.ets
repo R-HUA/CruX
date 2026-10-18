@@ -162,6 +162,7 @@ struct MainTabs {
 
   async aboutToAppear(): Promise<void> {
     this.bridge.setHandler((url: string) => {
+      this.saveWebSession();
       if (this.rawWeb) { return; }
       this.syncFromUrl(url);
       this.updateChromeFlag(url);
@@ -216,7 +217,20 @@ struct MainTabs {
   // (the page kept running in the background), so re-read them here as well as
   // on the timer.
   onBackgroundChanged(): void {
+    if (this.appBackground) { this.saveWebSession(); }
     if (this.appBackground && this.composeOwner !== '' && !this.posting && !this.webComposer) { this.saveDraft(); }
+  }
+
+  /** 缩短登录 Cookie 等待周期落盘的窗口，避免突然退出时丢失尚未保存的会话。 */
+  private async saveWebSession(): Promise<void> {
+    try {
+      await web_webview.WebCookieManager.saveCookieAsync();
+      hilog.info(DOMAIN, TAG, 'event=session_saved');
+    } catch (err) {
+      const error = err as BusinessError;
+      hilog.error(DOMAIN, TAG, 'event=session_save_failed code=%{public}d', error.code);
+      if (!this.appBackground) { this.toast($r('app.string.operation_failed')); }
+    }
   }
 
   onPageShow(): void {
@@ -1856,6 +1870,7 @@ struct MainTabs {
         this.hasError = false;
       })
       .onPageEnd((event) => {
+        this.saveWebSession();
         this.progress = 100;
         this.refreshing = false;
         this.finishFirstLoad();
