@@ -1,7 +1,7 @@
 import web_webview from '@ohos.web.webview';
 import mediaquery from '@ohos.mediaquery';
 import { preferences } from '@kit.ArkData';
-import { isSiteUrl, isAuthUrl, mediaAcceptTypes, chooseMedia, sharePage, installDownloads } from '../common/WebSystem';
+import { isSiteUrl, isAuthUrl, mediaAcceptTypes, chooseMedia, installDownloads } from '../common/WebSystem';
 import { abilityAccessCtrl, common, PermissionRequestResult, Permissions } from '@kit.AbilityKit';
 import { BusinessError, deviceInfo } from '@kit.BasicServicesKit';
 import { notificationManager } from '@kit.NotificationKit';
@@ -1018,16 +1018,6 @@ struct MainTabs {
     return false;
   }
 
-  private async shareCurrentPage(): Promise<void> {
-    try {
-      const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
-      await sharePage(ctx, this.currentUrl || TWITTER_ROUTES[0]);
-    } catch (err) {
-      hilog.error(DOMAIN, TAG, 'event=share_failed error=%{public}s', JSON.stringify(err));
-      this.toast($r('app.string.operation_failed'));
-    }
-  }
-
   private reportDownload(result: string): void {
     if (result === 'cancelled') { return; }
     this.toast(result === 'saved' ? $r('app.string.file_saved') :
@@ -1168,18 +1158,6 @@ struct MainTabs {
 
   private stopPostCheck(): void {
     if (this.postTimer !== -1) { clearTimeout(this.postTimer); this.postTimer = -1; }
-  }
-
-  private async switchWebMode(): Promise<void> {
-    if (this.sheetOpen) { this.closeCompose(); return; }
-    try {
-      await this.persistDraft();
-      this.rawWeb = !this.rawWeb;
-      this.controller.setCustomUserAgent(this.rawWeb ? web_webview.WebviewController.getDefaultUserAgent() : this.userAgent());
-      this.controller.loadUrl(this.currentUrl || TWITTER_ROUTES[0]);
-    } catch (err) {
-      this.toast($r('app.string.operation_failed'));
-    }
   }
 
   // Drafts are saved as you type, so closing the sheet — or the app — cannot
@@ -1363,29 +1341,6 @@ struct MainTabs {
     } finally {
       this.posting = false;
     }
-  }
-
-  // The shell's title bar, laid out the way the X app lays out its own: a
-  // leading control, a centre that belongs to the current tab, and at most one
-  // trailing action. Every icon here is one the stock app also puts in a
-  // header; anything already reachable from the tab bar, the page body or the
-  // account menu stays out.
-  @Builder
-  shellTitle() {
-    Row() {
-      if (this.rawWeb || this.ownHandle === '') {
-        Button($r('app.string.back')).onClick(() => { this.goBack(); })
-        Blank()
-      } else {
-        Column() { this.navTitleBar() }.layoutWeight(1)
-      }
-      Button($r('app.string.share_page')).id('page-share')
-        .buttonStyle(ButtonStyleMode.TEXTUAL)
-        .onClick(() => { this.shareCurrentPage(); })
-      Button(this.rawWeb ? $r('app.string.native_mode') : $r('app.string.raw_mode'))
-        .buttonStyle(ButtonStyleMode.TEXTUAL)
-        .onClick(() => { this.switchWebMode(); })
-    }.width('100%')
   }
 
   @Builder
@@ -2172,9 +2127,9 @@ struct MainTabs {
     }
     .width('100%')
     .height('100%')
-    .title(this.shellTitle())
+    .title(this.navTitleBar())
     .titleMode(NavigationTitleMode.Mini)
-    .hideTitleBar(this.fullScreen)
+    .hideTitleBar(this.fullScreen || this.rawWeb || this.authenticationPage || this.ownHandle === '')
     // Navigation defaults to Split mode on wide windows, which would reserve a
     // left pane for the title bar and squeeze our own rail + WebView into it.
     // The shell owns the wide layout, so keep Navigation in Stack mode.
