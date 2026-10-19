@@ -8,9 +8,9 @@ import { abilityAccessCtrl, common, PermissionRequestResult, Permissions } from 
 import { BusinessError, deviceInfo } from '@kit.BasicServicesKit';
 import { notificationManager } from '@kit.NotificationKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
-import { ColorMetrics, SymbolGlyphModifier, window } from '@kit.ArkUI';
+import { ColorMetrics, LengthMetrics, SymbolGlyphModifier, window } from '@kit.ArkUI';
 import { HdsNavigation, HdsNavigationTitleMode, HdsTabs, hdsMaterial,
-  HdsTabsController, HdsAnimationMode, ScrollEffectType, BlurStrategy } from '@kit.UIDesignKit';
+  HdsTabsController, HdsAnimationMode, BlurStrategy, ScrollEffectType } from '@kit.UIDesignKit';
 import { KeyCode } from '@kit.InputKit';
 import { vibrator } from '@kit.SensorServiceKit';
 import {
@@ -18,14 +18,14 @@ import {
   WIDE_BREAKPOINT
 } from '../common/Theme';
 import {
-  TWITTER_ROUTES, TWITTER_COMPOSE, TWITTER_UA,
+  TWITTER_BASE, TWITTER_ROUTES, TWITTER_COMPOSE, TWITTER_UA,
   TWITTER_DM_COMPOSE, TWITTER_NOTIF_SETTINGS, TWITTER_EDIT_PROFILE,
   TWITTER_SETTINGS, TWITTER_BOOKMARKS,
   profileUrl, listsUrl, pathOf, routeIndexForUrl, profileHandleForUrl,
   isTabRootPath, isPostDetailUrl, usesNativeNavigation, usesNativeHeader, userAgentFor
 } from '../common/WebConfig';
 import {
-  OWN_HANDLE_SCRIPT, chromeScript, chromeFlagScript, chromeInsetsScript, scrollToTopScript, REPLY_TO_POST_SCRIPT,
+  OWN_HANDLE_SCRIPT, chromeScript, chromeFlagScript, chromeInsetsScript, scrollToTopScript,
   CLICK_POST_BUTTON_SCRIPT, POST_RESULT_SCRIPT, profileBootstrapScript, clickRouteScript, fillComposerScript,
   HOME_TAB_SCRIPT, selectHomeTabScript, AVATAR_SCRIPT, UNREAD_COUNTS_SCRIPT
 } from '../common/WebChrome';
@@ -43,6 +43,12 @@ const DESKTOP_MODE_KEY: string = 'desktop_site';
 const FLOATING_BAR_KEY: string = 'floating_bar';
 const AUTO_HIDE_BAR_KEY: string = 'auto_hide_bar';
 const HEADER_HEIGHT: number = 56;
+// HDS 的羽化蒙层只对 GRADIENT_BLUR 生效，蒙层向标题栏下方延伸这段高度。
+const HEADER_BLUR_EXTRA_HEIGHT: number = 20;
+// 滚动多少 vp 后顶栏达到完全模糊。
+const HEADER_BLUR_DISTANCE: number = 32;
+// 标题栏内容整体上移，给摄像头的上下留出更均匀的呼吸空间。
+const HEADER_CONTENT_LIFT: number = 4;
 const FLOATING_BAR_HEIGHT: number = 58;
 // The composer's text, kept in ArkData preferences so a draft survives the
 // sheet closing and the app being killed.
@@ -73,12 +79,6 @@ const DRAFT_SAVE_DEBOUNCE_MS: number = 700;
 // history hook calls this instead.
 class PageBridge {
   private imageHandler: (payload: string) => boolean = () => false;
-  private replyFailureHandler: () => void = () => {};
-
-  setReplyFailureHandler(handler: () => void): void { this.replyFailureHandler = handler; }
-
-  onReplyUnavailable(): void { this.replyFailureHandler(); }
-
   setImageHandler(handler: (payload: string) => boolean): void { this.imageHandler = handler; }
 
   onImages(payload: string): boolean { return this.imageHandler(payload); }
@@ -131,7 +131,10 @@ struct MainTabs {
   private shellWindow: window.Window | undefined = undefined;
   private avoidChanged: (area: window.AvoidAreaOptions) => void = () => this.updateShellInsets();
   private tabsController: HdsTabsController = new HdsTabsController();
-  @State headerBlurRatio: number = 0;
+  // Web 的滚动由渲染进程持有，HDS 只能读取 ArkUI 可滚动组件；把网页偏移镜像到
+  // 这个 1vp 隐藏滚动容器，标题栏才能按官方指南在两种样式间过渡。
+  private blurScroller: Scroller = new Scroller();
+  private lastBlurOffset: number = 0;
   @State statusBarContentColor: string = '#000000';
   @State pressedIndex: number = -1;
   @State webWidth: number = 0;
@@ -146,6 +149,9 @@ struct MainTabs {
   // reveals the real x.com composer instead of failing.
   @State draft: string = '';
   @State webComposer: boolean = false;
+  @State composeUrl: string = TWITTER_COMPOSE;
+  @State composeLoading: boolean = true;
+  @State composePreparing: boolean = false;
   @State posting: boolean = false;
   @State rawWeb: boolean = false;
   @State authenticationPage: boolean = false;
@@ -209,10 +215,6 @@ struct MainTabs {
     this.shellWindow.on('avoidAreaChange', this.avoidChanged);
     this.updateShellInsets();
     this.bridge.setImageHandler((payload: string) => this.openImages(payload));
-    this.bridge.setReplyFailureHandler(() => {
-      hilog.error(DOMAIN, TAG, 'event=reply_control_unavailable');
-      this.toast($r('app.string.operation_failed'));
-    });
     this.bridge.setHandler((url: string) => {
       this.saveWebSession();
       if (this.rawWeb) { return; }
@@ -780,11 +782,32 @@ struct MainTabs {
       /^\/[a-z0-9_]{1,15}\/status\/\d+\/(mediaviewer|(?:video|photo)\/[1-4])$/.test(this.currentPath);
   }
 
+  private resetHeaderBlur(): void {
+    this.lastBlurOffset = 0;
+    try {
+      this.blurScroller.scrollTo({ xOffset: 0, yOffset: 0, animation: false });
+    } catch {
+      // 首次进入页面时隐藏滚动容器尚未挂载。
+    }
+  }
+
+  /** 把网页滚动位置镜像给 HDS，顶栏在顶部保持全透明，随滚动逐渐模糊。 */
+  private syncHeaderBlur(yOffset: number): void {
+    const offset: number = Math.min(HEADER_BLUR_DISTANCE, Math.max(0, yOffset));
+    if (Math.abs(offset - this.lastBlurOffset) < 0.5) { return; }
+    this.lastBlurOffset = offset;
+    try {
+      this.blurScroller.scrollTo({ xOffset: 0, yOffset: offset, animation: false });
+    } catch {
+      // 隐藏滚动容器尚未挂载时忽略，下一次滚动会重试。
+    }
+  }
+
   private resetChromeScroll(): void {
     this.lastScrollY = 0;
     this.scrollDistance = 0;
     this.webScrollFromTouch = false;
-    this.headerBlurRatio = 0;
+    this.resetHeaderBlur();
     this.barsCollapsed = false;
   }
 
@@ -793,7 +816,7 @@ struct MainTabs {
     const y: number = Math.max(0, yOffset);
     const delta: number = y - this.lastScrollY;
     this.lastScrollY = y;
-    this.headerBlurRatio = Math.min(1, y / 32);
+    this.syncHeaderBlur(y);
     if (!this.overlaysWeb() || isPostDetailUrl(this.currentUrl) || !this.autoHideBar || this.isWide || y < 48) {
       this.barsCollapsed = false;
       this.scrollDistance = 0;
@@ -1241,39 +1264,46 @@ struct MainTabs {
   private async confirmCurrentAccount(): Promise<string> {
     const direct = MainTabs.unquote(await this.controller.runJavaScript(OWN_HANDLE_SCRIPT));
     if (/^[A-Za-z0-9_]{1,15}$/.test(direct)) { return direct; }
-    this.discovering = true;
-    try {
-      const result = MainTabs.unquote(await this.controller.runJavaScript(profileBootstrapScript(false)));
-      if (result !== 'armed') { return ''; }
-      await new Promise<void>((resolve) => { setTimeout(resolve, BOOTSTRAP_SETTLE_MS); });
-      const handle = MainTabs.unquote(await this.controller.runJavaScript('window.__otBoot||""'));
-      return /^[A-Za-z0-9_]{1,15}$/.test(handle) ? handle : '';
-    } finally {
-      this.discovering = false;
-    }
+    const result = MainTabs.unquote(await this.controller.runJavaScript(profileBootstrapScript(false)));
+    if (result !== 'armed') { return ''; }
+    await new Promise<void>((resolve) => { setTimeout(resolve, BOOTSTRAP_SETTLE_MS); });
+    const handle = MainTabs.unquote(await this.controller.runJavaScript('window.__otBoot||""'));
+    return /^[A-Za-z0-9_]{1,15}$/.test(handle) ? handle : '';
   }
 
   /** 当前账号确认后才读取其草稿，旧草稿需要用户确认归属。 */
   private async openCompose(): Promise<void> {
     if (this.openingCompose || this.sheetOpen) { return; }
     this.openingCompose = true;
+    this.composePreparing = true;
+    this.composeOwner = '';
+    this.draft = '';
+    this.postUncertain = false;
+    this.composeMessage = '';
+    this.composeController = new web_webview.WebviewController();
+    this.composeUrl = TWITTER_COMPOSE;
+    this.composeLoading = true;
+    this.webComposer = false;
+    this.posting = false;
+    this.sheetOpen = true;
     try {
       const handle: string = await this.confirmCurrentAccount();
+      if (!this.sheetOpen) { return; }
       if (!/^[A-Za-z0-9_]{1,15}$/.test(handle)) {
-        this.toast($r('app.string.account_unconfirmed'));
+        this.composeMessage = $r('app.string.account_unconfirmed');
         return;
       }
-      this.composeOwner = handle.toLowerCase();
-      this.ownHandle = handle;
+      const owner: string = handle.toLowerCase();
       const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
       const prefs = await preferences.getPreferences(ctx, PREFS_NAME);
-      this.draft = await prefs.get(COMPOSE_DRAFT_KEY + ':' + this.composeOwner, '') as string;
-      this.postUncertain = await prefs.get('post_pending:' + this.composeOwner, false) as boolean;
+      const draft = await prefs.get(COMPOSE_DRAFT_KEY + ':' + owner, '') as string;
+      const uncertain = await prefs.get('post_pending:' + owner, false) as boolean;
+      if (!this.sheetOpen) { return; }
+      this.composeOwner = owner;
+      this.ownHandle = handle;
+      this.draft = draft;
+      this.postUncertain = uncertain;
       this.composeMessage = this.postUncertain ? $r('app.string.post_unknown') : '';
-      this.composeController = new web_webview.WebviewController();
-      this.webComposer = false;
-      this.posting = false;
-      this.sheetOpen = true;
       if (this.legacyDraft !== '' && this.draft === '') {
         this.getUIContext().showAlertDialog({
           title: $r('app.string.legacy_draft_title'),
@@ -1284,8 +1314,9 @@ struct MainTabs {
       }
     } catch (err) {
       hilog.error(DOMAIN, TAG, 'event=compose_open_failed error=%{public}s', JSON.stringify(err));
-      this.toast($r('app.string.draft_read_failed'));
+      this.composeMessage = $r('app.string.draft_read_failed');
     } finally {
+      this.composePreparing = false;
       this.openingCompose = false;
     }
   }
@@ -1413,7 +1444,8 @@ struct MainTabs {
 
   /** 先保存提交意图；未知结果不得自动重发或清空草稿。 */
   private async postFromSheet(): Promise<void> {
-    if (this.draft.trim() === '' || this.posting || this.postUncertain || this.webComposer) { return; }
+    if (this.draft.trim() === '' || this.posting || this.postUncertain || this.webComposer ||
+      this.composePreparing || this.composeLoading || this.composeOwner === '') { return; }
     this.posting = true;
     this.composeMessage = '';
     if (this.draftSaveTimer !== -1) { clearTimeout(this.draftSaveTimer); this.draftSaveTimer = -1; }
@@ -1524,23 +1556,47 @@ struct MainTabs {
 
   @Builder
   navTitleBar() {
-    Row({ space: 0 }) {
-      if (this.showBack()) {
-        this.backButton()
-      } else if (this.isHomeRoot()) {
+    if (this.isHomeRoot()) {
+      this.homeTitleBar()
+    } else {
+      Row({ space: 0 }) {
+        if (this.showBack()) {
+          this.backButton()
+        }
+        this.headerTitles()
+        this.headerAction()
+      }
+      .height(HEADER_HEIGHT)
+      .width('100%')
+      .alignItems(VerticalAlign.Center)
+      .padding({ left: this.showBack() ? S4 : S12, right: S4 })
+      .translate({ y: -HEADER_CONTENT_LIFT })
+    }
+  }
+
+  // The timeline switcher is centred on the screen so the camera sits between
+  // the two labels, rather than centred in the space left of the avatar. The
+  // avatar is anchored to the switcher's bottom edge, so the picture follows
+  // the underline at any font scale instead of drifting against it.
+  @Builder
+  homeTitleBar() {
+    RelativeContainer() {
+      this.homeTimelineTabs()
+
+      Row() {
         this.accountAvatar()
       }
-      if (this.isHomeRoot()) {
-        this.homeTimelineTabs()
-      } else {
-        this.headerTitles()
-      }
-      this.headerAction()
+      .width(TOUCH_TARGET)
+      .height(32)
+      .margin({ left: S12 })
+      .alignRules({
+        left: { anchor: '__container__', align: HorizontalAlign.Start },
+        bottom: { anchor: 'home_tabs', align: VerticalAlign.Bottom }
+      })
     }
-    .height(HEADER_HEIGHT)
     .width('100%')
-    .alignItems(VerticalAlign.Center)
-    .padding({ left: this.showBack() ? S4 : S12, right: S4 })
+    .height(HEADER_HEIGHT)
+    .translate({ y: -HEADER_CONTENT_LIFT })
   }
 
   // Back only exists where there is history to walk and the page is not one of
@@ -1601,8 +1657,10 @@ struct MainTabs {
       }
     }
     .width(TOUCH_TARGET)
-    .height(TOUCH_TARGET)
+    .height(32)
     .justifyContent(FlexAlign.Center)
+    // The picture is 32vp tall; the touch target stays 48vp.
+    .responseRegion({ x: 0, y: -S8, width: '100%', height: TOUCH_TARGET })
     // Pointer devices (2in1 / tablet with a mouse) get the hover the phone
     // never needed.
     .hoverEffect(HoverEffect.Highlight)
@@ -1656,14 +1714,18 @@ struct MainTabs {
   // each tap drives the page's real tab instead of faking a timeline switch.
   @Builder
   homeTimelineTabs() {
-    Row({ space: S4 }) {
+    Row({ space: S8 }) {
       this.homeTimelineTab($r('app.string.home_for_you'), 0)
       this.homeTimelineTab($r('app.string.home_following'), 1)
     }
-    .layoutWeight(1)
-    .height('100%')
+    .id('home_tabs')
     .justifyContent(FlexAlign.Center)
-    .alignItems(VerticalAlign.Center)
+    // RelativeContainer names the horizontal-centre rule "middle" and the
+    // vertical-centre rule "center".
+    .alignRules({
+      middle: { anchor: '__container__', align: HorizontalAlign.Center },
+      center: { anchor: '__container__', align: VerticalAlign.Center }
+    })
   }
 
   @Builder
@@ -1688,8 +1750,6 @@ struct MainTabs {
         .opacity(this.homeTabIndex === index ? 1 : 0)
         .animation({ duration: 240, curve: Curve.FastOutSlowIn })
     }
-    .height('100%')
-    .justifyContent(FlexAlign.Center)
     .padding({ left: S12, right: S12 })
     .hoverEffect(HoverEffect.Highlight)
     .accessibilityText(label)
@@ -1900,12 +1960,19 @@ struct MainTabs {
     }
   }
 
-  /** 复用真实回复动作，保留网页返回、附件和未发送内容处理。 */
+  /** 面板立即显示，网页回复上下文在面板内加载，不再等待详情页恢复原帖。 */
   private replyToPost(): void {
-    this.controller.runJavaScript(REPLY_TO_POST_SCRIPT).catch((error: Error) => {
-      hilog.error(DOMAIN, TAG, 'event=reply_open_failed error=%{public}s', error.message);
-      this.toast($r('app.string.operation_failed'));
-    });
+    if (this.openingCompose || this.sheetOpen) { return; }
+    const postId: string = this.currentPath.split('/')[3];
+    this.composeOwner = '';
+    this.composeController = new web_webview.WebviewController();
+    this.composeUrl = TWITTER_BASE + '/intent/tweet?in_reply_to=' + postId;
+    this.composeLoading = true;
+    this.composePreparing = false;
+    this.composeMessage = '';
+    this.webComposer = true;
+    this.posting = false;
+    this.sheetOpen = true;
   }
 
   @Builder
@@ -1954,14 +2021,15 @@ struct MainTabs {
   @Builder
   composeFab() {
     Button({ type: ButtonType.Circle }) {
-      SymbolGlyph($r('sys.symbol.square_and_pencil_fill'))
-        .fontSize(24)
-        .fontColor([$r('sys.color.ohos_id_color_foreground_contrary')])
+      SymbolGlyph($r('sys.symbol.square_and_pencil'))
+        .fontSize(22)
+        .fontColor([$r('sys.color.ohos_id_color_text_secondary')])
     }
-    .width(56)
-    .height(56)
-    .backgroundColor($r('sys.color.ohos_id_color_emphasize'))
-    .shadow({ radius: 12, color: '#33000000', offsetX: 0, offsetY: 4 })
+    .width(52)
+    .height(52)
+    .backgroundColor(Color.Transparent)
+    // 官方建议悬浮按钮使用超薄/薄材质；这里使用组件级 THIN。
+    .backgroundBlurStyle(BlurStyle.COMPONENT_THIN)
     .margin({ right: S16, bottom: S16 + (this.overlaysWeb() ? this.bottomChromeHeight() : 0) })
     .scale({ x: this.barsCollapsed ? 0.01 : 1, y: this.barsCollapsed ? 0.01 : 1 })
     .opacity(this.barsCollapsed ? 0 : 1)
@@ -2031,7 +2099,7 @@ struct MainTabs {
       .javaScriptProxy({
         object: this.bridge,
         name: 'otNative',
-        methodList: ['onUrlChange', 'onImages', 'onReplyUnavailable'],
+        methodList: ['onUrlChange', 'onImages'],
         controller: this.controller
       })
       .onControllerAttached(() => {
@@ -2077,6 +2145,8 @@ struct MainTabs {
       .mixedMode(MixedMode.Compatible)
       .cacheMode(CacheMode.Default)
       .overviewModeAccess(true)
+      // 禁止 ArkWeb 自身的下拉刷新/过滚动，避免整页被重新加载。
+      .overScrollMode(OverScrollMode.NEVER)
       .zoomAccess(true)
       .geolocationAccess(true)
       .mediaPlayGestureAccess(false)
@@ -2238,12 +2308,25 @@ struct MainTabs {
 
   @Builder
   composeSheet() {
+    Column({ space: 0 }) {
+      if (this.webComposer) {
+        Row() {
+          Button($r('app.string.compose_cancel'))
+            .buttonStyle(ButtonStyleMode.TEXTUAL)
+            .fontFamily(FONT_FAMILY)
+            .onClick(() => { this.closeCompose(); })
+          Blank()
+        }
+        .width('100%')
+        .padding({ left: S8, right: S8 })
+        .height(48)
+      }
     Stack({ alignContent: Alignment.TopStart }) {
       // x.com's own composer, kept invisible under the native panel. It exists
       // only so the native Post button submits through the real web session;
       // if it has to surface (media, polls, threads, or an undrivable editor)
       // it is revealed and the native panel steps aside.
-      Web({ src: TWITTER_COMPOSE, controller: this.composeController })
+      Web({ src: this.composeUrl, controller: this.composeController })
         .width('100%')
         .height('100%')
         .opacity(this.webComposer ? 1 : 0)
@@ -2257,9 +2340,12 @@ struct MainTabs {
           }
         })
         .onLoadIntercept((event) => this.interceptExternal(event))
+        .onPageBegin(() => { this.composeLoading = true; })
+        .onPageEnd(() => { this.composeLoading = false; })
         .onFullScreenEnter((event) => { this.enterFullScreen(event.handler); })
         .onFullScreenExit(() => { this.exitFullScreen(); })
         .onRenderExited(() => {
+          this.composeLoading = false;
           if (this.posting) { this.markPostUnknown(); }
           this.composeMessage = $r('app.string.editor_failed');
         })
@@ -2269,6 +2355,7 @@ struct MainTabs {
         .fileAccess(false)
         .mixedMode(MixedMode.Compatible)
         .cacheMode(CacheMode.Default)
+        .overScrollMode(OverScrollMode.NEVER)
         .zoomAccess(false)
         .darkMode(WebDarkMode.Auto)
         .onShowFileSelector((event) => {
@@ -2294,7 +2381,8 @@ struct MainTabs {
           Button($r('app.string.compose_post'))
             .buttonStyle(ButtonStyleMode.EMPHASIZED)
             .fontFamily(FONT_FAMILY)
-            .enabled(this.draft.trim() !== '' && !this.posting && !this.postUncertain)
+            .enabled(this.draft.trim() !== '' && !this.posting && !this.postUncertain &&
+              !this.composePreparing && !this.composeLoading && this.composeOwner !== '')
             .onClick(() => {
               this.postFromSheet();
             })
@@ -2322,6 +2410,7 @@ struct MainTabs {
           Button($r('app.string.compose_more'))
             .buttonStyle(ButtonStyleMode.TEXTUAL)
             .fontFamily(FONT_FAMILY)
+            .enabled(!this.composePreparing && !this.composeLoading && this.composeOwner !== '')
             .onClick(() => {
               this.openWebComposer();
             })
@@ -2333,6 +2422,9 @@ struct MainTabs {
         if (this.composeMessage !== '') {
           Text(this.composeMessage).fontSize(14).padding(S12)
         }
+        if (this.composePreparing || this.composeLoading) {
+          LoadingProgress().width(28).height(28).margin(S12)
+        }
         if (this.postUncertain) {
           Button($r('app.string.post_verify')).onClick(() => { this.resolveUnknownPost(); })
         }
@@ -2343,7 +2435,7 @@ struct MainTabs {
           .fontSize(18)
           .backgroundColor(Color.Transparent)
           .padding({ left: S16, right: S16, top: S12 })
-          .enabled(!this.posting && !this.postUncertain)
+          .enabled(!this.posting && !this.postUncertain && !this.composePreparing && this.composeOwner !== '')
           .onChange(() => {
             this.scheduleDraftSave();
           })
@@ -2357,6 +2449,12 @@ struct MainTabs {
       .height('100%')
       .backgroundColor($r('sys.color.ohos_id_color_background'))
       .visibility(this.webComposer ? Visibility.Hidden : Visibility.Visible)
+      if (this.webComposer && this.composeLoading) {
+        LoadingProgress().width(32).height(32).margin(S16)
+      }
+    }
+    .width('100%')
+    .layoutWeight(1)
     }
     .width('100%')
     .height('100%')
@@ -2400,55 +2498,71 @@ struct MainTabs {
 
   build() {
     HdsNavigation() {
-      Row() {
-        if (this.isWide && this.showsNativeNavigation() && !isPostDetailUrl(this.currentUrl)) { this.navBar() }
-        HdsTabs({ barPosition: BarPosition.End, controller: this.tabsController }) {
-          // 五个入口均路由到同一网页会话，内容节点常驻，避免页签切换重建 Web。
-          TabContent() {
-            Column() { this.webArea() }
-            .width('100%')
-            .height('100%')
-            // 网页自带标题时由视口避让状态栏；原生标题覆盖的列表仍从屏幕顶部绘制。
-            .padding({ top: this.fullScreen || (this.overlaysWeb() && this.topChromeHeight() > 0) ? 0 :
-              this.topInset + (this.overlaysWeb() ? 0 : this.topChromeHeight()),
-              bottom: this.overlaysWeb() ? 0 : this.bottomChromeHeight() })
-          }
-          .tabBar(this.bottomNavigation())
+      Stack() {
+        // 只负责把网页的滚动偏移喂给 HDS，本身不绘制也不接触摸。
+        Scroll(this.blurScroller) {
+          Column().height(HEADER_BLUR_DISTANCE * 2)
         }
-        .scrollable(false)
-        .barOverlap(true)
-        .barHeight(this.showsNativeNavigation() && (!this.isWide || isPostDetailUrl(this.currentUrl)) ? FLOATING_BAR_HEIGHT : 0)
-        .barFloatingStyle(this.showsNativeNavigation() && (!this.isWide || isPostDetailUrl(this.currentUrl)) && this.floatingBar ? {
-          barWidth: { smallWidth: '100%', mediumWidth: 380, largeWidth: 380 },
-          barSideMargin: 20,
-          // 手势区已提供与图库相同的底边距离，不再叠加额外悬浮间距。
-          barBottomMargin: this.bottomInset,
-          gradientMask: { maskColor: Color.Transparent, maskHeight: 1 },
-          systemMaterialEffect: {
-            materialType: this.immersiveMaterial ? hdsMaterial.MaterialType.IMMERSIVE : hdsMaterial.MaterialType.ADAPTIVE,
-            materialLevel: hdsMaterial.MaterialLevel.ADAPTIVE
+        .width(1)
+        .height(1)
+        .scrollBar(BarState.Off)
+        .edgeEffect(EdgeEffect.None)
+        .opacity(0)
+        .hitTestBehavior(HitTestMode.None)
+        .accessibilityLevel('no-hide-descendants')
+
+        Row() {
+          if (this.isWide && this.showsNativeNavigation() && !isPostDetailUrl(this.currentUrl)) { this.navBar() }
+          HdsTabs({ barPosition: BarPosition.End, controller: this.tabsController }) {
+            // 五个入口均路由到同一网页会话，内容节点常驻，避免页签切换重建 Web。
+            TabContent() {
+              Column() { this.webArea() }
+              .width('100%')
+              .height('100%')
+              // 网页自带标题时由视口避让状态栏；原生标题覆盖的列表仍从屏幕顶部绘制。
+              .padding({ top: this.fullScreen || (this.overlaysWeb() && this.topChromeHeight() > 0) ? 0 :
+                this.topInset + (this.overlaysWeb() ? 0 : this.topChromeHeight()),
+                bottom: this.overlaysWeb() ? 0 : this.bottomChromeHeight() })
+            }
+            .tabBar(this.bottomNavigation())
           }
-        } : undefined)
-        // 弹层绑定分属不同节点，避免外观面板的 bindSheet 覆盖图片查看器。
-        .bindContentCover($$this.imageViewerOpen, this.imageViewer(), {
-          modalTransition: ModalTransition.ALPHA,
-          backgroundColor: Color.Transparent,
-          onWillDismiss: (action: DismissContentCoverAction) => { action.dismiss(); this.imageViewerOpen = false; }
-        })
-        .layoutWeight(1)
-        // 忽略安全区时，matchParent 同时扩展尺寸；百分比高度只会移动位置。
+          .scrollable(false)
+          .barOverlap(true)
+          .barHeight(this.showsNativeNavigation() && (!this.isWide || isPostDetailUrl(this.currentUrl)) ? FLOATING_BAR_HEIGHT : 0)
+          .barFloatingStyle(this.showsNativeNavigation() && (!this.isWide || isPostDetailUrl(this.currentUrl)) && this.floatingBar ? {
+            barWidth: { smallWidth: '100%', mediumWidth: 380, largeWidth: 380 },
+            barSideMargin: 20,
+            // 手势区已提供与图库相同的底边距离，不再叠加额外悬浮间距。
+            barBottomMargin: this.bottomInset,
+            gradientMask: { maskColor: Color.Transparent, maskHeight: 1 },
+            systemMaterialEffect: {
+              materialType: this.immersiveMaterial ? hdsMaterial.MaterialType.IMMERSIVE : hdsMaterial.MaterialType.ADAPTIVE,
+              materialLevel: hdsMaterial.MaterialLevel.ADAPTIVE
+            }
+          } : undefined)
+          // 弹层绑定分属不同节点，避免外观面板的 bindSheet 覆盖图片查看器。
+          .bindContentCover($$this.imageViewerOpen, this.imageViewer(), {
+            modalTransition: ModalTransition.ALPHA,
+            backgroundColor: Color.Transparent,
+            onWillDismiss: (action: DismissContentCoverAction) => { action.dismiss(); this.imageViewerOpen = false; }
+          })
+          .layoutWeight(1)
+          // 忽略安全区时，matchParent 同时扩展尺寸；百分比高度只会移动位置。
+          .height(LayoutPolicy.matchParent)
+          .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
+        }
+        .width('100%')
         .height(LayoutPolicy.matchParent)
         .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
+        .bindSheet($$this.appearanceOpen, this.appearanceSheet(), {
+          height: SheetSize.FIT_CONTENT,
+          width: this.isWide ? 480 : '100%',
+          dragBar: true,
+          showClose: true
+        })
       }
       .width('100%')
       .height(LayoutPolicy.matchParent)
-      .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
-      .bindSheet($$this.appearanceOpen, this.appearanceSheet(), {
-        height: SheetSize.FIT_CONTENT,
-        width: this.isWide ? 480 : '100%',
-        dragBar: true,
-        showClose: true
-      })
     }
     .width('100%')
     .height(LayoutPolicy.matchParent)
@@ -2456,9 +2570,28 @@ struct MainTabs {
       enableComponentSafeArea: true,
       content: { stackBuilder: () => { this.navTitleBar(); } },
       style: {
-        // Web 不提供 ArkUI Scroller，由实际网页滚动更新原始渐变模糊样式。
-        originalStyle: { backgroundStyle: { blurRadius: 16 + 16 * this.headerBlurRatio, maskExtraHeight: 24 } },
-        scrollEffectOpts: { enableScrollEffect: false, scrollEffectType: ScrollEffectType.IMMERSIVE_GRADIENT_BLUR },
+        // 顶部无模糊无底色，滚动后由 HDS 线性过渡到带材质底色的羽化模糊。
+        // GRADIENT_BLUR 是唯一支持 maskExtraHeight 的类型，蒙层会向标题栏
+        // 下方延伸，形成柔和的渐变边界。
+        originalStyle: {
+          backgroundStyle: {
+            backgroundColor: Color.Transparent,
+            blurRadius: 0,
+            maskExtraHeight: HEADER_BLUR_EXTRA_HEIGHT
+          }
+        },
+        scrollEffectStyle: {
+          backgroundStyle: {
+            blurRadius: 32,
+            maskExtraHeight: HEADER_BLUR_EXTRA_HEIGHT
+          }
+        },
+        scrollEffectOpts: {
+          enableScrollEffect: true,
+          scrollEffectType: ScrollEffectType.GRADIENT_BLUR,
+          blurEffectiveStartOffset: LengthMetrics.vp(0),
+          blurEffectiveEndOffset: LengthMetrics.vp(HEADER_BLUR_DISTANCE)
+        },
         blurStrategy: BlurStrategy.ENABLE,
         systemMaterialEffect: {
           materialType: this.immersiveMaterial ? hdsMaterial.MaterialType.IMMERSIVE : hdsMaterial.MaterialType.ADAPTIVE,
@@ -2466,6 +2599,7 @@ struct MainTabs {
         }
       }
     })
+    .bindToScrollable([this.blurScroller])
     .systemBarStyle({ statusBarContentColor: this.isMediaViewer() ? '#FFFFFF' : this.statusBarContentColor }, undefined)
     .titleMode(HdsNavigationTitleMode.MINI)
     .hideTitleBar(this.topChromeHeight() === 0)

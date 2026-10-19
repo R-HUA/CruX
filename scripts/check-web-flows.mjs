@@ -9,7 +9,7 @@ function load(name, exports) {
   const js = stripTypeScriptTypes(source).replace(/^export /gm, '');
   return vm.runInNewContext(js + ';({' + exports.join(',') + '})');
 }
-const routes = load('WebConfig', ['routeIndexForUrl', 'profileHandleForUrl','usesNativeNavigation','usesNativeHeader','isTabRootPath']);
+const routes = load('WebConfig', ['routeIndexForUrl', 'profileHandleForUrl','usesNativeNavigation','usesNativeHeader','isTabRootPath','isPostDetailUrl']);
 for (const [path, expected] of [['/home',0],['/search?q=a',1],['/notifications',2],['/messages/42',3],['/i/chat',3],['/someone',4],['/i/flow/login',-1],['/settings',-1],['/someone/status/123',-1]]) {
   assert.equal(routes.routeIndexForUrl('https://x.com' + path), expected, path);
 }
@@ -28,18 +28,45 @@ for(const path of ['/explore','/search?q=中文','/i/flow/login','/alice']){
   assert.equal(routes.usesNativeHeader('https://x.com'+path),false,path);
 }
 assert.equal(routes.usesNativeHeader('https://x.com/home'),true);
-const scripts = load('WebChrome', ['fillComposerScript','CLICK_POST_BUTTON_SCRIPT','POST_RESULT_SCRIPT','chromeScript','chromeFlagScript','OWN_HANDLE_SCRIPT','profileBootstrapScript','clickRouteScript']);
+assert.equal(routes.usesNativeHeader('https://x.com/alice/status/123'),true);
+assert.equal(routes.isPostDetailUrl('https://x.com/alice/status/123?ref=home'),true);
+for (const url of ['https://x.com/alice/status/123/photo/1','https://x.com/alice/status/123/mediaViewer','https://example.com/alice/status/123']) {
+  assert.equal(routes.isPostDetailUrl(url),false,url);
+}
+const scripts = load('WebChrome', ['fillComposerScript','CLICK_POST_BUTTON_SCRIPT','POST_RESULT_SCRIPT','chromeScript','chromeFlagScript','chromeInsetsScript','OWN_HANDLE_SCRIPT','profileBootstrapScript','clickRouteScript']);
+// 回复直接使用当前详情的帖子编号，原帖是否被虚拟列表回收不影响面板显示。
+const mainSource=readFileSync(new URL('../entry/src/main/ets/pages/MainTabs.ets',import.meta.url),'utf8');
+const replyMethod=mainSource.match(/private replyToPost\(\): void \{([\s\S]*?)\n  \}/)[1];
+const reply=vm.runInNewContext(stripTypeScriptTypes('(function(){'+replyMethod+'})'),{
+  TWITTER_BASE:'https://x.com',web_webview:{WebviewController:class{}}
+});
+const replyState={openingCompose:false,sheetOpen:false,currentPath:'/alice/status/123',composeOwner:'alice'};
+reply.call(replyState);
+assert.equal(replyState.sheetOpen,true);
+assert.equal(replyState.composeUrl,'https://x.com/intent/tweet?in_reply_to=123');
+assert.equal(replyState.webComposer,true);assert.equal(replyState.composeLoading,true);
+assert.equal(replyState.composeOwner,'');
+const replyController=replyState.composeController;
+reply.call(replyState);assert.equal(replyState.composeController,replyController);
 // 测试真实注入串，避免只测试一份复制的实现。
 for (const value of ['中文\n第二段😀 https://x.com', '  两侧空格  ', 'a\r\nb']) {
   let text = '';
   const editor = { focus(){}, get innerText(){ return text; }, get textContent(){ return text; } };
-  const context = {document:{querySelector:()=>editor,execCommand:(_command,_ui,value)=>{text=value;return true;}}};
+  const wrapper={textContent:'外层容器'};
+  const context = {document:{querySelector:selector=>selector==='[data-testid="tweetTextarea_0"][contenteditable="true"]'?editor:wrapper,
+    execCommand:(_command,_ui,value)=>{text=value;return true;}}};
   assert.equal(vm.runInNewContext(scripts.fillComposerScript(value),context),'ok');
+  assert.equal(wrapper.textContent,'外层容器');
 }
 assert.equal(vm.runInNewContext(scripts.fillComposerScript('12345678完整正文'),{
   document:{querySelector:()=>({focus(){},innerText:'12345678截断'}),execCommand:()=>true}
 }),'mismatch');
 assert.equal(vm.runInNewContext(scripts.fillComposerScript('内容'),{document:{querySelector:()=>null}}),'missing');
+const failedEditor={focus(){},textContent:'原正文'};
+assert.equal(vm.runInNewContext(scripts.fillComposerScript('内容'),{
+  document:{querySelector:()=>failedEditor,execCommand:()=>false}
+}),'error');
+assert.equal(failedEditor.textContent,'原正文');
 new vm.Script(scripts.chromeScript(true,true,'https://x.com/home'));
 // 当前移动网页资料入口是无 href 的按钮，原生导航不能依赖它返回账号名。
 let profileClicks=0;
@@ -115,6 +142,25 @@ authVisible=true;chromeContext.window.__otApplyTop();assert.equal(cssText,'');
 authVisible=false;location.pathname='/alice/status/123/photo/1';
 chromeContext.window.__otApplyTop();assert.equal(cssText,safeAreaCss);
 location.pathname='/unknown/path';chromeContext.window.__otApplyTop();assert.equal(cssText,safeAreaCss);
+
+// 使用真实注入代码验证视口缩放、重复同步、私信释放以及登录/路由切换时的留白归属。
+const insets=new Map();
+chromeContext.document.documentElement.style={setProperty:(key,value)=>insets.set(key,value)};
+chromeContext.window.innerWidth=980;
+location.pathname='/home';location.href='https://x.com/home';
+vm.runInNewContext(scripts.chromeScript(true,true,location.href),chromeContext);
+vm.runInNewContext(scripts.chromeInsetsScript(48,70,400),chromeContext);
+assert.ok(Math.abs(parseFloat(insets.get('--ot-top-inset'))-117.6)<0.001);
+assert.equal(parseFloat(insets.get('--ot-bottom-inset')),171.5);
+assert.match(cssText,/main\[role="main"\]/);
+chromeContext.window.innerWidth=400;chromeContext.window.__otUpdateInsets();
+assert.equal(insets.get('--ot-top-inset'),'48px');
+vm.runInNewContext(scripts.chromeInsetsScript(0,0,400),chromeContext);
+assert.doesNotMatch(cssText,/main\[role="main"\]/);
+vm.runInNewContext(scripts.chromeInsetsScript(48,70,400),chromeContext);
+authVisible=true;chromeContext.window.__otApplyTop();assert.equal(cssText,'');
+authVisible=false;location.pathname='/unknown/path';location.href='https://x.com/unknown/path';
+chromeContext.history.pushState();assert.doesNotMatch(cssText,/--ot-top-inset|--ot-bottom-inset/);
 
 function posting({ disabled=false, missing=false, throws=false }={}) {
   let clicks=0; let observe; let timeout; let toasts=[];
