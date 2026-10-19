@@ -1,5 +1,14 @@
 {
   "string": [
+    {"name":"media_close","value":"关闭"},
+    {"name":"media_loading","value":"正在加载图片…"},
+    {"name":"media_failed","value":"图片加载失败"},
+    {"name":"media_original_size","value":"原始尺寸"},
+    {"name":"media_available_size","value":"可用尺寸"},
+    {"name":"media_share","value":"分享"},
+    {"name":"media_copy","value":"复制链接"},
+    {"name":"media_saved","value":"已保存到相册"},
+    {"name":"media_copied","value":"已复制链接"},
     {
       "name": "tab_home",
       "value": "首页"

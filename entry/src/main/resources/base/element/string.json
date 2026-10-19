@@ -1,5 +1,14 @@
 {
   "string": [
+    {"name":"media_close","value":"Close"},
+    {"name":"media_loading","value":"Loading image…"},
+    {"name":"media_failed","value":"Image could not be loaded"},
+    {"name":"media_original_size","value":"Original dimensions"},
+    {"name":"media_available_size","value":"Available dimensions"},
+    {"name":"media_share","value":"Share"},
+    {"name":"media_copy","value":"Copy link"},
+    {"name":"media_saved","value":"Saved to Photos"},
+    {"name":"media_copied","value":"Link copied"},
     {
       "name": "tab_home",
       "value": "Home"
