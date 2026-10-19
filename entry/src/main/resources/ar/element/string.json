@@ -1,5 +1,8 @@
 {
   "string": [
+    {"name":"appearance_title","value":"المظهر"},
+    {"name":"appearance_floating","value":"شريط تنقل عائم"},
+    {"name":"appearance_auto_hide","value":"إخفاء التنقل أثناء التمرير"},
     {"name":"media_close","value":"إغلاق"},
     {"name":"media_loading","value":"جارٍ تحميل الصورة…"},
     {"name":"media_failed","value":"تعذّر تحميل الصورة"},
@@ -160,6 +163,10 @@
     {
       "name": "post",
       "value": "منشور"
+    },
+    {
+      "name": "reply_prompt",
+      "value": "انشر ردك"
     },
     {
       "name": "file_select_failed",

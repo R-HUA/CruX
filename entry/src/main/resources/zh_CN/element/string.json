@@ -1,5 +1,8 @@
 {
   "string": [
+    {"name":"appearance_title","value":"外观"},
+    {"name":"appearance_floating","value":"悬浮导航栏"},
+    {"name":"appearance_auto_hide","value":"浏览时收起导航栏"},
     {"name":"media_close","value":"关闭"},
     {"name":"media_loading","value":"正在加载图片…"},
     {"name":"media_failed","value":"图片加载失败"},
@@ -160,6 +163,10 @@
     {
       "name": "post",
       "value": "帖子"
+    },
+    {
+      "name": "reply_prompt",
+      "value": "发布你的回复"
     },
     {
       "name": "account_unconfirmed",

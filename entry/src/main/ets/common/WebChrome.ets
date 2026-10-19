@@ -16,6 +16,8 @@ const FONT_CSS: string =
 
 const CHROME_CSS: string =
   "nav[aria-label='Primary']{display:none!important}" +
+  // 导航子项隐藏后，外壳仍有手势区 padding 和边框，必须一并移除。
+  "[data-testid='BottomBar']:has(nav[aria-label='Primary']){display:none!important}" +
   "[data-testid='FloatingActionButtons_Tweet_Button']{display:none!important}" +
   // Wide layouts: x.com renders its desktop side navigation, whose account
   // button sits in the corner the shell's own rail occupies.
@@ -34,6 +36,29 @@ const WEB_SAFE_AREA_CSS: string =
   "[data-testid^='immersive-tweet-ui-content-container-']{bottom:0!important;" +
   "padding-bottom:env(safe-area-inset-bottom)!important}" +
   "[data-testid^='immersive-tweet-ui-content-container-']>:last-child{margin-bottom:4px!important}";
+
+// 留白属于滚动内容，滑动后网页才能经过原生栏背面；登录和未知路由不应用。
+const OVERLAY_CSS: string =
+  'main[role="main"]{padding-top:var(--ot-top-inset,0px)!important;' +
+  'padding-bottom:var(--ot-bottom-inset,0px)!important;}' +
+  // 在不随下拉位移的列表容器裁剪，箭头随网页原有 transform 拉入后仍可见。
+  'main[role="main"] div:has(>div>div>svg[aria-label="Pull to refresh"]){overflow:clip!important;}' +
+  'html{scroll-padding-top:var(--ot-top-inset,0px);scroll-padding-bottom:var(--ot-bottom-inset,0px);}';
+
+/** 根据 Web 实际视口换算 CSS 像素，避免桌面站点缩放后留白不足。 */
+export function chromeInsetsScript(top: number, bottom: number, viewportWidth: number): string {
+  return `(function(){
+    window.__otInsetTop=${top};window.__otInsetBottom=${bottom};window.__otViewportWidth=${viewportWidth};
+    window.__otUpdateInsets=function(){
+      var scale=window.__otViewportWidth>0?window.innerWidth/window.__otViewportWidth:1;
+      document.documentElement.style.setProperty('--ot-top-inset',(window.__otInsetTop*scale)+'px');
+      document.documentElement.style.setProperty('--ot-bottom-inset',(window.__otInsetBottom*scale)+'px');
+    };
+    window.__otUpdateInsets();
+    if(window.__otApplyTop)window.__otApplyTop();
+    if(!window.__otInsetResize){window.__otInsetResize=true;window.addEventListener('resize',function(){window.__otUpdateInsets();});}
+  })();`;
+}
 
 // 仅从明确的本人资料入口读取账号；读不到时不能推断用户已退出登录。
 export const OWN_HANDLE_SCRIPT: string = `(function(){
@@ -78,6 +103,7 @@ export function chromeScript(nativeNavigation: boolean, nativeHeader: boolean, u
     'var auth=document.querySelector(\'input[autocomplete="username"],input[autocomplete="current-password"],input[autocomplete="one-time-code"]\');' +
     'var rules=auth?"":' + JSON.stringify(WEB_SAFE_AREA_CSS) + ';' +
     'if(window.__otNativeNavigation&&!auth&&window.__otChromeUrl===String(location.href)){rules+=' + JSON.stringify(CHROME_CSS) + ';' +
+    'if(window.__otInsetTop>0||window.__otInsetBottom>0)rules+=' + JSON.stringify(OVERLAY_CSS) + ';' +
     'if(window.__otNativeHeader){rules+=' + JSON.stringify(HEADER_CSS) + ';' +
     'if(p==="/home")rules+=' + JSON.stringify(HOME_TABS_CSS) + ';}}' +
     'if(css.textContent!==rules)css.textContent=rules;' +
@@ -123,6 +149,39 @@ export function chromeFlagScript(nativeNavigation: boolean, nativeHeader: boolea
 export function scrollToTopScript(): string {
   return 'window.scrollTo({top:0,behavior:"smooth"});';
 }
+
+/** 保留网页回复上下文；评论区回收原帖后，等待其恢复再点击，不能回复可见的第一条评论。 */
+export const REPLY_TO_POST_SCRIPT: string = `(function(){
+  if(window.__otReplyPending)return;
+  var path=location.pathname.toLowerCase(),y=window.scrollY,observer,timer;
+  window.__otReplyPending=true;
+  function finish(){
+    if(observer)observer.disconnect();clearTimeout(timer);window.__otReplyPending=false;
+  }
+  function open(){
+    if(location.pathname.toLowerCase()!==path){finish();return true;}
+    var posts=document.querySelectorAll('article[data-testid="tweet"]');
+    for(var i=0;i<posts.length;i++){
+      var time=posts[i].querySelector('time');
+      var link=time&&time.closest('a[href]');
+      if(!link||new URL(link.href,location.href).pathname.toLowerCase()!==path)continue;
+      var reply=posts[i].querySelector('[data-testid="reply"]');
+      finish();window.scrollTo(0,y);
+      if(!reply||reply.disabled||reply.getAttribute('aria-disabled')==='true')window.otNative.onReplyUnavailable();
+      else reply.click();
+      return true;
+    }
+    return false;
+  }
+  if(open())return;
+  observer=new MutationObserver(open);
+  observer.observe(document.documentElement,{childList:true,subtree:true});
+  timer=setTimeout(function(){
+    finish();
+    if(location.pathname.toLowerCase()===path){window.scrollTo(0,y);window.otNative.onReplyUnavailable();}
+  },3000);
+  window.scrollTo(0,0);
+})();`;
 
 /** 复用网页现有链接的路由事件，避免原生标签每次重载整个文档。 */
 export function clickRouteScript(url: string): string {
