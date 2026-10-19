@@ -1,5 +1,7 @@
 import web_webview from '@ohos.web.webview';
 import mediaquery from '@ohos.mediaquery';
+import { MediaAddress, resolveMedia, MEDIA_CLICK_SCRIPT } from '../common/WebMedia';
+import { NativeImageViewer } from './NativeImageViewer';
 import { preferences } from '@kit.ArkData';
 import { isSiteUrl, isAuthUrl, mediaAcceptTypes, chooseMedia, installDownloads } from '../common/WebSystem';
 import { abilityAccessCtrl, common, PermissionRequestResult, Permissions } from '@kit.AbilityKit';
@@ -64,6 +66,11 @@ const DRAFT_SAVE_DEBOUNCE_MS: number = 700;
 // its navigations never fire the Web component's load callbacks; the injected
 // history hook calls this instead.
 class PageBridge {
+  private imageHandler: (payload: string) => boolean = () => false;
+
+  setImageHandler(handler: (payload: string) => boolean): void { this.imageHandler = handler; }
+
+  onImages(payload: string): boolean { return this.imageHandler(payload); }
   private handler: (url: string) => void = (url: string) => {
   };
 
@@ -78,9 +85,17 @@ class PageBridge {
 // How long the account menu needs before it has rendered its links.
 const BOOTSTRAP_SETTLE_MS: number = 1800;
 
+interface ImagePayload {
+  urls: string[];
+  index: number;
+}
+
 @Entry
 @Component
 struct MainTabs {
+  @State imageViewerOpen: boolean = false;
+  private imageItems: MediaAddress[] = [];
+  private imageIndex: number = 0;
   @State currentIndex: number = 0;
   @State progress: number = 0;
   @State hasError: boolean = false;
@@ -150,6 +165,7 @@ struct MainTabs {
   private badgeShown: number = -1;
 
   async aboutToAppear(): Promise<void> {
+    this.bridge.setImageHandler((payload: string) => this.openImages(payload));
     this.bridge.setHandler((url: string) => {
       this.saveWebSession();
       if (this.rawWeb) { return; }
@@ -286,6 +302,7 @@ struct MainTabs {
   // Home tab, and only then let the system close the app (HarmonyOS UX
   // requirement — back must not drop the user out of a page they can leave).
   onBackPress(): boolean {
+    if (this.imageViewerOpen) { this.imageViewerOpen = false; return true; }
     if (this.fullScreenHandler !== undefined) { this.fullScreenHandler.exitFullScreen(); return true; }
     if (this.sheetOpen) {
       this.closeCompose();
@@ -1782,7 +1799,7 @@ struct MainTabs {
       .javaScriptProxy({
         object: this.bridge,
         name: 'otNative',
-        methodList: ['onUrlChange'],
+        methodList: ['onUrlChange', 'onImages'],
         controller: this.controller
       })
       .onControllerAttached(() => {
@@ -1808,6 +1825,17 @@ struct MainTabs {
       .onLoadIntercept((event) => this.interceptExternal(event))
       .onFullScreenEnter((event) => { this.enterFullScreen(event.handler); })
       .onFullScreenExit(() => { this.exitFullScreen(); })
+      .onContextMenuShow((event) => {
+        if (!event || this.rawWeb || !event.param.existsImageContents() || !isSiteUrl(this.controller.getUrl())) { return false; }
+        const media = resolveMedia(event.param.getSourceUrl());
+        if (!media || this.imageViewerOpen) { return false; }
+        this.imageItems = [media];
+        this.imageIndex = 0;
+        this.tick();
+        this.imageViewerOpen = true;
+        event.result.closeContextMenu();
+        return true;
+      })
       .javaScriptAccess(true)
       .domStorageAccess(true)
       // x.com's chat client keeps its session state in browser storage; ArkWeb
@@ -1831,6 +1859,12 @@ struct MainTabs {
         this.hasError = false;
       })
       .onPageEnd((event) => {
+        if (!this.rawWeb && event && isSiteUrl(event.url)) {
+          this.controller.runJavaScript(MEDIA_CLICK_SCRIPT).catch((error: Error) => {
+            hilog.error(DOMAIN, TAG, 'event=image_bridge_failed error=%{public}s', error.message);
+            this.toast($r('app.string.operation_failed'));
+          });
+        }
         this.saveWebSession();
         this.progress = 100;
         this.refreshing = false;
@@ -2093,6 +2127,37 @@ struct MainTabs {
     .onKeyEvent((event: KeyEvent) => this.composeKey(event))
   }
 
+  /** 桥接数据属于网页输入，完整校验通过后才接管当前点击。 */
+  private openImages(payload: string): boolean {
+    if (this.rawWeb || this.imageViewerOpen || this.sheetOpen || this.fullScreen || !isSiteUrl(this.controller.getUrl())) { return false; }
+    try {
+      const data = JSON.parse(payload) as ImagePayload;
+      if (!Array.isArray(data.urls) || data.urls.length < 1 || data.urls.length > 4 ||
+        !Number.isInteger(data.index) || data.index < 0 || data.index >= data.urls.length) { return false; }
+      const items: MediaAddress[] = [];
+      for (const url of data.urls) {
+        if (typeof url !== 'string') { return false; }
+        const item = resolveMedia(url);
+        if (!item || items.some((existing: MediaAddress) => existing.id === item.id)) { return false; }
+        items.push(item);
+      }
+      this.imageItems = items;
+      this.imageIndex = data.index;
+      this.tick();
+      this.imageViewerOpen = true;
+      return true;
+    } catch (error) {
+      hilog.warn(DOMAIN, TAG, 'event=image_payload_rejected error=%{public}s', JSON.stringify(error));
+      return false;
+    }
+  }
+
+  @Builder
+  imageViewer() {
+    NativeImageViewer({ items: this.imageItems, initialIndex: this.imageIndex,
+      onClose: () => { this.imageViewerOpen = false; } })
+  }
+
   build() {
     Navigation() {
       // navBar() is declared first so ColumnReverse puts it at the bottom and
@@ -2105,6 +2170,11 @@ struct MainTabs {
       }
       .width('100%')
       .height('100%')
+      .bindContentCover($$this.imageViewerOpen, this.imageViewer(), {
+        modalTransition: ModalTransition.ALPHA,
+        backgroundColor: Color.Transparent,
+        onWillDismiss: (action: DismissContentCoverAction) => { action.dismiss(); this.imageViewerOpen = false; }
+      })
     }
     .width('100%')
     .height('100%')

@@ -1,5 +1,14 @@
 {
   "string": [
+    {"name":"media_close","value":"إغلاق"},
+    {"name":"media_loading","value":"جارٍ تحميل الصورة…"},
+    {"name":"media_failed","value":"تعذّر تحميل الصورة"},
+    {"name":"media_original_size","value":"الأبعاد الأصلية"},
+    {"name":"media_available_size","value":"الأبعاد المتاحة"},
+    {"name":"media_share","value":"مشاركة"},
+    {"name":"media_copy","value":"نسخ الرابط"},
+    {"name":"media_saved","value":"تم الحفظ في الصور"},
+    {"name":"media_copied","value":"تم نسخ الرابط"},
     {
       "name": "tab_home",
       "value": "الرئيسية"
