@@ -125,6 +125,20 @@ export function chromeScript(nativeNavigation: boolean, nativeHeader: boolean, u
     'history.replaceState=function(){var r=otRep.apply(this,arguments);otTell();return r;};' +
     'window.addEventListener("popstate",function(){otTell();});' +
     'window.addEventListener("hashchange",function(){otTell();});}' +
+    // x.com 的下拉刷新只把内容平移回去，document 会残留约一个标题栏高度的
+    // scrollY，刷新后的首条内容因此停进原生标题栏。下拉手势结束后把这种
+    // 顶部残留滚回 0；只处理从顶部附近向下拉的手势，不干扰正常滚动。
+    'if(!window.__otPullFix&&document.addEventListener){window.__otPullFix=1;' +
+    'var otPullStart=0,otPullY=0,otPulled=false,otTouch=false,otPullTimers=[],otPullPath="";' +
+    'var otClearPullTimers=function(){for(var i=0;i<otPullTimers.length;i++){clearTimeout(otPullTimers[i]);}otPullTimers=[];};' +
+    'var otSettleTop=function(){if(otTouch||location.pathname!==otPullPath){return;}if(window.scrollY>0&&window.scrollY<200){window.scrollTo(0,0);}};' +
+    'document.addEventListener("touchstart",function(e){otTouch=true;otClearPullTimers();' +
+    'if(!e.touches||!e.touches.length){return;}otPullStart=window.scrollY;otPullY=e.touches[0].clientY;otPulled=false;otPullPath=location.pathname;},{passive:true,capture:true});' +
+    'document.addEventListener("touchmove",function(e){if(!e.touches||!e.touches.length){return;}' +
+    'if(otPullStart<=100&&e.touches[0].clientY-otPullY>24){otPulled=true;}},{passive:true,capture:true});' +
+    'document.addEventListener("touchend",function(){otTouch=false;if(!otPulled){return;}otPulled=false;' +
+    'otPullTimers=[setTimeout(otSettleTop,500),setTimeout(otSettleTop,1200),setTimeout(otSettleTop,2000)];},{passive:true,capture:true});' +
+    'document.addEventListener("touchcancel",function(){otTouch=false;otPulled=false;otClearPullTimers();},{passive:true,capture:true});}' +
     'if(!window.__otObs){window.__otPend=0;' +
     'window.__otPass=function(){window.__otPend=0;try{' +
     'window.__otApplyTop&&window.__otApplyTop();' +
@@ -149,39 +163,6 @@ export function chromeFlagScript(nativeNavigation: boolean, nativeHeader: boolea
 export function scrollToTopScript(): string {
   return 'window.scrollTo({top:0,behavior:"smooth"});';
 }
-
-/** 保留网页回复上下文；评论区回收原帖后，等待其恢复再点击，不能回复可见的第一条评论。 */
-export const REPLY_TO_POST_SCRIPT: string = `(function(){
-  if(window.__otReplyPending)return;
-  var path=location.pathname.toLowerCase(),y=window.scrollY,observer,timer;
-  window.__otReplyPending=true;
-  function finish(){
-    if(observer)observer.disconnect();clearTimeout(timer);window.__otReplyPending=false;
-  }
-  function open(){
-    if(location.pathname.toLowerCase()!==path){finish();return true;}
-    var posts=document.querySelectorAll('article[data-testid="tweet"]');
-    for(var i=0;i<posts.length;i++){
-      var time=posts[i].querySelector('time');
-      var link=time&&time.closest('a[href]');
-      if(!link||new URL(link.href,location.href).pathname.toLowerCase()!==path)continue;
-      var reply=posts[i].querySelector('[data-testid="reply"]');
-      finish();window.scrollTo(0,y);
-      if(!reply||reply.disabled||reply.getAttribute('aria-disabled')==='true')window.otNative.onReplyUnavailable();
-      else reply.click();
-      return true;
-    }
-    return false;
-  }
-  if(open())return;
-  observer=new MutationObserver(open);
-  observer.observe(document.documentElement,{childList:true,subtree:true});
-  timer=setTimeout(function(){
-    finish();
-    if(location.pathname.toLowerCase()===path){window.scrollTo(0,y);window.otNative.onReplyUnavailable();}
-  },3000);
-  window.scrollTo(0,0);
-})();`;
 
 /** 复用网页现有链接的路由事件，避免原生标签每次重载整个文档。 */
 export function clickRouteScript(url: string): string {
@@ -324,17 +305,14 @@ export const POST_RESULT_SCRIPT: string = 'window.__otPostState||"unknown"';
 // nothing the user typed is lost.
 export function fillComposerScript(text: string): string {
   return '(function(t){try{' +
-    'var e=document.querySelector(\'[data-testid^="tweetTextarea_0"]\')||' +
-    'document.querySelector(\'div[role="textbox"][contenteditable="true"]\')||' +
-    'document.querySelector(\'[contenteditable="true"]\');' +
+    'var e=document.querySelector(\'[data-testid="tweetTextarea_0"][contenteditable="true"]\');' +
     'if(!e)return \'missing\';' +
     'e.focus();' +
     'try{var s=window.getSelection();var r=document.createRange();' +
     'r.selectNodeContents(e);s.removeAllRanges();s.addRange(r);}catch(_){}' +
     'var ok=false;' +
     'try{ok=document.execCommand(\'insertText\',false,t);}catch(_){ok=false;}' +
-    'if(!ok){e.textContent=t;' +
-    'try{e.dispatchEvent(new InputEvent(\'input\',{bubbles:true,inputType:\'insertText\',data:t}));}catch(_){}}' +
+    'if(!ok)return \'error\';' +
     'var got=(e.innerText||e.textContent||\'\');' +
     'return got.replace(/\\r\\n?/g,"\\n")===t.replace(/\\r\\n?/g,"\\n")?\'ok\':\'mismatch\';' +
     '}catch(err){return \'error\';}})(' + JSON.stringify(text) + ');';
