@@ -8,7 +8,9 @@ import { abilityAccessCtrl, common, PermissionRequestResult, Permissions } from 
 import { BusinessError, deviceInfo } from '@kit.BasicServicesKit';
 import { notificationManager } from '@kit.NotificationKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
-import { SymbolGlyphModifier, window } from '@kit.ArkUI';
+import { ColorMetrics, SymbolGlyphModifier, window } from '@kit.ArkUI';
+import { HdsNavigation, HdsNavigationTitleMode, HdsTabs, hdsMaterial,
+  HdsTabsController, HdsAnimationMode, ScrollEffectType, BlurStrategy } from '@kit.UIDesignKit';
 import { KeyCode } from '@kit.InputKit';
 import { vibrator } from '@kit.SensorServiceKit';
 import {
@@ -20,10 +22,10 @@ import {
   TWITTER_DM_COMPOSE, TWITTER_NOTIF_SETTINGS, TWITTER_EDIT_PROFILE,
   TWITTER_SETTINGS, TWITTER_BOOKMARKS,
   profileUrl, listsUrl, pathOf, routeIndexForUrl, profileHandleForUrl,
-  isTabRootPath, usesNativeNavigation, usesNativeHeader, userAgentFor
+  isTabRootPath, isPostDetailUrl, usesNativeNavigation, usesNativeHeader, userAgentFor
 } from '../common/WebConfig';
 import {
-  OWN_HANDLE_SCRIPT, chromeScript, chromeFlagScript, scrollToTopScript,
+  OWN_HANDLE_SCRIPT, chromeScript, chromeFlagScript, chromeInsetsScript, scrollToTopScript, REPLY_TO_POST_SCRIPT,
   CLICK_POST_BUTTON_SCRIPT, POST_RESULT_SCRIPT, profileBootstrapScript, clickRouteScript, fillComposerScript,
   HOME_TAB_SCRIPT, selectHomeTabScript, AVATAR_SCRIPT, UNREAD_COUNTS_SCRIPT
 } from '../common/WebChrome';
@@ -38,6 +40,10 @@ const PREFS_NAME: string = 'opentwit_web';
 const OWN_HANDLE_KEY: string = 'own_handle';
 const AVATAR_KEY: string = 'own_avatar';
 const DESKTOP_MODE_KEY: string = 'desktop_site';
+const FLOATING_BAR_KEY: string = 'floating_bar';
+const AUTO_HIDE_BAR_KEY: string = 'auto_hide_bar';
+const HEADER_HEIGHT: number = 56;
+const FLOATING_BAR_HEIGHT: number = 58;
 // The composer's text, kept in ArkData preferences so a draft survives the
 // sheet closing and the app being killed.
 const COMPOSE_DRAFT_KEY: string = 'compose_draft';
@@ -67,6 +73,11 @@ const DRAFT_SAVE_DEBOUNCE_MS: number = 700;
 // history hook calls this instead.
 class PageBridge {
   private imageHandler: (payload: string) => boolean = () => false;
+  private replyFailureHandler: () => void = () => {};
+
+  setReplyFailureHandler(handler: () => void): void { this.replyFailureHandler = handler; }
+
+  onReplyUnavailable(): void { this.replyFailureHandler(); }
 
   setImageHandler(handler: (payload: string) => boolean): void { this.imageHandler = handler; }
 
@@ -110,6 +121,24 @@ struct MainTabs {
   @State currentPath: string = '';
   @State currentUrl: string = '';
   @State isWide: boolean = false;
+  @State floatingBar: boolean = true;
+  @State autoHideBar: boolean = true;
+  @State appearanceOpen: boolean = false;
+  @State @Watch('onBarsCollapsedChanged') barsCollapsed: boolean = false;
+  @State immersiveMaterial: boolean = false;
+  @State bottomInset: number = 0;
+  @State topInset: number = 0;
+  private shellWindow: window.Window | undefined = undefined;
+  private avoidChanged: (area: window.AvoidAreaOptions) => void = () => this.updateShellInsets();
+  private tabsController: HdsTabsController = new HdsTabsController();
+  @State headerBlurRatio: number = 0;
+  @State statusBarContentColor: string = '#000000';
+  @State pressedIndex: number = -1;
+  @State webWidth: number = 0;
+  private lastScrollY: number = 0;
+  private scrollDistance: number = 0;
+  // 切页恢复也会滚动，收到实际拖动后才允许自动收起。
+  private webScrollFromTouch: boolean = false;
   @State firstLoadDone: boolean = false;
   @State sheetOpen: boolean = false;
   // Native composer state. "webComposer" is the escape hatch: when the page's
@@ -164,8 +193,26 @@ struct MainTabs {
   // actually changes.
   private badgeShown: number = -1;
 
+  onWillApplyTheme(theme: Theme): void {
+    const color = ColorMetrics.resourceColor(theme.colors.fontPrimary);
+    this.statusBarContentColor = '#' + ((color.red << 16) | (color.green << 8) | color.blue)
+      .toString(16).padStart(6, '0');
+  }
+
   async aboutToAppear(): Promise<void> {
+    this.immersiveMaterial = hdsMaterial.getSystemMaterialTypes().includes(hdsMaterial.MaterialType.IMMERSIVE);
+    hilog.info(DOMAIN, TAG, 'event=material_support immersive=%{public}s', String(this.immersiveMaterial));
+    const shellContext = this.getUIContext().getHostContext() as common.UIAbilityContext;
+    this.shellWindow = await window.getLastWindow(shellContext);
+    // 状态栏透出页面底色，文字颜色继续由导航组件管理。
+    await this.shellWindow.setWindowSystemBarProperties({ statusBarColor: '#00000000' });
+    this.shellWindow.on('avoidAreaChange', this.avoidChanged);
+    this.updateShellInsets();
     this.bridge.setImageHandler((payload: string) => this.openImages(payload));
+    this.bridge.setReplyFailureHandler(() => {
+      hilog.error(DOMAIN, TAG, 'event=reply_control_unavailable');
+      this.toast($r('app.string.operation_failed'));
+    });
     this.bridge.setHandler((url: string) => {
       this.saveWebSession();
       if (this.rawWeb) { return; }
@@ -183,6 +230,9 @@ struct MainTabs {
         const prefs: preferences.Preferences = await preferences.getPreferences(ctx, PREFS_NAME);
         this.legacyDraft = await prefs.get(COMPOSE_DRAFT_KEY, '') as string;
         this.notificationAsked = await prefs.get(NOTIFICATION_ASKED_KEY, false) as boolean;
+        this.floatingBar = await prefs.get(FLOATING_BAR_KEY, true) as boolean;
+        this.autoHideBar = await prefs.get(AUTO_HIDE_BAR_KEY, true) as boolean;
+        this.syncChromeInsets();
       }
     } catch (err) {
       hilog.warn(DOMAIN, TAG, 'preferences unavailable: %{public}s', JSON.stringify(err));
@@ -190,6 +240,7 @@ struct MainTabs {
   }
 
   aboutToDisappear(): void {
+    this.shellWindow?.off('avoidAreaChange', this.avoidChanged);
     this.stopPostCheck();
     if (this.firstLoadTimer !== -1) {
       clearTimeout(this.firstLoadTimer);
@@ -267,6 +318,8 @@ struct MainTabs {
       this.isWide = listener.matches;
       listener.on('change', (result: mediaquery.MediaQueryResult) => {
         this.isWide = result.matches;
+        this.resetChromeScroll();
+        this.syncChromeInsets();
       });
       this.wideListener = listener;
     } catch (err) {
@@ -303,6 +356,7 @@ struct MainTabs {
   // requirement — back must not drop the user out of a page they can leave).
   onBackPress(): boolean {
     if (this.imageViewerOpen) { this.imageViewerOpen = false; return true; }
+    if (this.appearanceOpen) { this.appearanceOpen = false; return true; }
     if (this.fullScreenHandler !== undefined) { this.fullScreenHandler.exitFullScreen(); return true; }
     if (this.sheetOpen) {
       this.closeCompose();
@@ -532,6 +586,7 @@ struct MainTabs {
   }
 
   private syncFromUrl(url: string): void {
+    if (url !== this.currentUrl) { this.resetChromeScroll(); }
     const idx: number = routeIndexForUrl(url);
     if (idx >= 0 && idx !== this.currentIndex) {
       this.currentIndex = idx;
@@ -656,6 +711,7 @@ struct MainTabs {
   // Second line of the header: a profile shows its handle, a post shows what
   // kind of page it is. Tab roots and everything else show nothing — no URLs.
   private subtitleMain(): string {
+    if (isPostDetailUrl(this.currentUrl)) { return ''; }
     if (this.viewingHandle !== '') {
       return '@' + this.profileHandle();
     }
@@ -690,11 +746,103 @@ struct MainTabs {
       usesNativeNavigation(this.currentUrl);
   }
 
+  /** 私信使用固定视口和底部输入框，保留原生栏占位而不覆盖网页。 */
+  private overlaysWeb(): boolean {
+    return this.showsNativeNavigation() && (isPostDetailUrl(this.currentUrl) || this.currentIndex !== 3);
+  }
+
+  private bottomChromeHeight(): number {
+    return !this.showsNativeNavigation() || (this.isWide && !isPostDetailUrl(this.currentUrl)) ? 0 :
+      (this.floatingBar ? FLOATING_BAR_HEIGHT : BAR_HEIGHT) + this.bottomInset;
+  }
+
+  private updateShellInsets(): void {
+    if (!this.shellWindow) { return; }
+    const area = this.shellWindow.getWindowAvoidArea(window.AvoidAreaType.TYPE_NAVIGATION_INDICATOR);
+    this.bottomInset = this.getUIContext().px2vp(area.bottomRect.height);
+    const systemArea = this.shellWindow.getWindowAvoidArea(window.AvoidAreaType.TYPE_SYSTEM);
+    this.topInset = this.getUIContext().px2vp(systemArea.topRect.height);
+    this.syncChromeInsets();
+  }
+
+  private onBarsCollapsedChanged(): void {
+    if (this.barsCollapsed) { this.tabsController.applyHideAnimation(HdsAnimationMode.SCROLL_ANIMATION); }
+    else { this.tabsController.applyShowAnimation(HdsAnimationMode.SCROLL_ANIMATION); }
+  }
+
+  private topChromeHeight(): number {
+    return this.showsNativeNavigation() && usesNativeHeader(this.currentUrl) ? HEADER_HEIGHT : 0;
+  }
+
+  /** 网页媒体查看器固定使用黑色画布，系统栏需随页面而非系统主题配色。 */
+  private isMediaViewer(): boolean {
+    return isSiteUrl(this.currentUrl) &&
+      /^\/[a-z0-9_]{1,15}\/status\/\d+\/(mediaviewer|(?:video|photo)\/[1-4])$/.test(this.currentPath);
+  }
+
+  private resetChromeScroll(): void {
+    this.lastScrollY = 0;
+    this.scrollDistance = 0;
+    this.webScrollFromTouch = false;
+    this.headerBlurRatio = 0;
+    this.barsCollapsed = false;
+  }
+
+  /** Web 滚动回调已经使用 vp，只累计同向位移以避免轻微抖动收起导航。 */
+  private handleWebScroll(yOffset: number): void {
+    const y: number = Math.max(0, yOffset);
+    const delta: number = y - this.lastScrollY;
+    this.lastScrollY = y;
+    this.headerBlurRatio = Math.min(1, y / 32);
+    if (!this.overlaysWeb() || isPostDetailUrl(this.currentUrl) || !this.autoHideBar || this.isWide || y < 48) {
+      this.barsCollapsed = false;
+      this.scrollDistance = 0;
+      return;
+    }
+    // 切页恢复位置和视口调整也会回调，实际拖动之前不触发底栏滚动动画。
+    if (!this.webScrollFromTouch) { return; }
+    if (Math.abs(delta) < 1.5) { return; }
+    if (delta * this.scrollDistance < 0) { this.scrollDistance = 0; }
+    this.scrollDistance += delta;
+    if (y > 80 && this.scrollDistance > 44) {
+      this.barsCollapsed = true;
+      this.scrollDistance = 0;
+    } else if (this.scrollDistance < -22) {
+      this.barsCollapsed = false;
+      this.scrollDistance = 0;
+    }
+  }
+
+  private syncChromeInsets(): void {
+    if (this.rawWeb || !isSiteUrl(this.currentUrl) || this.webWidth <= 0) { return; }
+    this.controller.runJavaScript(chromeInsetsScript(
+      this.overlaysWeb() && this.topChromeHeight() > 0 ? this.topInset + this.topChromeHeight() : 0,
+      this.overlaysWeb() ? this.bottomChromeHeight() : 0, this.webWidth
+    )).catch((error: Error) => {
+      hilog.error(DOMAIN, TAG, 'event=chrome_insets_failed error=%{public}s', error.message);
+      this.toast($r('app.string.operation_failed'));
+    });
+  }
+
+  private async setAppearance(key: string, value: boolean): Promise<void> {
+    try {
+      await this.putPreference(key, value);
+      if (key === FLOATING_BAR_KEY) { this.floatingBar = value; }
+      if (key === AUTO_HIDE_BAR_KEY) { this.autoHideBar = value; }
+      this.resetChromeScroll();
+      this.syncChromeInsets();
+    } catch (error) {
+      hilog.error(DOMAIN, TAG, 'event=appearance_save_failed error=%{public}s', JSON.stringify(error));
+      this.toast($r('app.string.operation_failed'));
+    }
+  }
+
   private applyPageChrome(url: string): void {
     if (this.rawWeb || !/^https:\/\/(www\.)?(x|twitter)\.com(\/|$)/.test(url)) { return; }
     const navigation: boolean = usesNativeNavigation(url);
     try {
       this.controller.runJavaScript(chromeScript(navigation, usesNativeHeader(url), url));
+      this.syncChromeInsets();
     } catch (err) {
     }
   }
@@ -704,6 +852,7 @@ struct MainTabs {
     try {
       const navigation: boolean = usesNativeNavigation(url);
       this.controller.runJavaScript(chromeFlagScript(navigation, usesNativeHeader(url), url));
+      this.syncChromeInsets();
     } catch (err) {
     }
   }
@@ -1388,7 +1537,8 @@ struct MainTabs {
       }
       this.headerAction()
     }
-    .height(48)
+    .height(HEADER_HEIGHT)
+    .width('100%')
     .alignItems(VerticalAlign.Center)
     .padding({ left: this.showBack() ? S4 : S12, right: S4 })
   }
@@ -1396,7 +1546,7 @@ struct MainTabs {
   // Back only exists where there is history to walk and the page is not one of
   // the five tab roots.
   private showBack(): boolean {
-    return this.canGoBack && !this.isTabRoot();
+    return isPostDetailUrl(this.currentUrl) || (this.canGoBack && !this.isTabRoot());
   }
 
   // A profile is a tab root too: /<handle> is what the Profile tab loads, so
@@ -1427,7 +1577,8 @@ struct MainTabs {
     .accessibilityText($r('app.string.back'))
     .accessibilityLevel('yes')
     .onClick(() => {
-      this.goBack();
+      if (isPostDetailUrl(this.currentUrl) && !this.canGoBack) { this.loadWeb(TWITTER_ROUTES[0]); }
+      else { this.goBack(); }
     })
   }
 
@@ -1464,6 +1615,9 @@ struct MainTabs {
   @Builder
   accountMenu() {
     Menu() {
+      MenuItem({ content: $r('app.string.appearance_title'),
+        symbolStartIcon: new SymbolGlyphModifier($r('sys.symbol.gearshape')) })
+        .onClick(() => { this.appearanceOpen = true; })
         MenuItem({
           content: $r('app.string.menu_view_profile'),
           symbolStartIcon: new SymbolGlyphModifier($r('sys.symbol.person_fill'))
@@ -1532,6 +1686,7 @@ struct MainTabs {
         .borderRadius(2)
         .backgroundColor($r('sys.color.ohos_id_color_emphasize'))
         .opacity(this.homeTabIndex === index ? 1 : 0)
+        .animation({ duration: 240, curve: Curve.FastOutSlowIn })
     }
     .height('100%')
     .justifyContent(FlexAlign.Center)
@@ -1569,6 +1724,7 @@ struct MainTabs {
   }
 
   private headerTitle(): string {
+    if (isPostDetailUrl(this.currentUrl)) { return this.localized($r('app.string.post')); }
     const title: string = this.titleMain();
     // "X" is x.com's own site name and what it titles unknown pages with, so it
     // is not a page name: fall back to the tab the user is on.
@@ -1674,14 +1830,25 @@ struct MainTabs {
     .justifyContent(FlexAlign.Center)
     .alignItems(HorizontalAlign.Center)
     .width(this.isWide ? RAIL_WIDTH : undefined)
-    .height(this.isWide ? TOUCH_TARGET + S16 : undefined)
+    .height(this.isWide ? TOUCH_TARGET + S16 : TOUCH_TARGET)
+    .borderRadius(24)
+    .backgroundColor(Color.Transparent)
+    .scale({ x: this.pressedIndex === index ? 0.92 : 1, y: this.pressedIndex === index ? 0.92 : 1 })
+    .animation({ duration: 150, curve: Curve.FastOutSlowIn })
     .layoutWeight(this.isWide ? 0 : 1)
     // Mouse hover, so the rail reads as a desktop navigation rail on 2in1.
     .hoverEffect(HoverEffect.Highlight)
     .accessibilityText(this.tabLabel(index))
     .accessibilityDescription(this.tabLabel(index))
+    .accessibilitySelected(this.currentIndex === index)
     .accessibilityLevel('yes')
+    .onTouch((event: TouchEvent) => {
+      if (event.type === TouchType.Down) { this.pressedIndex = index; }
+      if (event.type === TouchType.Up || event.type === TouchType.Cancel) { this.pressedIndex = -1; }
+    })
     .onClick(() => {
+      this.webScrollFromTouch = false;
+      this.barsCollapsed = false;
       this.goRoute(index);
     })
   }
@@ -1689,11 +1856,6 @@ struct MainTabs {
   @Builder
   navBar() {
     Column() {
-      if (!this.isWide) {
-        Divider()
-          .strokeWidth(0.5)
-          .color($r('sys.color.ohos_id_color_list_separator'))
-      }
       Flex({
         direction: this.isWide ? FlexDirection.Column : FlexDirection.Row,
         justifyContent: this.isWide ? FlexAlign.Center : FlexAlign.SpaceBetween,
@@ -1706,21 +1868,87 @@ struct MainTabs {
         this.navItem(4)
       }
       .width('100%')
-      .height(this.isWide ? '100%' : BAR_HEIGHT)
+      .height(this.isWide ? '100%' : (this.floatingBar ? FLOATING_BAR_HEIGHT : BAR_HEIGHT))
+      .padding({ left: this.isWide ? 0 : 6, right: this.isWide ? 0 : 6 })
     }
     .width(this.isWide ? RAIL_WIDTH : '100%')
-    .height(this.isWide ? '100%' : BAR_HEIGHT)
-    // Start (not Center) so the bar row keeps its position when the background
-    // is expanded into the bottom safe area below.
+    .constraintSize({ maxWidth: this.isWide ? RAIL_WIDTH : (this.floatingBar ? 380 : undefined) })
+    .height(this.isWide ? '100%' : (this.floatingBar ? FLOATING_BAR_HEIGHT : BAR_HEIGHT))
     .justifyContent(this.isWide ? FlexAlign.Center : FlexAlign.Start)
-    // One chrome surface for the whole shell: the tab bar and rail use the same
-    // background as the title bar and the page, so there is no grey-vs-white
-    // seam between the bar and the window area below it. The hairline divider
-    // above the row keeps the separation from the web content.
-    .backgroundColor($r('sys.color.ohos_id_color_background'))
-    // Paint that surface all the way to the screen edge on devices where the
-    // layout stops at the navigation-indicator safe area.
-    .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.BOTTOM])
+    .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
+    .borderRadius(!this.isWide && this.floatingBar ? 29 : 0)
+    .border({ width: 0.5, color: $r('sys.color.ohos_id_color_list_separator') })
+    .clip(true)
+    .shadow({ radius: !this.isWide && this.floatingBar ? 16 : 0, color: '#24000000', offsetY: 4 })
+  }
+
+  @Builder
+  bottomNavigation() {
+    if (isPostDetailUrl(this.currentUrl)) {
+      this.replyBar()
+    } else {
+      Row() {
+        this.navItem(0)
+        this.navItem(1)
+        this.navItem(2)
+        this.navItem(3)
+        this.navItem(4)
+      }
+        .width('100%')
+        .height('100%')
+        .padding({ left: 4, right: 4 })
+    }
+  }
+
+  /** 复用真实回复动作，保留网页返回、附件和未发送内容处理。 */
+  private replyToPost(): void {
+    this.controller.runJavaScript(REPLY_TO_POST_SCRIPT).catch((error: Error) => {
+      hilog.error(DOMAIN, TAG, 'event=reply_open_failed error=%{public}s', error.message);
+      this.toast($r('app.string.operation_failed'));
+    });
+  }
+
+  @Builder
+  replyBar() {
+    Row({ space: S12 }) {
+      if (this.avatarUrl !== '') {
+        Image(this.avatarUrl).width(32).height(32).borderRadius(16).objectFit(ImageFit.Cover)
+      } else {
+        SymbolGlyph($r('sys.symbol.person_crop_circle_fill')).fontSize(32)
+          .fontColor([$r('sys.color.ohos_id_color_text_secondary')])
+      }
+      Text($r('app.string.reply_prompt'))
+        .fontSize(16).fontFamily(FONT_FAMILY).layoutWeight(1)
+        .fontColor($r('sys.color.ohos_id_color_text_secondary'))
+      SymbolGlyph($r('sys.symbol.square_and_pencil')).fontSize(22)
+        .fontColor([$r('sys.color.ohos_id_color_emphasize')])
+    }
+    .id('post-reply').width('100%').height('100%')
+    .padding({ left: S12, right: S12 })
+    .accessibilityText($r('app.string.reply_prompt')).accessibilityLevel('yes')
+    .onClick(() => { this.replyToPost(); })
+  }
+
+  @Builder
+  appearanceSheet() {
+    Column({ space: S16 }) {
+      Text($r('app.string.appearance_title'))
+        .fontSize(20)
+        .fontWeight(FontWeight.Bold)
+        .fontColor($r('sys.color.ohos_id_color_text_primary'))
+      Row() {
+        Text($r('app.string.appearance_floating')).layoutWeight(1)
+        Toggle({ type: ToggleType.Switch, isOn: this.floatingBar })
+          .onChange((value: boolean) => { this.setAppearance(FLOATING_BAR_KEY, value); })
+      }.width('100%')
+      Row() {
+        Text($r('app.string.appearance_auto_hide')).layoutWeight(1)
+        Toggle({ type: ToggleType.Switch, isOn: this.autoHideBar })
+          .onChange((value: boolean) => { this.setAppearance(AUTO_HIDE_BAR_KEY, value); })
+      }.width('100%')
+    }
+    .width('100%')
+    .padding({ left: S16, right: S16, top: S16, bottom: 32 })
   }
 
   @Builder
@@ -1734,7 +1962,11 @@ struct MainTabs {
     .height(56)
     .backgroundColor($r('sys.color.ohos_id_color_emphasize'))
     .shadow({ radius: 12, color: '#33000000', offsetX: 0, offsetY: 4 })
-    .margin({ right: S16, bottom: S16 })
+    .margin({ right: S16, bottom: S16 + (this.overlaysWeb() ? this.bottomChromeHeight() : 0) })
+    .scale({ x: this.barsCollapsed ? 0.01 : 1, y: this.barsCollapsed ? 0.01 : 1 })
+    .opacity(this.barsCollapsed ? 0 : 1)
+    .animation({ duration: 240, curve: Curve.FastOutSlowIn })
+    .hitTestBehavior(this.barsCollapsed ? HitTestMode.None : HitTestMode.Default)
     .accessibilityText(this.currentIndex === 3
       ? $r('app.string.menu_new_message')
       : $r('app.string.compose_title'))
@@ -1790,7 +2022,7 @@ struct MainTabs {
 
   @Builder
   webView() {
-    Web({ src: TWITTER_ROUTES[0], controller: this.controller })
+    Web({ src: TWITTER_ROUTES[0], controller: this.controller, renderMode: RenderMode.ASYNC_RENDER })
       .width('100%')
       .height('100%')
       // 网页遮罩和背景延伸至手势区，交互元素由网页安全区样式避让。
@@ -1799,7 +2031,7 @@ struct MainTabs {
       .javaScriptProxy({
         object: this.bridge,
         name: 'otNative',
-        methodList: ['onUrlChange', 'onImages'],
+        methodList: ['onUrlChange', 'onImages', 'onReplyUnavailable'],
         controller: this.controller
       })
       .onControllerAttached(() => {
@@ -1850,6 +2082,14 @@ struct MainTabs {
       .mediaPlayGestureAccess(false)
       .darkMode(WebDarkMode.Auto)
       .textZoomRatio(100)
+      .onTouch((event: TouchEvent) => {
+        if (event.type === TouchType.Move) { this.webScrollFromTouch = true; }
+      })
+      .onScroll((event: OnScrollEvent) => { this.handleWebScroll(event.yOffset); })
+      .onAreaChange((_old: Area, area: Area) => {
+        this.webWidth = Number(area.width);
+        this.syncChromeInsets();
+      })
       .onProgressChange((event) => {
         if (event) {
           this.progress = event.newProgress;
@@ -1983,7 +2223,7 @@ struct MainTabs {
 
       // Native compose entry point, like the stock app: on the four content
       // tabs (never on Profile), and only once a page is on screen.
-      if (this.showsNativeNavigation() && this.currentIndex !== 4 && !this.hasError && this.firstLoadDone) {
+      if (this.showsNativeNavigation() && !isPostDetailUrl(this.currentUrl) && this.currentIndex !== 4 && !this.hasError && this.firstLoadDone) {
         this.composeFab()
       }
     }
@@ -2159,34 +2399,83 @@ struct MainTabs {
   }
 
   build() {
-    Navigation() {
-      // navBar() is declared first so ColumnReverse puts it at the bottom and
-      // Row puts it on the left — same children, no re-creation on breakpoints.
-      Flex({
-        direction: this.isWide ? FlexDirection.Row : FlexDirection.ColumnReverse
-      }) {
-        if (this.showsNativeNavigation()) { this.navBar() }
-        this.webArea()
+    HdsNavigation() {
+      Row() {
+        if (this.isWide && this.showsNativeNavigation() && !isPostDetailUrl(this.currentUrl)) { this.navBar() }
+        HdsTabs({ barPosition: BarPosition.End, controller: this.tabsController }) {
+          // 五个入口均路由到同一网页会话，内容节点常驻，避免页签切换重建 Web。
+          TabContent() {
+            Column() { this.webArea() }
+            .width('100%')
+            .height('100%')
+            // 网页自带标题时由视口避让状态栏；原生标题覆盖的列表仍从屏幕顶部绘制。
+            .padding({ top: this.fullScreen || (this.overlaysWeb() && this.topChromeHeight() > 0) ? 0 :
+              this.topInset + (this.overlaysWeb() ? 0 : this.topChromeHeight()),
+              bottom: this.overlaysWeb() ? 0 : this.bottomChromeHeight() })
+          }
+          .tabBar(this.bottomNavigation())
+        }
+        .scrollable(false)
+        .barOverlap(true)
+        .barHeight(this.showsNativeNavigation() && (!this.isWide || isPostDetailUrl(this.currentUrl)) ? FLOATING_BAR_HEIGHT : 0)
+        .barFloatingStyle(this.showsNativeNavigation() && (!this.isWide || isPostDetailUrl(this.currentUrl)) && this.floatingBar ? {
+          barWidth: { smallWidth: '100%', mediumWidth: 380, largeWidth: 380 },
+          barSideMargin: 20,
+          // 手势区已提供与图库相同的底边距离，不再叠加额外悬浮间距。
+          barBottomMargin: this.bottomInset,
+          gradientMask: { maskColor: Color.Transparent, maskHeight: 1 },
+          systemMaterialEffect: {
+            materialType: this.immersiveMaterial ? hdsMaterial.MaterialType.IMMERSIVE : hdsMaterial.MaterialType.ADAPTIVE,
+            materialLevel: hdsMaterial.MaterialLevel.ADAPTIVE
+          }
+        } : undefined)
+        // 弹层绑定分属不同节点，避免外观面板的 bindSheet 覆盖图片查看器。
+        .bindContentCover($$this.imageViewerOpen, this.imageViewer(), {
+          modalTransition: ModalTransition.ALPHA,
+          backgroundColor: Color.Transparent,
+          onWillDismiss: (action: DismissContentCoverAction) => { action.dismiss(); this.imageViewerOpen = false; }
+        })
+        .layoutWeight(1)
+        // 忽略安全区时，matchParent 同时扩展尺寸；百分比高度只会移动位置。
+        .height(LayoutPolicy.matchParent)
+        .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
       }
       .width('100%')
-      .height('100%')
-      .bindContentCover($$this.imageViewerOpen, this.imageViewer(), {
-        modalTransition: ModalTransition.ALPHA,
-        backgroundColor: Color.Transparent,
-        onWillDismiss: (action: DismissContentCoverAction) => { action.dismiss(); this.imageViewerOpen = false; }
+      .height(LayoutPolicy.matchParent)
+      .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
+      .bindSheet($$this.appearanceOpen, this.appearanceSheet(), {
+        height: SheetSize.FIT_CONTENT,
+        width: this.isWide ? 480 : '100%',
+        dragBar: true,
+        showClose: true
       })
     }
     .width('100%')
-    .height('100%')
-    .title(this.navTitleBar())
-    .titleMode(NavigationTitleMode.Mini)
-    .hideTitleBar(!this.showsNativeNavigation() || !usesNativeHeader(this.currentUrl))
+    .height(LayoutPolicy.matchParent)
+    .titleBar({
+      enableComponentSafeArea: true,
+      content: { stackBuilder: () => { this.navTitleBar(); } },
+      style: {
+        // Web 不提供 ArkUI Scroller，由实际网页滚动更新原始渐变模糊样式。
+        originalStyle: { backgroundStyle: { blurRadius: 16 + 16 * this.headerBlurRatio, maskExtraHeight: 24 } },
+        scrollEffectOpts: { enableScrollEffect: false, scrollEffectType: ScrollEffectType.IMMERSIVE_GRADIENT_BLUR },
+        blurStrategy: BlurStrategy.ENABLE,
+        systemMaterialEffect: {
+          materialType: this.immersiveMaterial ? hdsMaterial.MaterialType.IMMERSIVE : hdsMaterial.MaterialType.ADAPTIVE,
+          materialLevel: hdsMaterial.MaterialLevel.ADAPTIVE
+        }
+      }
+    })
+    .systemBarStyle({ statusBarContentColor: this.isMediaViewer() ? '#FFFFFF' : this.statusBarContentColor }, undefined)
+    .titleMode(HdsNavigationTitleMode.MINI)
+    .hideTitleBar(this.topChromeHeight() === 0)
+    .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
     // Navigation defaults to Split mode on wide windows, which would reserve a
     // left pane for the title bar and squeeze our own rail + WebView into it.
     // The shell owns the wide layout, so keep Navigation in Stack mode.
     .mode(NavigationMode.Stack)
     .hideBackButton(true)
-    .backgroundColor($r('sys.color.ohos_id_color_background'))
+    .backgroundColor(this.isMediaViewer() ? Color.Black : $r('sys.color.ohos_id_color_background'))
     .bindSheet($$this.sheetOpen, this.composeSheet(), {
       height: SheetSize.LARGE,
       width: this.isWide ? 640 : '100%',

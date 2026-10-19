@@ -191,14 +191,18 @@ export function isTabRootPath(path: string): boolean {
 export function usesNativeNavigation(url: string): boolean {
   const path: string = pathOf(url);
   return path !== '/' && path.indexOf('/settings') !== 0 &&
-    (routeIndexForUrl(url) >= 0 ||
-      (/^https:\/\/(www\.)?(x|twitter)\.com\//i.test(url) &&
-        /^\/[a-z0-9_]{1,15}\/status\/\d+\/?$/.test(path)));
+    (routeIndexForUrl(url) >= 0 || isPostDetailUrl(url));
+}
+
+/** 帖子详情使用返回栏和回复入口，不沿用来源标签页的菜单。 */
+export function isPostDetailUrl(url: string): boolean {
+  return /^https:\/\/(www\.)?(x|twitter)\.com\//i.test(url) &&
+    /^\/[a-z0-9_]{1,15}\/status\/\d+$/.test(pathOf(url));
 }
 
 /** 搜索框和候选项由网页一起管理，避免原生输入与网页搜索状态分离。 */
 export function usesNativeHeader(url: string): boolean {
   const path: string = pathOf(url);
-  return usesNativeNavigation(url) && isTabRootPath(path) &&
-    path !== '/explore' && path !== '/search';
+  return isPostDetailUrl(url) || (usesNativeNavigation(url) && isTabRootPath(path) &&
+    path !== '/explore' && path !== '/search');
 }

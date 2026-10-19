@@ -1,5 +1,8 @@
 {
   "string": [
+    {"name":"appearance_title","value":"Appearance"},
+    {"name":"appearance_floating","value":"Floating navigation bar"},
+    {"name":"appearance_auto_hide","value":"Hide navigation while scrolling"},
     {"name":"media_close","value":"Close"},
     {"name":"media_loading","value":"Loading image…"},
     {"name":"media_failed","value":"Image could not be loaded"},
@@ -160,6 +163,10 @@
     {
       "name": "post",
       "value": "Post"
+    },
+    {
+      "name": "reply_prompt",
+      "value": "Post your reply"
     },
     {
       "name": "account_unconfirmed",
