@@ -2,6 +2,8 @@ import web_webview from '@ohos.web.webview';
 import mediaquery from '@ohos.mediaquery';
 import { MediaAddress, resolveMedia, MEDIA_CLICK_SCRIPT } from '../common/WebMedia';
 import { NativeImageViewer } from './NativeImageViewer';
+import { NetworkSettingsSheet } from './NetworkSettingsSheet';
+import { NetworkConfig, NetworkSnapshot } from '../common/NetworkConfig';
 import { preferences } from '@kit.ArkData';
 import { isSiteUrl, isAuthUrl, mediaAcceptTypes, chooseMedia, installDownloads } from '../common/WebSystem';
 import { abilityAccessCtrl, common, PermissionRequestResult, Permissions } from '@kit.AbilityKit';
@@ -124,6 +126,8 @@ struct MainTabs {
   @State floatingBar: boolean = true;
   @State autoHideBar: boolean = true;
   @State appearanceOpen: boolean = false;
+  @State @Watch('onNetworkOpenChanged') networkOpen: boolean = false;
+  @State networkSecureOnly: boolean = false;
   @State @Watch('onBarsCollapsedChanged') barsCollapsed: boolean = false;
   @State immersiveMaterial: boolean = false;
   @State bottomInset: number = 0;
@@ -198,6 +202,10 @@ struct MainTabs {
   // Last count handed to the launcher, so the shell only calls out when it
   // actually changes.
   private badgeShown: number = -1;
+  private networkUnsubscribe: (() => void) | undefined = undefined;
+  private networkGeneration: number = 0;
+  private networkPendingReload: boolean = false;
+  private networkReloadTimer: number = -1;
 
   onWillApplyTheme(theme: Theme): void {
     const color = ColorMetrics.resourceColor(theme.colors.fontPrimary);
@@ -214,6 +222,17 @@ struct MainTabs {
     await this.shellWindow.setWindowSystemBarProperties({ statusBarColor: '#00000000' });
     this.shellWindow.on('avoidAreaChange', this.avoidChanged);
     this.updateShellInsets();
+    const net = NetworkConfig.getInstance();
+    net.ensureInitialized(shellContext);
+    const netSnapshot: NetworkSnapshot = net.snapshot();
+    this.networkSecureOnly = netSnapshot.mode === 'secure_only';
+    this.networkGeneration = netSnapshot.generation;
+    this.networkUnsubscribe = net.subscribe((snapshot: NetworkSnapshot) => {
+      this.networkSecureOnly = snapshot.mode === 'secure_only';
+      if (snapshot.generation !== this.networkGeneration) {
+        this.networkPendingReload = true;
+      }
+    });
     this.bridge.setImageHandler((payload: string) => this.openImages(payload));
     this.bridge.setHandler((url: string) => {
       this.saveWebSession();
@@ -243,6 +262,14 @@ struct MainTabs {
 
   aboutToDisappear(): void {
     this.shellWindow?.off('avoidAreaChange', this.avoidChanged);
+    if (this.networkUnsubscribe !== undefined) {
+      this.networkUnsubscribe();
+      this.networkUnsubscribe = undefined;
+    }
+    if (this.networkReloadTimer !== -1) {
+      clearTimeout(this.networkReloadTimer);
+      this.networkReloadTimer = -1;
+    }
     this.stopPostCheck();
     if (this.firstLoadTimer !== -1) {
       clearTimeout(this.firstLoadTimer);
@@ -293,6 +320,7 @@ struct MainTabs {
 
   onPageShow(): void {
     this.refreshBadges();
+    this.flushNetworkReload();
   }
 
   // A page that never finishes loading must not leave the first-load spinner up
@@ -359,6 +387,7 @@ struct MainTabs {
   onBackPress(): boolean {
     if (this.imageViewerOpen) { this.imageViewerOpen = false; return true; }
     if (this.appearanceOpen) { this.appearanceOpen = false; return true; }
+    if (this.networkOpen) { this.networkOpen = false; return true; }
     if (this.fullScreenHandler !== undefined) { this.fullScreenHandler.exitFullScreen(); return true; }
     if (this.sheetOpen) {
       this.closeCompose();
@@ -860,6 +889,44 @@ struct MainTabs {
     }
   }
 
+  private openNetworkSettings(): void {
+    if (this.imageViewerOpen || this.sheetOpen || this.fullScreen) {
+      return;
+    }
+    this.networkOpen = true;
+  }
+
+  private onNetworkOpenChanged(): void {
+    if (!this.networkOpen) {
+      this.flushNetworkReload();
+    }
+  }
+
+  /** DoH changes apply to new resolutions; reload once after the panel closes. */
+  private flushNetworkReload(): void {
+    if (!this.networkPendingReload || this.appBackground || this.fullScreen) {
+      return;
+    }
+    if (this.authenticationPage || !isSiteUrl(this.currentUrl) || !this.firstLoadDone) {
+      this.networkPendingReload = false;
+      return;
+    }
+    this.networkPendingReload = false;
+    this.networkGeneration = NetworkConfig.getInstance().snapshot().generation;
+    if (this.networkReloadTimer !== -1) {
+      clearTimeout(this.networkReloadTimer);
+    }
+    this.networkReloadTimer = setTimeout(() => {
+      this.networkReloadTimer = -1;
+      this.reloadCurrent();
+    }, 200);
+  }
+
+  @Builder
+  networkSettingsSheet() {
+    NetworkSettingsSheet()
+  }
+
   private applyPageChrome(url: string): void {
     if (this.rawWeb || !/^https:\/\/(www\.)?(x|twitter)\.com(\/|$)/.test(url)) { return; }
     const navigation: boolean = usesNativeNavigation(url);
@@ -1258,6 +1325,7 @@ struct MainTabs {
       hilog.error(DOMAIN, TAG, 'event=fullscreen_exit_failed error=%{public}s', JSON.stringify(err));
       this.toast($r('app.string.operation_failed'));
     }
+    this.flushNetworkReload();
   }
 
   /** 账号必须由当前网页确认，缓存不能决定草稿归属。 */
@@ -1676,6 +1744,9 @@ struct MainTabs {
       MenuItem({ content: $r('app.string.appearance_title'),
         symbolStartIcon: new SymbolGlyphModifier($r('sys.symbol.gearshape')) })
         .onClick(() => { this.appearanceOpen = true; })
+        MenuItem({ content: $r('app.string.network_title'),
+          symbolStartIcon: new SymbolGlyphModifier($r('sys.symbol.lock_shield')) })
+          .onClick(() => { this.openNetworkSettings(); })
         MenuItem({
           content: $r('app.string.menu_view_profile'),
           symbolStartIcon: new SymbolGlyphModifier($r('sys.symbol.person_fill'))
@@ -2079,6 +2150,16 @@ struct MainTabs {
           } catch (err) {
           }
         })
+      if (this.networkSecureOnly) {
+        Button($r('app.string.network_open_settings'))
+          .type(ButtonType.Capsule)
+          .fontFamily(FONT_FAMILY)
+          .backgroundColor($r('sys.color.ohos_id_color_button_normal'))
+          .fontColor($r('sys.color.ohos_id_color_text_primary'))
+          .onClick(() => {
+            this.openNetworkSettings();
+          })
+      }
     }
     .width('100%')
     .height('100%')
@@ -2499,6 +2580,19 @@ struct MainTabs {
   build() {
     HdsNavigation() {
       Stack() {
+        // 网络设置面板独占一个 1x1 宿主，避免覆盖外观/发帖/图片查看器的弹层绑定。
+        Row()
+          .width(1)
+          .height(1)
+          .hitTestBehavior(HitTestMode.None)
+          .accessibilityLevel('no-hide-descendants')
+          .bindSheet($$this.networkOpen, this.networkSettingsSheet(), {
+            height: SheetSize.LARGE,
+            width: this.isWide ? 480 : '100%',
+            dragBar: true,
+            showClose: true
+          })
+
         // 只负责把网页的滚动偏移喂给 HDS，本身不绘制也不接触摸。
         Scroll(this.blurScroller) {
           Column().height(HEADER_BLUR_DISTANCE * 2)

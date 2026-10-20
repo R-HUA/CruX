@@ -271,6 +271,278 @@
     {
       "name": "file_cleanup_failed",
       "value": "Temporary file cleanup failed. Check the saved file"
+    },
+    {
+      "name": "network_title",
+      "value": "Network & security"
+    },
+    {
+      "name": "network_status_title",
+      "value": "Status"
+    },
+    {
+      "name": "network_status_mode",
+      "value": "DNS encryption"
+    },
+    {
+      "name": "network_status_node",
+      "value": "Active node"
+    },
+    {
+      "name": "network_status_vpn",
+      "value": "VPN"
+    },
+    {
+      "name": "network_status_mode_off",
+      "value": "System DNS"
+    },
+    {
+      "name": "network_status_mode_auto",
+      "value": "Automatic (fallback)"
+    },
+    {
+      "name": "network_status_mode_secure",
+      "value": "Secure DNS only"
+    },
+    {
+      "name": "network_status_paused",
+      "value": "Paused while VPN is connected"
+    },
+    {
+      "name": "network_status_apply_failed",
+      "value": "DoH settings could not be applied. X will use system DNS."
+    },
+    {
+      "name": "network_retry",
+      "value": "Retry"
+    },
+    {
+      "name": "network_mode_title",
+      "value": "DNS encryption mode"
+    },
+    {
+      "name": "network_mode_off",
+      "value": "Off"
+    },
+    {
+      "name": "network_mode_auto",
+      "value": "Automatic"
+    },
+    {
+      "name": "network_mode_secure",
+      "value": "Secure only"
+    },
+    {
+      "name": "network_mode_off_desc",
+      "value": "Use the system DNS resolver."
+    },
+    {
+      "name": "network_mode_auto_desc",
+      "value": "Prefer DoH and fall back to system DNS if it fails. Recommended."
+    },
+    {
+      "name": "network_mode_secure_desc",
+      "value": "Never fall back. If the node is unavailable, X will not load."
+    },
+    {
+      "name": "network_mode_secure_confirm_title",
+      "value": "Use secure DNS only?"
+    },
+    {
+      "name": "network_mode_secure_confirm_message",
+      "value": "System DNS will not be used. If the selected node is unreachable, web pages and images will fail to load."
+    },
+    {
+      "name": "network_mode_confirm",
+      "value": "Use secure DNS"
+    },
+    {
+      "name": "network_mode_vpn_note",
+      "value": "DoH is paused while a VPN is connected."
+    },
+    {
+      "name": "network_behavior_title",
+      "value": "Behavior"
+    },
+    {
+      "name": "network_sync_images",
+      "value": "Sync original image downloads"
+    },
+    {
+      "name": "network_sync_images_desc",
+      "value": "Use the current DoH node for pbs.twimg.com image downloads."
+    },
+    {
+      "name": "network_vpn_bypass",
+      "value": "VPN auto bypass"
+    },
+    {
+      "name": "network_vpn_bypass_desc",
+      "value": "Pause DoH when a system VPN is connected to avoid conflicts with fake-IP."
+    },
+    {
+      "name": "network_nodes_title",
+      "value": "DoH servers"
+    },
+    {
+      "name": "network_nodes_test_all",
+      "value": "Test all"
+    },
+    {
+      "name": "network_nodes_testing_all",
+      "value": "Testing…"
+    },
+    {
+      "name": "network_nodes_add",
+      "value": "Add"
+    },
+    {
+      "name": "network_node_test",
+      "value": "Test"
+    },
+    {
+      "name": "network_node_testing",
+      "value": "Testing…"
+    },
+    {
+      "name": "network_node_untested",
+      "value": "Not tested"
+    },
+    {
+      "name": "network_node_unreachable",
+      "value": "Unreachable"
+    },
+    {
+      "name": "network_node_bad_response",
+      "value": "Invalid response"
+    },
+    {
+      "name": "network_node_rcode",
+      "value": "DNS error"
+    },
+    {
+      "name": "network_node_ms",
+      "value": "%d ms"
+    },
+    {
+      "name": "network_node_custom",
+      "value": "Custom"
+    },
+    {
+      "name": "network_node_delete",
+      "value": "Delete"
+    },
+    {
+      "name": "network_custom_title",
+      "value": "Custom nodes"
+    },
+    {
+      "name": "network_custom_name",
+      "value": "Name"
+    },
+    {
+      "name": "network_custom_url",
+      "value": "DoH URL (https)"
+    },
+    {
+      "name": "network_custom_bootstrap",
+      "value": "Bootstrap IP (optional)"
+    },
+    {
+      "name": "network_custom_save",
+      "value": "Save and use"
+    },
+    {
+      "name": "network_custom_cancel",
+      "value": "Cancel"
+    },
+    {
+      "name": "network_custom_empty",
+      "value": "No custom nodes yet."
+    },
+    {
+      "name": "network_custom_error_name",
+      "value": "Enter a name."
+    },
+    {
+      "name": "network_custom_error_url",
+      "value": "Enter a valid HTTPS DoH URL with a path."
+    },
+    {
+      "name": "network_custom_error_ip",
+      "value": "Enter a valid IPv4 or IPv6 address."
+    },
+    {
+      "name": "network_custom_error_duplicate",
+      "value": "This DoH URL is already in the list."
+    },
+    {
+      "name": "network_custom_error_limit",
+      "value": "You can add up to %d custom nodes."
+    },
+    {
+      "name": "network_custom_error_save",
+      "value": "Could not save the setting."
+    },
+    {
+      "name": "network_vpn_active",
+      "value": "Connected"
+    },
+    {
+      "name": "network_vpn_inactive",
+      "value": "Not connected"
+    },
+    {
+      "name": "network_vpn_unknown",
+      "value": "Unknown"
+    },
+    {
+      "name": "network_note_title",
+      "value": "About DoH"
+    },
+    {
+      "name": "network_note_sni",
+      "value": "DoH encrypts DNS queries only. It does not hide the TLS SNI, change IP routing, or bypass IP/SNI blocking."
+    },
+    {
+      "name": "network_note_provider",
+      "value": "The selected DoH provider can see your DNS queries. Choose a provider you trust."
+    },
+    {
+      "name": "network_note_secure",
+      "value": "Secure DNS only never falls back. If the node fails, pages and images will not load."
+    },
+    {
+      "name": "network_note_vpn",
+      "value": "When a VPN is connected, DoH is paused and DNS is handled by the VPN."
+    },
+    {
+      "name": "network_note_images",
+      "value": "Original image downloads use DoH when synchronization is on. Automatic mode retries with system DNS if DoH fails."
+    },
+    {
+      "name": "network_note_domestic",
+      "value": "Domestic DoH nodes also apply their own resolution policy."
+    },
+    {
+      "name": "network_open_settings",
+      "value": "Network settings"
+    },
+    {
+      "name": "network_reload_note",
+      "value": "Changes apply to new requests. Reload the page if X does not respond."
+    },
+    {
+      "name": "network_saved",
+      "value": "Network settings saved."
+    },
+    {
+      "name": "network_save_failed",
+      "value": "Settings applied but could not be saved."
+    },
+    {
+      "name": "network_info_reason",
+      "value": "Check whether a VPN is active so the app can pause DoH and avoid DNS conflicts."
     }
   ]
 }

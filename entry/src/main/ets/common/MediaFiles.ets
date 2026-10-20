@@ -4,8 +4,10 @@ import { fileIo, fileUri } from '@kit.CoreFileKit';
 import { photoAccessHelper } from '@kit.MediaLibraryKit';
 import { systemShare } from '@kit.ShareKit';
 import { common } from '@kit.AbilityKit';
+import { BusinessError } from '@kit.BasicServicesKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { MediaAddress } from './WebMedia';
+import { DohPolicy, NetworkConfig } from './NetworkConfig';
 
 export interface MediaFile {
   path: string;
@@ -49,50 +51,73 @@ export class MediaFiles {
   private async download(address: MediaAddress, directory: string): Promise<MediaFile> {
     if (!this.cleanup) { this.cleanup = this.removeExpired(directory); }
     await this.cleanup;
+    const policy: DohPolicy = NetworkConfig.getInstance().getDohPolicy();
     for (const candidate of address.candidates) {
       if (this.closed) { throw new Error('Media session closed'); }
-      const request = http.createHttp();
-      this.requests.push(request);
-      try {
-        const response = await request.request(candidate, {
-          method: http.RequestMethod.GET,
-          expectDataType: http.HttpDataType.ARRAY_BUFFER,
-          maxLimit: 25 * 1024 * 1024,
-          connectTimeout: 10000,
-          readTimeout: 30000
-        });
-        if (this.closed) { throw new Error('Media session closed'); }
-        // 只对资源不存在继续候选链；鉴权、限流及服务错误直接向用户暴露。
-        if (response.responseCode === 404) { continue; }
-        if (response.responseCode !== 200 || !(response.result instanceof ArrayBuffer)) {
-          throw new Error('Image HTTP status ' + response.responseCode);
-        }
-        const buffer = response.result as ArrayBuffer;
-        const extension = imageExtension(buffer);
-        const path = directory + '/x-image-' + this.stamp + '-' + address.id + '.' + extension;
-        const file = await fileIo.open(path, fileIo.OpenMode.CREATE | fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.TRUNC);
-        this.files.push(path);
-        try {
-          let written = 0;
-          while (written < buffer.byteLength) {
-            const count = await fileIo.write(file.fd, buffer.slice(written));
-            if (count <= 0) { throw new Error('Image write made no progress'); }
-            written += count;
-          }
-        } finally { await fileIo.close(file); }
-        const source = image.createImageSource(path);
-        try {
-          const info = await source.getImageInfo();
-          hilog.info(0x0A11, 'OpenTwit', 'event=image_downloaded bytes=%{public}d', buffer.byteLength);
-          return { path: path, url: candidate, extension: extension, width: info.size.width,
-            height: info.size.height, size: buffer.byteLength, originalSize: /[?&]name=orig(?:&|$)/.test(candidate) };
-        } finally { await source.release(); }
-      } finally {
-        request.destroy();
-        this.requests.splice(this.requests.indexOf(request), 1);
+      const response = await this.requestImage(candidate, policy);
+      if (this.closed) { throw new Error('Media session closed'); }
+      // 只对资源不存在继续候选链；鉴权、限流及服务错误直接向用户暴露。
+      if (response.responseCode === 404) { continue; }
+      if (response.responseCode !== 200 || !(response.result instanceof ArrayBuffer)) {
+        throw new Error('Image HTTP status ' + response.responseCode);
       }
+      const buffer = response.result as ArrayBuffer;
+      const extension = imageExtension(buffer);
+      const path = directory + '/x-image-' + this.stamp + '-' + address.id + '.' + extension;
+      const file = await fileIo.open(path, fileIo.OpenMode.CREATE | fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.TRUNC);
+      this.files.push(path);
+      try {
+        let written = 0;
+        while (written < buffer.byteLength) {
+          const count = await fileIo.write(file.fd, buffer.slice(written));
+          if (count <= 0) { throw new Error('Image write made no progress'); }
+          written += count;
+        }
+      } finally { await fileIo.close(file); }
+      const source = image.createImageSource(path);
+      try {
+        const info = await source.getImageInfo();
+        hilog.info(0x0A11, 'OpenTwit', 'event=image_downloaded bytes=%{public}d', buffer.byteLength);
+        return { path: path, url: candidate, extension: extension, width: info.size.width,
+          height: info.size.height, size: buffer.byteLength, originalSize: /[?&]name=orig(?:&|$)/.test(candidate) };
+      } finally { await source.release(); }
     }
     throw new Error('Image resource unavailable');
+  }
+
+  /** Network Kit 的 DoH 不会自动回退；只有 AUTO 模式允许同一候选改走系统 DNS。 */
+  private async requestImage(url: string, policy: DohPolicy): Promise<http.HttpResponse> {
+    if (policy.mode !== 'off' && policy.url !== undefined) {
+      try {
+        return await this.sendRequest(url, policy.url);
+      } catch (error) {
+        if (policy.mode !== 'auto' || this.closed) { throw error as Error; }
+        const code = (error as BusinessError).code;
+        hilog.warn(0x0A11, 'OpenTwit', 'event=media_doh_fallback code=%{public}d', code);
+      }
+    }
+    return this.sendRequest(url, undefined);
+  }
+
+  private async sendRequest(url: string, dohUrl: string | undefined): Promise<http.HttpResponse> {
+    const request = http.createHttp();
+    this.requests.push(request);
+    try {
+      return await request.request(url, {
+        method: http.RequestMethod.GET,
+        expectDataType: http.HttpDataType.ARRAY_BUFFER,
+        maxLimit: 25 * 1024 * 1024,
+        connectTimeout: 10000,
+        readTimeout: 30000,
+        dnsOverHttps: dohUrl
+      });
+    } finally {
+      const index = this.requests.indexOf(request);
+      if (index >= 0) {
+        this.requests.splice(index, 1);
+        request.destroy();
+      }
+    }
   }
 
   /** 回收进程被终止后遗留的缓存，只处理本模块且超过一天的临时文件。 */
@@ -135,7 +160,9 @@ export class MediaFiles {
 
   async close(): Promise<void> {
     this.closed = true;
-    this.requests.forEach((request: http.HttpRequest) => request.destroy());
+    const active = this.requests.slice();
+    this.requests = [];
+    for (const request of active) { request.destroy(); }
     // 各操作的失败由调用界面提示；此处等待所有分支结束以避免删除正在使用的文件。
     await Promise.allSettled(Array.from(this.downloads.values()));
     await Promise.allSettled(this.operations);

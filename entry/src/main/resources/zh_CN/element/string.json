@@ -271,6 +271,278 @@
     {
       "name": "file_cleanup_failed",
       "value": "临时文件清理失败，请检查保存结果"
+    },
+    {
+      "name": "network_title",
+      "value": "网络与安全"
+    },
+    {
+      "name": "network_status_title",
+      "value": "状态"
+    },
+    {
+      "name": "network_status_mode",
+      "value": "DNS 加密"
+    },
+    {
+      "name": "network_status_node",
+      "value": "当前节点"
+    },
+    {
+      "name": "network_status_vpn",
+      "value": "VPN"
+    },
+    {
+      "name": "network_status_mode_off",
+      "value": "系统 DNS"
+    },
+    {
+      "name": "network_status_mode_auto",
+      "value": "自动回退"
+    },
+    {
+      "name": "network_status_mode_secure",
+      "value": "强制 DoH"
+    },
+    {
+      "name": "network_status_paused",
+      "value": "VPN 连接时暂停"
+    },
+    {
+      "name": "network_status_apply_failed",
+      "value": "DoH 设置未能生效，X 将继续使用系统 DNS。"
+    },
+    {
+      "name": "network_retry",
+      "value": "重试"
+    },
+    {
+      "name": "network_mode_title",
+      "value": "DNS 加密模式"
+    },
+    {
+      "name": "network_mode_off",
+      "value": "关闭"
+    },
+    {
+      "name": "network_mode_auto",
+      "value": "自动回退"
+    },
+    {
+      "name": "network_mode_secure",
+      "value": "强制 DoH"
+    },
+    {
+      "name": "network_mode_off_desc",
+      "value": "使用系统 DNS 解析。"
+    },
+    {
+      "name": "network_mode_auto_desc",
+      "value": "优先使用 DoH，失败时自动回退系统 DNS。推荐。"
+    },
+    {
+      "name": "network_mode_secure_desc",
+      "value": "绝不回退。节点不可用时 X 将无法加载。"
+    },
+    {
+      "name": "network_mode_secure_confirm_title",
+      "value": "启用强制 DoH？"
+    },
+    {
+      "name": "network_mode_secure_confirm_message",
+      "value": "将不再使用系统 DNS。如果所选节点不可达，网页和图片都会加载失败。"
+    },
+    {
+      "name": "network_mode_confirm",
+      "value": "启用强制 DoH"
+    },
+    {
+      "name": "network_mode_vpn_note",
+      "value": "VPN 连接时 DoH 暂停。"
+    },
+    {
+      "name": "network_behavior_title",
+      "value": "行为"
+    },
+    {
+      "name": "network_sync_images",
+      "value": "同步加速原图下载"
+    },
+    {
+      "name": "network_sync_images_desc",
+      "value": "原生查看器下载 pbs.twimg.com 原图时复用当前 DoH 节点。"
+    },
+    {
+      "name": "network_vpn_bypass",
+      "value": "VPN 自动旁路"
+    },
+    {
+      "name": "network_vpn_bypass_desc",
+      "value": "检测到系统 VPN 时暂停 DoH，避免与 fake-IP 冲突。"
+    },
+    {
+      "name": "network_nodes_title",
+      "value": "DoH 服务器"
+    },
+    {
+      "name": "network_nodes_test_all",
+      "value": "全部测速"
+    },
+    {
+      "name": "network_nodes_testing_all",
+      "value": "测速中…"
+    },
+    {
+      "name": "network_nodes_add",
+      "value": "添加"
+    },
+    {
+      "name": "network_node_test",
+      "value": "测速"
+    },
+    {
+      "name": "network_node_testing",
+      "value": "测速中…"
+    },
+    {
+      "name": "network_node_untested",
+      "value": "未测速"
+    },
+    {
+      "name": "network_node_unreachable",
+      "value": "不可达"
+    },
+    {
+      "name": "network_node_bad_response",
+      "value": "响应无效"
+    },
+    {
+      "name": "network_node_rcode",
+      "value": "解析失败"
+    },
+    {
+      "name": "network_node_ms",
+      "value": "%d ms"
+    },
+    {
+      "name": "network_node_custom",
+      "value": "自定义"
+    },
+    {
+      "name": "network_node_delete",
+      "value": "删除"
+    },
+    {
+      "name": "network_custom_title",
+      "value": "自定义节点"
+    },
+    {
+      "name": "network_custom_name",
+      "value": "名称"
+    },
+    {
+      "name": "network_custom_url",
+      "value": "DoH 地址（https）"
+    },
+    {
+      "name": "network_custom_bootstrap",
+      "value": "引导 IP（可选）"
+    },
+    {
+      "name": "network_custom_save",
+      "value": "保存并启用"
+    },
+    {
+      "name": "network_custom_cancel",
+      "value": "取消"
+    },
+    {
+      "name": "network_custom_empty",
+      "value": "还没有自定义节点。"
+    },
+    {
+      "name": "network_custom_error_name",
+      "value": "请输入名称。"
+    },
+    {
+      "name": "network_custom_error_url",
+      "value": "请输入带路径的有效 HTTPS DoH 地址。"
+    },
+    {
+      "name": "network_custom_error_ip",
+      "value": "请输入有效的 IPv4 或 IPv6 地址。"
+    },
+    {
+      "name": "network_custom_error_duplicate",
+      "value": "该 DoH 地址已在列表中。"
+    },
+    {
+      "name": "network_custom_error_limit",
+      "value": "最多可添加 %d 个自定义节点。"
+    },
+    {
+      "name": "network_custom_error_save",
+      "value": "设置保存失败。"
+    },
+    {
+      "name": "network_vpn_active",
+      "value": "已连接"
+    },
+    {
+      "name": "network_vpn_inactive",
+      "value": "未连接"
+    },
+    {
+      "name": "network_vpn_unknown",
+      "value": "未知"
+    },
+    {
+      "name": "network_note_title",
+      "value": "关于 DoH"
+    },
+    {
+      "name": "network_note_sni",
+      "value": "DoH 只加密 DNS 查询，不隐藏 TLS SNI，不改变 IP 路由，也不能绕过 IP/SNI 封锁。"
+    },
+    {
+      "name": "network_note_provider",
+      "value": "所选 DoH 节点可以看到你的 DNS 查询，请选择信任的服务商。"
+    },
+    {
+      "name": "network_note_secure",
+      "value": "强制 DoH 不会回退；节点故障时网页和图片将无法加载。"
+    },
+    {
+      "name": "network_note_vpn",
+      "value": "VPN 连接时 DoH 暂停，DNS 交由 VPN 处理。"
+    },
+    {
+      "name": "network_note_images",
+      "value": "开启同步后，原图下载会使用 DoH；自动回退模式在 DoH 失败时会改用系统 DNS 重试。"
+    },
+    {
+      "name": "network_note_domestic",
+      "value": "国内 DoH 节点仍会按其自身解析策略返回结果。"
+    },
+    {
+      "name": "network_open_settings",
+      "value": "网络设置"
+    },
+    {
+      "name": "network_reload_note",
+      "value": "更改对新请求生效；若 X 无响应，请重新加载页面。"
+    },
+    {
+      "name": "network_saved",
+      "value": "网络设置已保存。"
+    },
+    {
+      "name": "network_save_failed",
+      "value": "设置已生效，但未能保存。"
+    },
+    {
+      "name": "network_info_reason",
+      "value": "检测系统 VPN 状态，以便在 VPN 连接时暂停 DoH，避免 DNS 解析冲突。"
     }
   ]
 }
