@@ -1,6 +1,7 @@
 {
   "string": [
     {"name":"appearance_title","value":"المظهر"},
+    {"name":"settings_title","value":"الإعدادات"},
     {"name":"appearance_floating","value":"شريط تنقل عائم"},
     {"name":"appearance_auto_hide","value":"إخفاء التنقل أثناء التمرير"},
     {"name":"media_close","value":"إغلاق"},
@@ -114,7 +115,7 @@
     },
     {
       "name": "vibrate_reason",
-      "value": "يمنح OpenTwit استجابة لمسية خفيفة عند تبديل علامات التبويب."
+      "value": "يمنح CruX استجابة لمسية خفيفة عند تبديل علامات التبويب."
     },
     {
       "name": "error_title",
@@ -150,7 +151,7 @@
     },
     {
       "name": "internet_reason",
-      "value": "يحمّل OpenTwit واجهة Twitter الكاملة (x.com) داخل التطبيق."
+      "value": "يحمّل CruX واجهة Twitter الكاملة (x.com) داخل التطبيق."
     },
     {
       "name": "location_reason",
