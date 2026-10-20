@@ -37,6 +37,16 @@ const HEADER_CSS: string =
 const HOME_TABS_CSS: string =
   // 多图轮播也使用 tablist，只隐藏含真实 tab 的导航，排除帖子内容。
   "nav[role='navigation'] [data-testid='ScrollSnap-SwipeableList']:has([role='tablist'] [role='tab']):not(article *){display:none!important}";
+// 详情页的原生回复入口替代内嵌编辑单元，保留回复列表与帖子操作。
+const REPLY_CSS: string = 'main [data-testid="inline_reply_offscreen"],' +
+  'main [data-testid="cellInnerDiv"]:has([data-testid="tweetTextarea_0"]){display:none!important}';
+// 读取实际画布色，网页主题仍由站点管理；透明背景继续读取根节点。
+const REPORT_THEME_SCRIPT: string =
+  'if(document.body&&window.otNative&&window.otNative.onTheme){' +
+  'var bg=getComputedStyle(document.body).backgroundColor;' +
+  'if(bg==="transparent"||bg==="rgba(0, 0, 0, 0)")bg=getComputedStyle(document.documentElement).backgroundColor;' +
+  'if(/^rgb\\(\\d+,\\s*\\d+,\\s*\\d+\\)$/.test(bg)&&bg!==window.__otTheme){' +
+  'window.__otTheme=bg;window.otNative.onTheme("main",bg);}}';
 const PULL_CLIP_CSS: string = '[data-ot-pull-clip]{overflow:clip!important;}';
 
 // 底部背景不避让，控件只保留一次手势区和小间距；共用规则不依赖某条媒体地址。
@@ -63,7 +73,8 @@ export function chromeInsetsScript(top: number, bottom: number, viewportWidth: n
     };
     window.__otUpdateInsets();
     if(window.__otApplyTop)window.__otApplyTop();
-    if(!window.__otInsetResize){window.__otInsetResize=true;window.addEventListener('resize',function(){window.__otUpdateInsets();});}
+    if(!window.__otInsetResize){window.__otInsetResize=true;window.addEventListener('resize',function(){
+      window.__otUpdateInsets();if(window.__otApplyTop)window.__otApplyTop();});}
   })();`;
 }
 
@@ -133,7 +144,7 @@ const PULL_CLIP_SCRIPT: string = `(function(enabled){
 export function chromeDocumentStartScript(enabled: boolean): string {
   if (!enabled) { return ''; }
   return '(function(){if(window!==window.top)return;' +
-    'var update=function(){if(!document.head)return;' +
+    'var update=function(){if(window.__otChromePaused||!document.head)return;' +
     'var p=location.pathname.replace(/\\/$/,"").toLowerCase()||"/";' +
     'var reserved=' + JSON.stringify(RESERVED_ROOTS) + ';' +
     'var secondary=new RegExp(' + JSON.stringify(SECONDARY_PATH_PATTERN) + ').test(p);' +
@@ -141,16 +152,18 @@ export function chromeDocumentStartScript(enabled: boolean): string {
     '["/home","/explore","/search","/notifications","/messages"].indexOf(p)<0;' +
     'var detail=/^\\/(?:[a-z0-9_]{1,15}|i\\/web)\\/status\\/\\d+$/.test(p);' +
     'var nav=secondary||profile||detail||p==="/home"||/^\\/(explore|search|notifications|messages|i\\/chat)(\\/|$)/.test(p);' +
-    'var header=secondary||profile||detail||["/home","/notifications","/messages","/i/chat"].indexOf(p)>=0;' +
+    'var header=secondary||profile||detail||["/home","/notifications"].indexOf(p)>=0;' +
     'var auth=document.querySelector(\'input[autocomplete="username"],input[autocomplete="current-password"],input[autocomplete="one-time-code"]\');' +
     'var css=document.getElementById("ot-initial-chrome");' +
     'if(!css){css=document.createElement("style");css.id="ot-initial-chrome";document.head.appendChild(css);}' +
     'var rules=nav&&!auth?' + JSON.stringify(CHROME_CSS) + ':"";' +
     'if(nav&&header&&!auth)rules+=' + JSON.stringify(HEADER_CSS) + ';' +
     'if(p==="/home"&&!auth)rules+=' + JSON.stringify(HOME_TABS_CSS + PULL_CLIP_CSS) + ';' +
+    'if(detail&&!auth)rules+=' + JSON.stringify(REPLY_CSS) + ';' +
     'if(css.textContent!==rules)css.textContent=rules;' +
-    PULL_CLIP_SCRIPT + '(p==="/home"&&!auth);};' +
+    PULL_CLIP_SCRIPT + '(p==="/home"&&!auth);' + REPORT_THEME_SCRIPT + '};' +
     'var observer=new MutationObserver(function(){if(window.__otObs){observer.disconnect();return;}update();});' +
+    'window.__otInitialObserver=observer;window.__otInitialUpdate=update;' +
     'observer.observe(document,{childList:true,subtree:true});update();' +
     'window.addEventListener("pagehide",function(){observer.disconnect();},{once:true});})();';
 }
@@ -159,6 +172,40 @@ export function chromeDocumentStartScript(enabled: boolean): string {
 const CHROME_ROUTE_KEY: string = 'function(value){return String(value)' +
   '.replace(/^https:\\/\\/(?:www\\.)?(?:x|twitter)\\.com(?=[/?#]|$)/i,"")' +
   '.split(/[?#]/)[0].replace(/\\/$/,"").toLowerCase()||"/";}';
+
+// 坐标保留在文档空间，原生滚动回调可直接计算过渡，不必每帧跨进程测量。
+export const PROFILE_LAYOUT_SCRIPT: string = `(function(active){
+  if(!window.otNative||!window.otNative.onProfileLayout)return;
+  var path=location.pathname.replace(/\\/$/,'').toLowerCase();
+  if(!active||!/^\\/[a-z0-9_]{1,15}$/.test(path)||${JSON.stringify(RESERVED_ROOTS)}[path]||
+    ['/home','/explore','/search','/notifications','/messages'].indexOf(path)>=0)return;
+  var y=window.scrollY;
+  var result={url:String(location.href),width:window.innerWidth,viewWidth:window.__otViewportWidth||0,
+    scrollY:y,ready:false,hasBanner:false,bannerBottom:0,identityBottom:0,name:'',handle:''};
+  var names=document.querySelectorAll('main [data-testid="UserName"]');
+  for(var i=0;i<names.length;i++){
+    var node=names[i];
+    if(node.closest('article,header,nav,[role="dialog"],[data-testid="TopNavBar"]'))continue;
+    var labels=node.querySelectorAll('[dir]'),handle=null;
+    for(var j=0;j<labels.length;j++){
+      var candidate=(labels[j].textContent||'').trim().match(/^@([A-Za-z0-9_]{1,15})$/);
+      if(candidate&&'/'+candidate[1].toLowerCase()===path){handle=candidate;break;}
+    }
+    if(!handle||'/'+handle[1].toLowerCase()!==path)continue;
+    var identity=node.getBoundingClientRect();
+    if(identity.width<=0||identity.height<=0)continue;
+    var banner=document.querySelector('main a[href="/'+handle[1]+'/header_photo"]')||
+      document.querySelector('main a[href="'+path+'/header_photo"]');
+    // 无横幅时等待实际资料区离开覆盖区域，不凭固定高度提前产生模糊。
+    var boundary=(banner||node.parentElement).getBoundingClientRect();
+    result.ready=true;result.hasBanner=Boolean(banner);result.bannerBottom=Math.round((boundary.bottom+y)*100)/100;
+    result.identityBottom=Math.round((identity.bottom+y)*100)/100;
+    result.name=(labels[0].textContent||'').trim();result.handle=handle[1];break;
+  }
+  var key=JSON.stringify([result.url,result.width,result.viewWidth,result.ready,result.hasBanner,result.bannerBottom,
+    result.identityBottom,result.name,result.handle]);
+  if(key!==window.__otProfileLayout){window.__otProfileLayout=key;window.otNative.onProfileLayout(JSON.stringify(result));}
+})`;
 
 /** 原生控件和网页去重共用路由判定，不以账号元素是否存在决定界面。 */
 export function chromeScript(nativeNavigation: boolean, nativeHeader: boolean, url: string): string {
@@ -171,15 +218,20 @@ export function chromeScript(nativeNavigation: boolean, nativeHeader: boolean, u
     'if(!css){css=document.createElement(\'style\');css.id=\'ot-hidenav\';' +
     'document.head.appendChild(css);}' +
     'var initial=document.getElementById("ot-initial-chrome");if(initial&&initial!==css)initial.remove();' +
+    'if(window.__otInitialObserver){window.__otInitialObserver.disconnect();window.__otInitialObserver=null;}' +
     'window.__otApplyTop=function(){' +
+    'if(window.__otChromePaused)return;' +
+    REPORT_THEME_SCRIPT +
     'var p=location.pathname.replace(/\\/$/,"")||"/";' +
     'var auth=document.querySelector(\'input[autocomplete="username"],input[autocomplete="current-password"],input[autocomplete="one-time-code"]\');' +
     'var active=window.__otNativeNavigation&&!auth&&routeKey(window.__otChromeUrl)===routeKey(location.href);' +
     'window.__otPullMatches=clipPull(active&&(window.__otInsetTop>0||p==="/home"));' +
     'var rules=auth?"":' + JSON.stringify(WEB_SAFE_AREA_CSS) + ';' +
     'if(active){rules+=' + JSON.stringify(CHROME_CSS) + ';' +
-    'if(window.__otInsetTop>0||window.__otInsetBottom>0)rules+=' + JSON.stringify(OVERLAY_CSS) + ';' +
+    'if(window.__otInsetTop>0||window.__otInsetBottom>0||(/^\\/[a-z0-9_]{1,15}$/i.test(p)&&!' +
+    JSON.stringify(RESERVED_ROOTS) + '[p.toLowerCase()]&&["/home","/explore","/search","/notifications","/messages"].indexOf(p.toLowerCase())<0))rules+=' + JSON.stringify(OVERLAY_CSS) + ';' +
     'if(window.__otNativeHeader){rules+=' + JSON.stringify(HEADER_CSS) + ';' +
+    'if(/^\\/(?:[a-z0-9_]{1,15}|i\\/web)\\/status\\/\\d+$/i.test(p))rules+=' + JSON.stringify(REPLY_CSS) + ';' +
     'if(p==="/home")rules+=' + JSON.stringify(HOME_TABS_CSS) + ';}}' +
     'if(css.textContent!==rules)css.textContent=rules;' +
     'if(window.__otAuth!==Boolean(auth)){' +
@@ -188,7 +240,8 @@ export function chromeScript(nativeNavigation: boolean, nativeHeader: boolean, u
     // 首屏图片可能晚于页面完成才挂载，头像变化时复用页面状态读取通道。
     'var avatar=auth?"":' + accountAvatarScript('') + ';' +
     'if(avatar!==window.__otAccountAvatar){window.__otAccountAvatar=avatar;' +
-    'if(avatar&&window.otNative)window.otNative.onUrlChange("main",String(location.href));}};' +
+    'if(avatar&&window.otNative)window.otNative.onUrlChange("main",String(location.href));}' +
+    PROFILE_LAYOUT_SCRIPT + '(active&&window.__otNativeHeader);};' +
     'window.__otOwn=function(){return ' + OWN_HANDLE_SCRIPT + ';};' +
     // x.com navigates like an app (history.pushState), which does not reload
     // the page and therefore never reaches the shell through the Web component
@@ -196,7 +249,7 @@ export function chromeScript(nativeNavigation: boolean, nativeHeader: boolean, u
     // bridge so the header, tab bar and back button stay in step.
     'if(!window.__otHist){window.__otHist=1;' +
     // SPA 地址已变化时先释放旧页规则，不能等待异步原生回调才显示详情顶部。
-    'function otTell(){try{window.__otApplyTop();if(window.otNative&&window.otNative.onUrlChange){' +
+    'function otTell(){try{if(window.__otChromePaused)return;window.__otApplyTop();if(window.otNative&&window.otNative.onUrlChange){' +
     'window.otNative.onUrlChange("main",String(window.location.href));}}catch(_){}}' +
     'var otPush=history.pushState;' +
     'history.pushState=function(){var r=otPush.apply(this,arguments);otTell();return r;};' +
@@ -210,6 +263,7 @@ export function chromeScript(nativeNavigation: boolean, nativeHeader: boolean, u
     'if(!window.__otPullFix&&document.addEventListener){window.__otPullFix=1;' +
     'var otPullStart=0,otPullY=0,otPulled=false,otTouch=false,otPullTimers=[],otPullPath="";' +
     'var otClearPullTimers=function(){for(var i=0;i<otPullTimers.length;i++){clearTimeout(otPullTimers[i]);}otPullTimers=[];};' +
+    'window.__otClearPullTimers=otClearPullTimers;' +
     'var otSettleTop=function(){if(otTouch||location.pathname!==otPullPath){return;}if(window.scrollY>0&&window.scrollY<200){window.scrollTo(0,0);}};' +
     'document.addEventListener("touchstart",function(e){otTouch=true;otClearPullTimers();' +
     'if(!e.touches||!e.touches.length){return;}otPullStart=window.scrollY;otPullY=e.touches[0].clientY;otPulled=false;otPullPath=location.pathname;},{passive:true,capture:true});' +
@@ -222,6 +276,7 @@ export function chromeScript(nativeNavigation: boolean, nativeHeader: boolean, u
     'window.__otPass=function(){window.__otPend=0;try{' +
     'window.__otApplyTop&&window.__otApplyTop();' +
     '}catch(e){}};' +
+    'window.__otObserveOptions={childList:true,subtree:true,attributes:true,attributeFilter:["src","srcset","style","href"]};' +
     'window.__otObs=new MutationObserver(function(){' +
     // 进入首页或替换加载占位时，裁剪先于下一帧；其余修饰仍合并到节流回调。
     'if(location.pathname.replace(/\\/$/,"").toLowerCase()==="/home"&&!document.querySelector(' +
@@ -229,8 +284,7 @@ export function chromeScript(nativeNavigation: boolean, nativeHeader: boolean, u
     'window.__otPullMatches=clipPull(true);}' +
     'if(window.__otPend){return;}window.__otPend=1;' +
     'window.__otTimer=setTimeout(window.__otPass,' + CHROME_OBSERVER_MS + ');});' +
-    'try{window.__otObs.observe(document.documentElement,{childList:true,subtree:true,' +
-    'attributes:true,attributeFilter:["src","srcset","style","href"]});}catch(e){}' +
+    'window.__otObs.observe(document.documentElement,window.__otObserveOptions);' +
     'window.addEventListener("pagehide",function(e){if(!e.persisted){window.__otObs.disconnect();clearTimeout(window.__otTimer);}}, {once:true});}' +
     'window.__otChromeReport=function(){return JSON.stringify({' +
     'navigation:Boolean(window.__otNativeNavigation&&!window.__otAuth&&routeKey(window.__otChromeUrl)===routeKey(location.href)),' +
@@ -239,6 +293,32 @@ export function chromeScript(nativeNavigation: boolean, nativeHeader: boolean, u
     'window.__otApplyTop();return window.__otChromeReport();' +
     '}catch(e){return JSON.stringify({error:String(e)});}})(' + nativeNavigation + ',' + nativeHeader + ',' + JSON.stringify(url) + ');';
 }
+
+/** 后台停止外壳的 DOM 扫描；恢复时先补一次状态，再继续观察。 */
+export function chromeActiveScript(active: boolean): string {
+  return '(function(active){window.__otChromePaused=!active;' +
+    'if(active)window.__otProfileLayout=null;' +
+    'if(window.__otClearPullTimers)window.__otClearPullTimers();' +
+    'if(window.__otInitialObserver){window.__otInitialObserver.disconnect();if(active){' +
+    'window.__otInitialUpdate();window.__otInitialObserver.observe(document,{childList:true,subtree:true});}}' +
+    'if(!window.__otObs)return;' +
+    'clearTimeout(window.__otTimer);window.__otPend=0;window.__otObs.disconnect();' +
+    'if(active){window.__otApplyTop();window.__otObs.observe(document.documentElement,window.__otObserveOptions);}' +
+    '})(' + active + ');';
+}
+
+/** 发布资格由网页按当前账号和文本计算，原生不复制站点的字数规则。 */
+export const COMPOSER_READY_SCRIPT: string = `(function(){
+  var b=document.querySelector('[data-testid="tweetButton"]')||document.querySelector('[data-testid="tweetButtonInline"]');
+  return Boolean(b&&!b.disabled&&b.getAttribute('aria-disabled')!=='true');
+})()`;
+
+/** 调用网页已有账号控件，账号和登录会话继续由 X 管理。 */
+export const ACCOUNT_SWITCH_SCRIPT: string = `(function(){
+  var button=document.querySelector('[data-testid="SideNav_AccountSwitcher_Button"],'+
+    '[data-testid="DashButton_ProfileIcon_Link"]');
+  if(!button)return 'missing';button.click();return 'opened';
+})()`;
 
 // Cheap follow-up used on in-page (SPA) navigations, which do not always fire
 // onPageEnd: flips the tab-root flag and re-runs the removal pass.
@@ -383,6 +463,30 @@ export function accountAvatarDiagScript(): string {
   })()`;
 }
 
+/** 被动读取网页已有的计数响应，不发起额外请求，也不改变响应内容。 */
+export const UNREAD_RESPONSE_SCRIPT: string = `(function(){
+  if(window!==window.top||window.__otBadgeHook)return;
+  window.__otBadgeHook=true;
+  window.__otBadgeEpoch=0;
+  var send=XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.send=function(){
+    var epoch=window.__otBadgeEpoch;
+    this.addEventListener('load',function(){
+      if(epoch!==window.__otBadgeEpoch||this.status!==200)return;
+      try{
+        var url=new URL(this.responseURL);
+        if(url.hostname!=='x.com'||!/^\\/i\\/api\\/graphql\\/[^/]+\\/ViewerBadgeCounts$/.test(url.pathname))return;
+        var data=this.responseType==='json'?this.response:JSON.parse(this.responseText);
+        var counts=data.data.viewer_v2.user_results.result.badge_counts;
+        var n=counts.ntab_unread_count,m=counts.xchat_unread_count;
+        if(!Number.isSafeInteger(n)||n<0||!Number.isSafeInteger(m)||m<0)throw new Error('Invalid badge counts');
+        window.__otBadgeCounts={notifications:n,messages:m,time:Date.now()};
+      }catch(error){console.warn('CruX unread response invalid');}
+    },{once:true});
+    return send.apply(this,arguments);
+  };
+})();`;
+
 // Unread counters for the shell's own tab bar and for the launcher badge.
 //
 // The counts belong to x.com, and the page already publishes them twice, so the
@@ -402,6 +506,9 @@ export function accountAvatarDiagScript(): string {
 // tabs.
 export const UNREAD_COUNTS_SCRIPT: string =
   '(function(){try{' +
+  // 响应只在一分钟内优先使用；站点未提供有效响应时继续读取原有页面入口。
+  'var cached=window.__otBadgeCounts;' +
+  'if(cached&&Date.now()-cached.time<60000)return cached.notifications+"/"+cached.messages;' +
   // An Arabic page formats counts with Arabic-Indic digits; normalise before
   // parsing so the number survives a localised page.
   'function dg(v){return String(v)' +

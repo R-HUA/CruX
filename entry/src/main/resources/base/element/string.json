@@ -1,5 +1,10 @@
 {
   "string": [
+    {"name":"menu_switch_account","value":"Switch account"},
+    {"name":"menu_share_page","value":"Share page"},
+    {"name":"desktop_site","value":"Desktop site"},
+    {"name":"show_original_page","value":"View original page"},
+    {"name":"show_native_shell","value":"Return to CruX"},
     {"name":"incoming_failed","value":"Unable to open this shared content or link."},
     {"name":"incoming_busy","value":"Close the current panel, then share or open the link again."},
     {"name":"incoming_draft_title","value":"Existing draft"},

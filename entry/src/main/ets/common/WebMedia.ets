@@ -1,4 +1,4 @@
-/** 仅接管帖子静态图片，头像、视频封面和其他地址仍由网页处理。 */
+/** 帖子图片和头像可直接查看；卡片仍保留点击导航，仅长按查看图片。 */
 export interface MediaAddress {
   id: string;
   source: string;
@@ -6,6 +6,16 @@ export interface MediaAddress {
 }
 
 export function resolveMedia(source: string): MediaAddress | undefined {
+  const avatar = /^https:\/\/pbs\.twimg\.com\/profile_images\/([0-9]+)\/([A-Za-z0-9_-]+)\.(jpg|jpeg|png|webp|gif)$/i.exec(source);
+  if (avatar) {
+    const original = source.replace(/_(normal|bigger|400x400)(?=\.[a-z]+$)/i, '');
+    return { id: 'avatar-' + avatar[1] + '-' + avatar[2], source: source,
+      candidates: original === source ? [source] : [original, source] };
+  }
+  const card = /^https:\/\/pbs\.twimg\.com\/(card_img|amplify_video_thumb|ext_tw_video_thumb)\/([A-Za-z0-9_/-]+)(?:\.(jpg|jpeg|png|webp))?(?:\?[^#]*)?$/i.exec(source);
+  if (card) {
+    return { id: 'card-' + card[1] + '-' + card[2].replace(/\//g, '-'), source: source, candidates: [source] };
+  }
   const match = /^https:\/\/pbs\.twimg\.com\/media\/([A-Za-z0-9_-]+)(?:\.(jpg|jpeg|png|webp))?(?::(?:orig|large|medium|small|thumb|4096x4096))?(?:\?([^#]*))?$/i.exec(source);
   if (!match) { return undefined; }
   const formatMatch = /(?:^|&)format=(jpg|jpeg|png|webp)(?:&|$)/i.exec(match[3] || '');
@@ -26,6 +36,16 @@ export const MEDIA_CLICK_SCRIPT: string = `(function(){
   document.addEventListener('click',function(e){
     if(e.button!==0||e.ctrlKey||e.metaKey||e.shiftKey||e.altKey)return;
     var target=e.target instanceof Element?e.target:null;
+    var avatarLink=target&&target.closest('a[href]');
+    if(avatarLink&&/^\\/[A-Za-z0-9_]{1,15}\\/photo$/.test(new URL(avatarLink.href,location.href).pathname)){
+      var avatar=avatarLink.querySelector('img');
+      var source=avatar&&(avatar.currentSrc||avatar.src);
+      if(source&&/^https:\\/\\/pbs\\.twimg\\.com\\/profile_images\\//.test(source)&&window.otNative&&window.otNative.onImages&&
+        window.otNative.onImages(JSON.stringify({urls:[source],index:0}))===true){
+        e.preventDefault();e.stopImmediatePropagation();
+      }
+      return;
+    }
     var photo=target&&target.closest('[data-testid="tweetPhoto"]');
     var link=photo&&photo.closest('a[href]');
     if(!photo||!link||!window.otNative||!window.otNative.onImages)return;

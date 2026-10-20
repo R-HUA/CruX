@@ -1,5 +1,10 @@
 {
   "string": [
+    {"name":"menu_switch_account","value":"切换账号"},
+    {"name":"menu_share_page","value":"分享页面"},
+    {"name":"desktop_site","value":"桌面版网站"},
+    {"name":"show_original_page","value":"查看原始网页"},
+    {"name":"show_native_shell","value":"返回 CruX"},
     {"name":"incoming_failed","value":"无法打开此次分享内容或链接"},
     {"name":"incoming_busy","value":"请关闭当前面板后重新分享或打开链接"},
     {"name":"incoming_draft_title","value":"已有草稿"},

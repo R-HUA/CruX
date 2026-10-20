@@ -11,6 +11,8 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import assert from 'node:assert/strict';
+import vm from 'node:vm';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const chrome = join(here, '..', 'entry', 'src', 'main', 'ets', 'common', 'WebChrome.ets');
@@ -45,14 +47,14 @@ function element(options = {}) {
   };
 }
 
-function run(script, bySelector, title) {
+function run(script, bySelector, title, window = {}) {
   const document = {
     title,
     querySelectorAll(selector) {
       return bySelector[selector] ?? [];
     }
   };
-  return new Function('document', `return ${script}`)(document);
+  return new Function('document', 'window', `return ${script}`)(document, window);
 }
 
 const NOTIFICATIONS = 'a[href="/notifications"],[data-testid="AppTabBar_Notifications_Link"]';
@@ -111,5 +113,53 @@ for (const [name, bySelector, title, expected] of cases) {
   console.log(`${ok ? 'ok  ' : 'FAIL'} ${name}: got ${JSON.stringify(actual)}, want ${JSON.stringify(expected)}`);
 }
 
+// 使用只读实测的响应结构验证主路径，不在测试中发起网络请求。
+const source = readFileSync(chrome, 'utf8');
+const responseScript = eval(source.match(/export const UNREAD_RESPONSE_SCRIPT: string = (`[\s\S]*?`);/)[1]);
+let sent = 0, warnings = 0;
+class Request {
+  listeners = [];
+  status = 200;
+  responseType = '';
+  responseURL = 'https://x.com/i/api/graphql/current/ViewerBadgeCounts';
+  addEventListener(name, callback, options) {
+    assert.equal(name, 'load'); assert.equal(options.once, true);
+    this.listeners.push(callback);
+  }
+  send() { sent++; return 'original-result'; }
+  complete() { for (const callback of this.listeners.splice(0)) callback.call(this); }
+}
+const window = {}; window.top = window;
+const runtime = { window, XMLHttpRequest: Request, URL, Date, console: {warn(){warnings++;}} };
+vm.runInNewContext(responseScript, runtime);
+vm.runInNewContext(responseScript, runtime);
+const response = (n, m) => ({data:{viewer_v2:{user_results:{result:{__typename:'User',badge_counts:{
+  ntab_unread_count:n,xchat_unread_count:m,dm_unread_count:99,total_unread_count:105,is_from_urt:true
+}}}}}});
+let request = new Request(); request.responseText = JSON.stringify(response(4, 2));
+assert.equal(request.send(), 'original-result'); request.complete();
+assert.equal(sent, 1); assert.equal(run(script, {}, '', window), '4/2');
+assert.equal(warnings, 0);
+// 返回零必须覆盖旧值，旧账号的在途结果不得回写。
+request = new Request(); request.responseType = 'json'; request.response = response(0, 0);
+request.send(); request.complete(); assert.equal(run(script, {}, '', window), '0/0');
+request = new Request(); request.responseText = JSON.stringify(response(9, 9)); request.send();
+window.__otBadgeEpoch++; window.__otBadgeCounts = null; request.complete();
+assert.equal(run(script, {}, '', window), '-1/-1');
+for (const [url, status] of [['https://other.example/i/api/graphql/current/ViewerBadgeCounts',200],
+  ['https://x.com/i/api/graphql/current/OtherOperation',200],
+  ['https://x.com/i/api/graphql/current/ViewerBadgeCounts',500]]) {
+  request = new Request(); request.responseURL = url; request.status = status;
+  request.responseText = JSON.stringify(response(8, 8)); request.send(); request.complete();
+  assert.equal(window.__otBadgeCounts, null);
+}
+for (const body of ['invalid', JSON.stringify(response(-1, 1)), JSON.stringify(response(1, '2'))]) {
+  request = new Request(); request.responseText = body; request.send(); request.complete();
+  assert.equal(window.__otBadgeCounts, null);
+}
+assert.equal(warnings, 3);
+window.__otBadgeCounts = {notifications:5,messages:2,time:Date.now()-60001};
+assert.equal(run(script, {[NOTIFICATIONS]:[element({text:'',attrs:{'aria-label':'Notifications (3 unread)'}})]}, '', window), '3/-1');
+console.log('Passive XHR counts, account changes, response boundaries and stale response fallback passed.');
 console.log(failed === 0 ? '\nall cases passed' : `\n${failed} case(s) failed`);
 process.exit(failed === 0 ? 0 : 1);

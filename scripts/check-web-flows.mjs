@@ -25,7 +25,8 @@ for(const path of ['/','/i/flow/login','/login','/unknown/path']){
 }
 assert.equal(routes.usesNativeNavigation('https://example.com/home'),false);
 assert.equal(routes.isTabRootPath('/search'),true);
-for(const path of ['/explore','/search?q=中文','/i/flow/login']){
+for(const path of ['/i/flow/login','/explore','/explore/tabs/for-you','/search?q=中文',
+  '/messages','/messages/42','/i/chat','/i/chat/conversations/42']){
   assert.equal(routes.usesNativeHeader('https://x.com'+path),false,path);
 }
 assert.equal(routes.usesNativeHeader('https://x.com/home'),true);
@@ -38,12 +39,12 @@ assert.equal(routes.isPostDetailUrl('https://x.com/i/web/status/123'),true);
 for (const url of ['https://x.com/alice/status/123/photo/1','https://x.com/alice/status/123/mediaViewer','https://example.com/alice/status/123']) {
   assert.equal(routes.isPostDetailUrl(url),false,url);
 }
-const scripts = load('WebChrome', ['fillComposerScript','CLICK_POST_BUTTON_SCRIPT','POST_RESULT_SCRIPT','chromeScript','chromeFlagScript','chromeInsetsScript','chromeDocumentStartScript','OWN_HANDLE_SCRIPT','profileBootstrapScript','clickRouteScript','accountAvatarScript','accountAvatarDiagScript']);
+const scripts = load('WebChrome', ['fillComposerScript','CLICK_POST_BUTTON_SCRIPT','POST_RESULT_SCRIPT','chromeScript','chromeFlagScript','chromeInsetsScript','chromeDocumentStartScript','chromeActiveScript','COMPOSER_READY_SCRIPT','ACCOUNT_SWITCH_SCRIPT','OWN_HANDLE_SCRIPT','profileBootstrapScript','clickRouteScript','accountAvatarScript','accountAvatarDiagScript','PROFILE_LAYOUT_SCRIPT']);
 assert.equal(scripts.chromeDocumentStartScript(false),'');
 new vm.Script(scripts.chromeDocumentStartScript(true));
 // 文档开始阶段与原生路由一致；登录表单出现时不得隐藏其导航。
 for (const path of ['/home','/explore','/search','/notifications','/messages','/messages/42',
-  '/i/chat','/alice','/alice/status/123','/settings','/settings/profile','/i/bookmarks',
+  '/i/chat','/i/chat/conversations/42','/alice','/alice/status/123','/settings','/settings/profile','/i/bookmarks',
   '/alice/lists','/i/web/status/123','/i/flow/login','/grok','/unknown/path','/home/unknown','/invalid-handle','/']) {
   const style = {textContent:''};
   let auth = false;
@@ -65,12 +66,65 @@ const insetBody=mainSource.match(/private overlayTopInset\(\): number \{([\s\S]*
 const topInset=vm.runInNewContext(stripTypeScriptTypes('(function(){'+insetBody+'})'),{
   HEADER_HEIGHT:56,HEADER_CONTENT_LIFT:4
 });
-const insetState={topInset:39,homeTabsHeight:28,overlaysWeb:()=>true,topChromeHeight:()=>56,isHomeRoot:()=>true};
+const insetState={topInset:39,homeTabsHeight:28,viewingHandle:'',overlaysWeb:()=>true,topChromeHeight:()=>56,isHomeRoot:()=>true};
 assert.equal(topInset.call(insetState),77,'Home inset ends at the measured underline, not the full title bar');
 insetState.homeTabsHeight=40;assert.equal(topInset.call(insetState),83,'Large text changes the measured boundary');
 insetState.isHomeRoot=()=>false;assert.equal(topInset.call(insetState),95);
+insetState.viewingHandle='alice';assert.equal(topInset.call(insetState),0,'Profile banner has no top inset');
+insetState.viewingHandle='';assert.equal(topInset.call(insetState),95,'Leaving a profile restores the other page inset');
 insetState.topChromeHeight=()=>0;assert.equal(topInset.call(insetState),0);
 insetState.overlaysWeb=()=>false;assert.equal(topInset.call(insetState),0);
+
+// 真实边界与滚动统一为 vp；标题和模糊独立变化，并连续反向恢复。
+const profileMethods=['syncHeaderBlur','resetHeaderBlur','resetProfileLayout','receiveProfileLayout','profileBannerButtons'].map(name=>
+  mainSource.match(new RegExp('^  private '+name+'\\([\\s\\S]*?^  \\}', 'm'))[0]).join('\n');
+const ProfilePage=vm.runInNewContext(stripTypeScriptTypes('class ProfilePage{'+profileMethods+'};ProfilePage'),{
+  HEADER_HEIGHT:56,HEADER_BLUR_DISTANCE:32,hilog:{error(){}},DOMAIN:0,TAG:''});
+const profilePage=new ProfilePage();let blurOffset=0;
+Object.assign(profilePage,{viewingHandle:'alice',webWidth:440,topInset:39,avatarAlive:true,appBackground:false,rawWeb:false,
+  currentUrl:'https://x.com/alice',controller:{getUrl:()=>profilePage.currentUrl},lastBlurOffset:0,
+  blurScroller:{scrollTo:({yOffset,animation})=>{assert.equal(animation,false);blurOffset=yOffset;}}});
+profilePage.resetProfileLayout();profilePage.syncHeaderBlur(1000);
+assert.equal(blurOffset,0);assert.equal(profilePage.profileTitleOpacity,0);
+const layout={url:profilePage.currentUrl,width:880,viewWidth:440,scrollY:0,ready:true,hasBanner:true,
+  bannerBottom:400,identityBottom:640,name:'Alice',handle:'Alice'};
+profilePage.receiveProfileLayout(JSON.stringify(layout));
+for(const [y,blur,title] of [[0,0,0],[105,0,0],[129,0.5,0],[153,1,0],[225,1,0],
+  [233,1,0.15625],[241,1,0.5],[257,1,1],[241,1,0.5],[129,0.5,0],[0,0,0]]){
+  profilePage.syncHeaderBlur(y);assert.equal(profilePage.profileBlurProgress,blur,'blur at '+y);
+  assert.equal(profilePage.profileTitleOpacity,title,'title at '+y);assert.equal(blurOffset,blur*32);
+}
+profilePage.receiveProfileLayout(JSON.stringify({...layout,scrollY:482}));
+assert.equal(profilePage.lastScrollY,241);assert.equal(profilePage.profileTitleOpacity,0.5,'Restored scroll is used without scrolling the page');
+profilePage.currentUrl='https://x.com/bob';profilePage.viewingHandle='bob';profilePage.resetProfileLayout();
+profilePage.receiveProfileLayout(JSON.stringify(layout));
+assert.equal(profilePage.profileTitleOpacity,0);assert.equal(profilePage.profileLayout,undefined,'Old page geometry is rejected');
+profilePage.receiveProfileLayout(JSON.stringify({...layout,url:profilePage.currentUrl,handle:'bob',viewWidth:600}));
+assert.equal(profilePage.profileLayout,undefined,'Old viewport geometry is rejected');
+profilePage.receiveProfileLayout(JSON.stringify({...layout,url:profilePage.currentUrl,handle:'bob',ready:false}));
+assert.equal(blurOffset,0);assert.equal(profilePage.profileBannerButtons(),true);
+profilePage.receiveProfileLayout(JSON.stringify({...layout,url:profilePage.currentUrl,handle:'bob',hasBanner:false}));
+assert.equal(profilePage.profileBannerButtons(),false,'No banner keeps readable theme icons and status text');
+profilePage.viewingHandle='';profilePage.syncHeaderBlur(16);assert.equal(blurOffset,16,'Other pages retain the original transition');
+
+// 资料节点在 SPA 切页时必须与地址中的账号一致，无横幅取实际资料区边界。
+let profileY=0,hasBanner=true,domHandle='Alice',identityHeight=80,profileReports=[];
+const nameNode={querySelectorAll:()=>[{textContent:'Alice'},{get textContent(){return '@'+domHandle;}}],closest:()=>null,
+  getBoundingClientRect:()=>({width:408,height:identityHeight,bottom:320-profileY}),
+  parentElement:{getBoundingClientRect:()=>({bottom:520-profileY})}};
+const profileContext={window:{innerWidth:440,__otViewportWidth:440,get scrollY(){return profileY;},
+  otNative:{onProfileLayout:value=>profileReports.push(JSON.parse(value))}},
+  location:{pathname:'/alice',href:'https://x.com/alice'},
+  document:{querySelectorAll:()=>[nameNode],querySelector:()=>hasBanner?{getBoundingClientRect:()=>({bottom:200-profileY})}:null}};
+const measure=()=>vm.runInNewContext(scripts.PROFILE_LAYOUT_SCRIPT+'(true)',profileContext);
+measure();assert.equal(profileReports.at(-1).bannerBottom,200);assert.equal(profileReports.at(-1).identityBottom,320);
+profileY=100;measure();assert.equal(profileReports.length,1,'Scrolling does not repeatedly send unchanged document geometry');
+hasBanner=false;measure();assert.equal(profileReports.at(-1).bannerBottom,520);assert.equal(profileReports.at(-1).hasBanner,false);
+profileContext.location={pathname:'/bob',href:'https://x.com/bob'};measure();assert.equal(profileReports.at(-1).ready,false);
+domHandle='bob';measure();assert.equal(profileReports.at(-1).ready,true);assert.equal(profileReports.at(-1).scrollY,100);
+identityHeight=0;measure();assert.equal(profileReports.at(-1).ready,false,'Loading placeholders cannot reveal the title');
+assert.match(mainSource,/onPageBegin\(\(\) => \{\s*this.resetProfileLayout\(\)/);
+assert.match(mainSource,/onAreaChange\([\s\S]*?this.webWidth !== Number\(area.width\)[\s\S]*?this.resetProfileLayout\(\)/);
 const replyMethod=mainSource.match(/private replyToPost\(\): void \{([\s\S]*?)\n  \}/)[1];
 const reply=vm.runInNewContext(stripTypeScriptTypes('(function(){'+replyMethod+'})'),{
   TWITTER_BASE:'https://x.com',web_webview:{WebviewController:class{}}
@@ -165,11 +219,13 @@ vm.runInNewContext(scripts.chromeScript(true,true,'https://x.com/home'),chromeCo
 vm.runInNewContext(scripts.chromeFlagScript(true,true,'https://x.com/home'),chromeContext);
 assert.match(cssText,/FloatingActionButtons_Tweet_Button/);
 assert.doesNotMatch(cssText,/TopNavBar|role='banner'/);
-// 搜索页必须保留网页输入框及候选列表，仍只去重底部导航和发帖入口。
-authVisible=false;location.pathname='/search';location.href='https://x.com/search?q=中文';
-vm.runInNewContext(scripts.chromeScript(true,false,location.href),chromeContext);
-assert.doesNotMatch(cssText,/TopNavBar|role='banner'|tablist/);
-assert.match(cssText,/FloatingActionButtons_Tweet_Button/);
+// 搜索与私信保留官网完整顶栏，首帧和 SPA 切页后都只去重底部导航与发帖入口。
+for (const path of ['/explore','/search?q=中文','/i/chat','/i/chat/conversations/42','/messages/42']) {
+  authVisible=false;location.pathname=path.split('?')[0];location.href='https://x.com'+path;
+  vm.runInNewContext(scripts.chromeScript(true,routes.usesNativeHeader(location.href),location.href),chromeContext);
+  assert.doesNotMatch(cssText,/TopNavBar|role='banner'|form\[role="search"\]|tablist/,path);
+  assert.match(cssText,/FloatingActionButtons_Tweet_Button/,path);
+}
 authVisible=false;vm.runInNewContext(scripts.chromeScript(false,false,location.href),chromeContext);
 assert.doesNotMatch(cssText,/display:none/);
 // 视频遮罩应铺到底；避让放进内容内部，不能影响登录、图片和未知页面。
@@ -395,9 +451,10 @@ pillState.firstLoadDone=false;assert.equal(pill.call(pillState),true);
 pillState.firstLoadDone=true;pillState.hasError=true;assert.equal(pill.call(pillState),true);
 pillState.showsNativeNavigation=()=>true;assert.equal(pill.call(pillState),false);
 pillState.showsNativeNavigation=()=>false;
-for(const state of ['fullScreen','imageViewerOpen','sheetOpen','networkOpen','appearanceOpen','discovering','rawWeb']) {
+for(const state of ['fullScreen','imageViewerOpen','sheetOpen','networkOpen','appearanceOpen','discovering']) {
   pillState[state]=true;assert.equal(pill.call(pillState),false,state);pillState[state]=false;
 }
+pillState.rawWeb=true;assert.equal(pill.call(pillState),true,'Original web mode keeps its return entry');
 
 // 头像下载、缓存和异步状态测试见 check-avatar-loading.mjs，使用生产下载器覆盖平台 I/O 边界。
 
@@ -425,3 +482,63 @@ assert.deepEqual(Array.from(media.mediaAcceptTypes(['application/pdf'])),[]);
 assert.equal(media.isSiteUrl('https://x.com.evil.test/'),false);
 assert.equal(media.isAuthUrl('https://accounts.google.com/o/oauth2/auth'),true);
 console.log('PASS: route classification, full text transfer, submission results and file type boundaries');
+
+// 发布资格跟随网页按钮；不以字符数替代站点按账号应用的规则。
+for (const [button, expected] of [[null,false],[{disabled:true,getAttribute:()=>null},false],
+  [{disabled:false,getAttribute:()=> 'true'},false],[{disabled:false,getAttribute:()=>null},true]]) {
+  assert.equal(vm.runInNewContext(scripts.COMPOSER_READY_SCRIPT,{document:{querySelector:()=>button}}),expected);
+}
+let disconnected=0, resumed=0, applied=0, pullCleared=0;
+const lifecycle={window:{__otObs:{disconnect(){disconnected++;},observe(){resumed++;}},
+  __otApplyTop(){applied++;},__otClearPullTimers(){pullCleared++;},__otPend:1,__otTimer:42},
+  clearTimeout(){},document:{documentElement:{}}};
+vm.runInNewContext(scripts.chromeActiveScript(false),lifecycle);
+assert.equal(lifecycle.window.__otChromePaused,true);assert.equal(disconnected,1);
+assert.equal(lifecycle.window.__otPend,0);assert.equal(resumed,0);
+vm.runInNewContext(scripts.chromeActiveScript(true),lifecycle);
+assert.equal(lifecycle.window.__otChromePaused,false);assert.equal(resumed,1);assert.equal(applied,1);
+assert.equal(pullCleared,2);
+const themeColors=[];
+chromeContext.document.body={};chromeContext.getComputedStyle=()=>({backgroundColor:'rgb(21, 32, 43)'});
+chromeContext.window.otNative.onTheme=(_source,color)=>themeColors.push(color);
+chromeContext.window.__otApplyTop();chromeContext.window.__otApplyTop();
+assert.deepEqual(themeColors,['rgb(21, 32, 43)']);
+chromeContext.getComputedStyle=()=>({backgroundColor:'rgb(255, 255, 255)'});
+chromeContext.window.__otApplyTop();assert.equal(themeColors.length,2);
+// 不再以原生提交拼接搜索 URL，候选与提交完整交由网页自己的搜索交互处理。
+assert.doesNotMatch(mainSource,/submitSearch|src=typed_query/);
+const topBarSource=readFileSync(new URL('../entry/src/main/ets/pages/NativeTopBar.ets',import.meta.url),'utf8');
+assert.match(topBarSource,/@Prop titleOpacity: number = 1/);
+assert.match(topBarSource,/\.opacity\(this.titleOpacity\)/);
+assert.doesNotMatch(topBarSource,/\bSearch\(/);
+// 验证界面实际使用的按钮条件，避免沿用来源标签时在非首页显示发帖入口。
+const fabExpression=mainSource.match(/if \((this\.showsNativeNavigation\(\) && this\.isHomeRoot\(\)[^\r\n]*)\) \{\r?\n\s*this\.composeFab\(\)/)[1];
+const fabVisible=vm.runInNewContext('(function(){return '+fabExpression+';})');
+const homeBody=mainSource.match(/private isHomeRoot\(\): boolean \{([\s\S]*?)\n  \}/)[1];
+const isHomeRoot=vm.runInNewContext('(function(){'+homeBody+'})');
+const fabState={currentPath:'/home',isHomeRoot,showsNativeNavigation:()=>true,hasError:false,firstLoadDone:true};
+assert.equal(fabVisible.call(fabState),true);
+for (const path of ['/explore','/search','/notifications','/i/chat','/messages/compose','/alice','/alice/status/123','/settings']) {
+  fabState.currentPath=path;assert.equal(fabVisible.call(fabState),false,path);
+}
+fabState.currentPath='/home';fabState.hasError=true;assert.equal(fabVisible.call(fabState),false);
+fabState.hasError=false;fabState.firstLoadDone=false;assert.equal(fabVisible.call(fabState),false);
+// 新草稿使旧异步校验失效，后台不再发起校验。
+let syncTask, resolveFill;
+const composeValidationContext={DRAFT_SAVE_DEBOUNCE_MS:700,COMPOSER_READY_SCRIPT:scripts.COMPOSER_READY_SCRIPT,
+  fillComposerScript:scripts.fillComposerScript,$r:key=>key,MainTabs:{unquote:value=>value},
+  clearTimeout(){},setTimeout:callback=>{syncTask=callback;return 1;},hilog:{warn(){}},DOMAIN:1,TAG:'test'};
+const method=name=>mainSource.match(new RegExp('private '+name+'\\([^)]*\\): void \\{([\\s\\S]*?)\\n  \\}'))[1];
+const syncCompose=vm.runInNewContext(stripTypeScriptTypes('(function(){'+method('scheduleComposeSync')+'})'),composeValidationContext);
+const clearCompose=vm.runInNewContext(stripTypeScriptTypes('(function(){'+method('clearComposeSync')+'})'),composeValidationContext);
+const composing={composeRevision:0,composeSyncTimer:-1,appBackground:false,sheetOpen:true,webComposer:false,
+  composeLoading:false,composePreparing:false,posting:false,postUncertain:false,draft:'第一份',composeOwner:'alice',
+  composeController:{runJavaScript:()=>new Promise(resolve=>{resolveFill=resolve;})},clearComposeSync:clearCompose};
+syncCompose.call(composing);const oldValidation=syncTask();
+composing.draft='第二份';syncCompose.call(composing);resolveFill('ok');await oldValidation;
+assert.equal(composing.composeReady,false);
+composing.composeController.runJavaScript=async script=>script===scripts.COMPOSER_READY_SCRIPT?'true':'ok';
+await syncTask();assert.equal(composing.composeReady,true);
+composing.appBackground=true;syncTask=undefined;syncCompose.call(composing);
+assert.equal(syncTask,undefined);assert.equal(composing.composeReady,false);
+console.log('PASS: webpage search/chat headers, home-only compose, webpage validation, stale draft results, theme and background observers');

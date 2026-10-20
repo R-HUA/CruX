@@ -206,10 +206,10 @@ export function isPostDetailUrl(url: string): boolean {
     /^\/(?:[a-z0-9_]{1,15}|i\/web)\/status\/\d+$/.test(pathOf(url));
 }
 
-/** 搜索框和候选项由网页一起管理，避免原生输入与网页搜索状态分离。 */
+/** 搜索候选与私信会话栏由网页管理，不叠加原生标题栏。 */
 export function usesNativeHeader(url: string): boolean {
   const path: string = pathOf(url);
+  if (/^\/(explore|search|messages|i\/chat)(\/|$)/.test(path)) { return false; }
   return isPostDetailUrl(url) || isSecondaryUrl(url) || profileHandleForUrl(url) !== '' ||
-    (usesNativeNavigation(url) && isTabRootPath(path) &&
-    path !== '/explore' && path !== '/search');
+    (usesNativeNavigation(url) && isTabRootPath(path));
 }

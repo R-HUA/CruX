@@ -12,6 +12,11 @@ for (const url of ['https://pbs.twimg.com/profile_images/a.jpg', 'https://pbs.tw
 }
 assert.equal(media.resolveMedia('https://pbs.twimg.com/media/a.png:large').candidates[0], 'https://pbs.twimg.com/media/a?format=png&name=orig');
 assert.equal(media.resolveMedia('https://pbs.twimg.com/media/a?format=webp&name=small').candidates[0], 'https://pbs.twimg.com/media/a?format=webp&name=orig');
+assert.equal(media.resolveMedia('https://pbs.twimg.com/profile_images/123/avatar_normal.jpg').candidates[0],
+  'https://pbs.twimg.com/profile_images/123/avatar.jpg');
+assert.equal(media.resolveMedia('https://pbs.twimg.com/card_img/123/card?format=jpg&name=small').candidates.length,1);
+assert.equal(media.resolveMedia('https://pbs.twimg.com/profile_images/123/avatar.gif').candidates[0],
+  'https://pbs.twimg.com/profile_images/123/avatar.gif');
 
 let handler, accepted = true, calls = 0, payload;
 class Element {}
@@ -21,7 +26,7 @@ const links = images.map((image,i) => ({href:'https://x.com/alice/status/123/pho
 const quote = {href:'https://x.com/bob/status/456/photo/1',querySelector:()=>({src:'https://pbs.twimg.com/media/quote?format=jpg'})};
 const scope = {querySelectorAll:()=>[...links,quote,links[0]]};
 const photo = {closest:s=>s==='a[href]'?links[1]:scope,querySelector:()=>images[1]};
-const target = new Element(); target.closest=()=>photo;
+const target = new Element(); target.closest=s=>s==='a[href]'?links[1]:photo;
 const context = {Element,URL,location:{href:'https://x.com/home'},window:{otNative:{onImages:p=>{calls++;payload=JSON.parse(p);return accepted;}}},document:{addEventListener:(_event,h)=>handler=h}};
 vm.runInNewContext(media.MEDIA_CLICK_SCRIPT,context);
 let prevented=0;
@@ -31,6 +36,10 @@ assert.deepEqual(payload,{urls,index:1}); assert.equal(prevented,1);
 accepted=false; handler(event); assert.equal(prevented,1);
 handler({...event,ctrlKey:true}); assert.equal(calls,2);
 delete context.window.otNative; handler(event); assert.equal(prevented,1);
+context.window.otNative = {onImages:p=>{payload=JSON.parse(p);return true;}};
+const avatar = 'https://pbs.twimg.com/profile_images/123/avatar_normal.jpg';
+target.closest = () => ({href:'https://x.com/alice/photo',querySelector:()=>({src:avatar})});
+handler(event); assert.deepEqual(payload, {urls:[avatar],index:0}); assert.equal(prevented,2);
 
 const png = Uint8Array.from([137,80,78,71,13,10,26,10,1,2,3,4]).buffer;
 let responses=[],requests=0,writes=[],removed=[],failWrite=false;
@@ -48,6 +57,7 @@ const runtime={ArrayBuffer,Uint8Array,Map,Promise,Date,canIUse:()=>true,
   hilog:{info(){},warn(){}}};
 const {MediaFiles,imageExtension}=vm.runInNewContext(source('MediaFiles')+';({MediaFiles,imageExtension})',runtime);
 assert.equal(imageExtension(png),'png'); assert.throws(()=>imageExtension(new ArrayBuffer(12)));
+assert.equal(imageExtension(Uint8Array.from([71,73,70,56,57,97]).buffer),'gif');
 responses=[{responseCode:404},{responseCode:200,result:png}];
 let session=new MediaFiles();
 const address=media.resolveMedia(urls[0]);
@@ -67,16 +77,25 @@ session=new MediaFiles();file=await session.load(address,{cacheDir:'/cache'});
 assert.equal(file.originalSize,false);await session.close();
 removed=[];
 runtime.fileIo.listFile=async()=>['x-image-1-old.jpg','x-image-2-recent.png','unrelated.jpg'];
-runtime.fileIo.stat=async p=>({mtime:p.includes('-old.')?0:Date.now()/1000});
+runtime.fileIo.stat=async p=>({mtime:p.includes('-old.')?0:Date.now()/1000,size:1024});
+MediaFiles.cacheCleanup=undefined;
 responses=[{responseCode:200,result:png}];session=new MediaFiles();
 await session.load(address,{cacheDir:'/cache'});
 assert.deepEqual(removed,['/cache/x-image-1-old.jpg']);await session.close();
 removed=[];
 runtime.fileIo.listFile=async()=>['x-web-image-1-2-3.tmp','x-web-image-1-2-4.tmp','x-web-image-unrelated.tmp'];
-runtime.fileIo.stat=async p=>({mtime:p.endsWith('-3.tmp')?0:Date.now()/1000});
+runtime.fileIo.stat=async p=>({mtime:p.endsWith('-3.tmp')?0:Date.now()/1000,size:1024});
+MediaFiles.cacheCleanup=undefined;
 responses=[{responseCode:200,result:png}];session=new MediaFiles();
 await session.load(address,{cacheDir:'/cache'});
 assert.deepEqual(removed,['/cache/x-web-image-1-2-3.tmp']);await session.close();
+// 模拟新进程的残留文件；容量清理只删模块文件，按最老文件优先。
+removed=[];MediaFiles.cacheCleanup=undefined;
+runtime.fileIo.listFile=async()=>['x-image-1-a.jpg','x-image-2-b.png','x-image-3-c.gif','unrelated.bin'];
+runtime.fileIo.stat=async p=>({mtime:Date.now()/1000-(p.includes('-a.')?3:p.includes('-b.')?2:1),size:60*1024*1024});
+responses=[{responseCode:200,result:png}];session=new MediaFiles();await session.load(address,{cacheDir:'/cache'});
+assert.deepEqual(removed,['/cache/x-image-1-a.jpg']);await session.close();
+runtime.fileIo.listFile=async()=>[];
 
 // DoH policy: OFF sends no dnsOverHttps, AUTO retries once without it,
 // SECURE_ONLY must not fall back to system DNS.

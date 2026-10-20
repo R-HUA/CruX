@@ -20,6 +20,12 @@ export interface MediaFile {
   originalSize: boolean;
 }
 
+interface CachedImageFile {
+  path: string;
+  size: number;
+  mtime: number;
+}
+
 /** 以响应字节识别格式，不能用请求地址推断实际文件类型。 */
 export function imageExtension(buffer: ArrayBuffer): string {
   const b = new Uint8Array(buffer);
@@ -28,6 +34,8 @@ export function imageExtension(buffer: ArrayBuffer): string {
   if (b.length >= 3 && b[0] === 255 && b[1] === 216 && b[2] === 255) { return 'jpg'; }
   if (b.length >= 12 && b[0] === 82 && b[1] === 73 && b[2] === 70 && b[3] === 70 &&
     b[8] === 87 && b[9] === 69 && b[10] === 66 && b[11] === 80) { return 'webp'; }
+  if (b.length >= 6 && b[0] === 71 && b[1] === 73 && b[2] === 70 && b[3] === 56 &&
+    (b[4] === 55 || b[4] === 57) && b[5] === 97) { return 'gif'; }
   throw new Error('Unsupported image response');
 }
 
@@ -39,7 +47,8 @@ export class MediaFiles {
   private downloads: Map<string, Promise<MediaFile>> = new Map();
   private operations: Promise<void>[] = [];
   private stamp: string = Date.now().toString();
-  private cleanup: Promise<void> | undefined = undefined;
+  // 首次下载前统一回收上次进程残留，避免并发查看会话互删临时文件。
+  private static cacheCleanup: Promise<void> | undefined = undefined;
   private webImages: WebImageDownloads | undefined;
   private webRequests: WebImageRequest[] = [];
 
@@ -56,8 +65,8 @@ export class MediaFiles {
   }
 
   private async download(address: MediaAddress, directory: string): Promise<MediaFile> {
-    if (!this.cleanup) { this.cleanup = this.removeExpired(directory); }
-    await this.cleanup;
+    if (!MediaFiles.cacheCleanup) { MediaFiles.cacheCleanup = this.removeExpired(directory); }
+    await MediaFiles.cacheCleanup;
     const policy: DohPolicy = NetworkConfig.getInstance().getDohPolicy();
     const useWeb: boolean = this.webImages !== undefined && NetworkConfig.getInstance().snapshot().syncImageDownloader;
     for (const candidate of address.candidates) {
@@ -148,15 +157,28 @@ export class MediaFiles {
     }
   }
 
-  /** 回收进程被终止后遗留的缓存，只处理本模块且超过一天的临时文件。 */
+  /** 首次下载前回收过期残留，剩余残留按最早修改时间收敛至 128 MiB。 */
   private async removeExpired(directory: string): Promise<void> {
     const names = await fileIo.listFile(directory);
+    const retained: CachedImageFile[] = [];
+    let total: number = 0;
     for (const name of names) {
-      if (!/^x-image-\d+-[A-Za-z0-9_-]+\.(jpg|png|webp)$/.test(name) &&
+      if (!/^x-image-\d+-[A-Za-z0-9_-]+\.(jpg|png|webp|gif)$/.test(name) &&
         !/^x-web-image-\d+-\d+-\d+\.tmp$/.test(name)) { continue; }
       const path = directory + '/' + name;
       const stat = await fileIo.stat(path);
-      if (Date.now() / 1000 - stat.mtime > 86400) { await fileIo.unlink(path); }
+      if (Date.now() / 1000 - stat.mtime > 86400) {
+        await fileIo.unlink(path);
+      } else {
+        retained.push({ path: path, size: stat.size, mtime: stat.mtime });
+        total += stat.size;
+      }
+    }
+    retained.sort((left: CachedImageFile, right: CachedImageFile) => left.mtime - right.mtime);
+    for (const file of retained) {
+      if (total <= 128 * 1024 * 1024) { break; }
+      await fileIo.unlink(file.path);
+      total -= file.size;
     }
   }
 
@@ -179,7 +201,8 @@ export class MediaFiles {
   share(context: common.UIAbilityContext, file: MediaFile): Promise<void> {
     if (!canIUse('SystemCapability.Collaboration.SystemShare')) { throw new Error('System share is unavailable'); }
     const data = new systemShare.SharedData({
-      utd: file.extension === 'jpg' ? 'general.jpeg' : file.extension === 'png' ? 'general.png' : 'general.webp',
+      utd: file.extension === 'jpg' ? 'general.jpeg' : file.extension === 'png' ? 'general.png' :
+        file.extension === 'gif' ? 'general.gif' : 'general.webp',
       uri: fileUri.getUriFromPath(file.path)
     });
     const task = new systemShare.ShareController(data).show(context, { anchor: 'image-share' });

@@ -1,5 +1,10 @@
 {
   "string": [
+    {"name":"menu_switch_account","value":"تبديل الحساب"},
+    {"name":"menu_share_page","value":"مشاركة الصفحة"},
+    {"name":"desktop_site","value":"موقع سطح المكتب"},
+    {"name":"show_original_page","value":"عرض الصفحة الأصلية"},
+    {"name":"show_native_shell","value":"العودة إلى CruX"},
     {"name":"incoming_failed","value":"تعذر فتح هذا المحتوى المشترك أو الرابط."},
     {"name":"incoming_busy","value":"أغلق اللوحة الحالية ثم شارك المحتوى أو افتح الرابط مجددًا."},
     {"name":"incoming_draft_title","value":"توجد مسودة"},

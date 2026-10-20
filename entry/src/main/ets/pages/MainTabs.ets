@@ -6,9 +6,12 @@ import { WebImageDownloads } from '../common/WebImageDownloads';
 import { IncomingContent } from '../common/IncomingContent';
 import { NativeImageViewer } from './NativeImageViewer';
 import { NetworkSettingsSheet } from './NetworkSettingsSheet';
+import { ComposerPanel } from './ComposerPanel';
+import { NativeBottomBar } from './NativeBottomBar';
+import { NativeTopBar } from './NativeTopBar';
 import { NetworkConfig, NetworkSnapshot } from '../common/NetworkConfig';
 import { preferences } from '@kit.ArkData';
-import { isSiteUrl, isAuthUrl, mediaAcceptTypes, chooseMedia, installDownloads } from '../common/WebSystem';
+import { isSiteUrl, isAuthUrl, mediaAcceptTypes, chooseMedia, installDownloads, sharePage } from '../common/WebSystem';
 import { abilityAccessCtrl, common, PermissionRequestResult, Permissions } from '@kit.AbilityKit';
 import { BusinessError, deviceInfo } from '@kit.BasicServicesKit';
 import { notificationManager } from '@kit.NotificationKit';
@@ -24,18 +27,19 @@ import {
 } from '../common/Theme';
 import {
   TWITTER_BASE, TWITTER_ROUTES, TWITTER_COMPOSE, TWITTER_UA,
-  TWITTER_DM_COMPOSE, TWITTER_NOTIF_SETTINGS, TWITTER_EDIT_PROFILE,
+  TWITTER_NOTIF_SETTINGS, TWITTER_EDIT_PROFILE,
   TWITTER_SETTINGS, TWITTER_BOOKMARKS,
   profileUrl, listsUrl, pathOf, routeIndexForUrl, profileHandleForUrl,
   isTabRootPath, isPostDetailUrl, isSecondaryUrl, usesNativeNavigation, usesNativeHeader, userAgentFor
 } from '../common/WebConfig';
 import {
-  OWN_HANDLE_SCRIPT, chromeScript, chromeFlagScript, chromeInsetsScript, chromeDocumentStartScript, scrollToTopScript,
+  OWN_HANDLE_SCRIPT, chromeScript, chromeFlagScript, chromeInsetsScript, chromeDocumentStartScript, chromeActiveScript, scrollToTopScript,
   CLICK_POST_BUTTON_SCRIPT, POST_RESULT_SCRIPT, profileBootstrapScript, clickRouteScript, fillComposerScript,
-  HOME_TAB_SCRIPT, selectHomeTabScript, accountAvatarScript, accountAvatarDiagScript, UNREAD_COUNTS_SCRIPT
+  HOME_TAB_SCRIPT, selectHomeTabScript, accountAvatarScript, accountAvatarDiagScript, UNREAD_COUNTS_SCRIPT,
+  ACCOUNT_SWITCH_SCRIPT, COMPOSER_READY_SCRIPT, UNREAD_RESPONSE_SCRIPT
 } from '../common/WebChrome';
 
-// 原生层提供导航、纯文字编辑与系统交互，网页保留搜索及业务页面。
+// 原生层提供导航、纯文字编辑与系统交互，网页保留搜索及会话交互。
 // 主 WebView 独立于标签内容，避免切换标签时销毁网页和会话。
 
 const DOMAIN: number = 0x0A11;
@@ -85,6 +89,12 @@ const DRAFT_SAVE_DEBOUNCE_MS: number = 700;
 // its navigations never fire the Web component's load callbacks; the injected
 // history hook calls this instead.
 class PageBridge {
+  private profileHandler: (payload: string) => void = () => {};
+  setProfileHandler(handler: (payload: string) => void): void { this.profileHandler = handler; }
+  onProfileLayout(payload: string): void { this.profileHandler(payload); }
+  private themeHandler: (color: string) => void = () => {};
+  setThemeHandler(handler: (color: string) => void): void { this.themeHandler = handler; }
+  onTheme(source: string, color: string): void { if (source === 'main') { this.themeHandler(color); } }
   private imageHandler: (payload: string) => boolean = () => false;
   setImageHandler(handler: (payload: string) => boolean): void { this.imageHandler = handler; }
 
@@ -106,6 +116,20 @@ const BOOTSTRAP_SETTLE_MS: number = 1800;
 interface ImagePayload {
   urls: string[];
   index: number;
+}
+
+/** 网页边界使用 CSS 像素，接收时按实际视口统一换算为 vp。 */
+interface ProfileLayout {
+  url: string;
+  width: number;
+  viewWidth: number;
+  scrollY: number;
+  ready: boolean;
+  hasBanner: boolean;
+  bannerBottom: number;
+  identityBottom: number;
+  name: string;
+  handle: string;
 }
 
 interface AccountPictureState {
@@ -179,8 +203,15 @@ struct MainTabs {
   // 这个 1vp 隐藏滚动容器，标题栏才能按官方指南在两种样式间过渡。
   private blurScroller: Scroller = new Scroller();
   private lastBlurOffset: number = 0;
+  private profileLayout: ProfileLayout | undefined = undefined;
+  @State profileBlurProgress: number = 0;
+  @State profileTitleOpacity: number = 0;
+  @State profileHasBanner: boolean = true;
+  @State profileName: string = '';
+  @State measuredHandle: string = '';
   @State statusBarContentColor: string = '#000000';
-  @State pressedIndex: number = -1;
+  @State webColorMode: ThemeColorMode = ThemeColorMode.SYSTEM;
+  @State pageBackground: string = '';
   @State webWidth: number = 0;
   private lastScrollY: number = 0;
   private scrollDistance: number = 0;
@@ -203,6 +234,13 @@ struct MainTabs {
   @State composePreparing: boolean = false;
   @State posting: boolean = false;
   @State rawWeb: boolean = false;
+  @State desktopMode: boolean = false;
+  @State preferencesReady: boolean = false;
+  @State composeReady: boolean = false;
+  private composeSyncTimer: number = -1;
+  private composeRevision: number = 0;
+  private pageStateTimer: number = -1;
+  private notificationTimer: number = -1;
   @State authenticationPage: boolean = false;
   @State fullScreen: boolean = false;
   @StorageLink('appBackground') @Watch('onBackgroundChanged') appBackground: boolean = false;
@@ -284,6 +322,15 @@ struct MainTabs {
       }
     });
     this.bridge.setImageHandler((payload: string) => this.openImages(payload));
+    this.bridge.setProfileHandler((payload: string) => this.receiveProfileLayout(payload));
+    this.bridge.setThemeHandler((color: string) => {
+      const match = /^rgb\((\d{1,3}),\s*(\d{1,3}),\s*(\d{1,3})\)$/.exec(color);
+      if (!match || !isSiteUrl(this.controller.getUrl())) { return; }
+      const red = Number(match[1]), green = Number(match[2]), blue = Number(match[3]);
+      if (red > 255 || green > 255 || blue > 255) { return; }
+      this.pageBackground = color;
+      this.webColorMode = red * 0.299 + green * 0.587 + blue * 0.114 < 128 ? ThemeColorMode.DARK : ThemeColorMode.LIGHT;
+    });
     this.bridge.setHandler((url: string) => {
       this.saveWebSession();
       if (this.rawWeb) { return; }
@@ -303,6 +350,8 @@ struct MainTabs {
         this.notificationAsked = await prefs.get(NOTIFICATION_ASKED_KEY, false) as boolean;
         this.floatingBar = await prefs.get(FLOATING_BAR_KEY, true) as boolean;
         this.autoHideBar = await prefs.get(AUTO_HIDE_BAR_KEY, true) as boolean;
+        this.desktopMode = await prefs.get(DESKTOP_MODE_KEY, false) as boolean;
+        if (this.incomingControllerReady) { this.controller.setCustomUserAgent(this.userAgent()); }
         // 上次账号只预热头像，不用于资料跳转或发帖身份确认。
         const cachedHandle = await prefs.get(OWN_HANDLE_KEY, '') as string;
         if (this.ownHandle === '' && cachedHandle !== '') { this.restoreAvatar(cachedHandle, true); }
@@ -310,6 +359,9 @@ struct MainTabs {
       }
     } catch (err) {
       hilog.warn(DOMAIN, TAG, 'preferences unavailable: %{public}s', JSON.stringify(err));
+      this.toast($r('app.string.operation_failed'));
+    } finally {
+      this.preferencesReady = true;
     }
   }
 
@@ -317,6 +369,8 @@ struct MainTabs {
     this.incomingControllerReady = false;
     this.incomingPageReady = false;
     this.avatarAlive = false;
+    this.stopBackgroundWork();
+    this.clearComposeSync();
     this.resetAvatar();
     this.closeRetiredAvatarFiles();
     this.webImages?.close().catch((err: Error) => {
@@ -354,6 +408,7 @@ struct MainTabs {
       try {
         this.wideListener.off('change');
       } catch (err) {
+        hilog.warn(DOMAIN, TAG, 'event=window_listener_release_failed code=%{public}d', (err as BusinessError).code);
       }
       this.wideListener = undefined;
     }
@@ -363,8 +418,34 @@ struct MainTabs {
   // (the page kept running in the background), so re-read them here as well as
   // on the timer.
   onBackgroundChanged(): void {
-    if (this.appBackground) { this.saveWebSession(); }
+    if (this.appBackground) {
+      this.stopBackgroundWork();
+      this.clearAvatarRetry();
+      this.clearComposeSync();
+      this.saveWebSession();
+    } else if (this.avatarAlive) {
+      this.armBadgeRefresh();
+      this.badgeRetries = 0;
+      this.schedulePageStateRead();
+      if (this.sheetOpen && !this.webComposer && !this.posting) { this.scheduleComposeSync(); }
+      if (this.posting && this.postUncertain) { this.checkPostResult(); }
+      this.flushNetworkReload();
+    }
+    if (this.incomingControllerReady && !this.rawWeb) {
+      this.controller.runJavaScript(chromeActiveScript(!this.appBackground)).catch((err: BusinessError) => {
+        hilog.warn(DOMAIN, TAG, 'event=chrome_lifecycle_failed code=%{public}d', err.code);
+      });
+    }
     if (this.appBackground && this.composeOwner !== '' && !this.posting && !this.webComposer) { this.saveDraft(); }
+  }
+
+  /** 只停止可恢复的界面轮询，正在进行的发布仍保留待确认标志。 */
+  private stopBackgroundWork(): void {
+    if (this.badgeTimer !== -1) { clearInterval(this.badgeTimer); this.badgeTimer = -1; }
+    if (this.badgeRetryTimer !== -1) { clearTimeout(this.badgeRetryTimer); this.badgeRetryTimer = -1; }
+    if (this.pageStateTimer !== -1) { clearTimeout(this.pageStateTimer); this.pageStateTimer = -1; }
+    if (this.notificationTimer !== -1) { clearTimeout(this.notificationTimer); this.notificationTimer = -1; }
+    this.stopPostCheck();
   }
 
   /** 缩短登录 Cookie 等待周期落盘的窗口，避免突然退出时丢失尚未保存的会话。 */
@@ -464,6 +545,7 @@ struct MainTabs {
           hilog.debug(DOMAIN, TAG, 'no haptics: %{public}s', err.message);
         });
     } catch (err) {
+      hilog.debug(DOMAIN, TAG, 'event=haptics_failed code=%{public}d', (err as BusinessError).code);
     }
   }
 
@@ -471,6 +553,7 @@ struct MainTabs {
     try {
       this.getUIContext().getPromptAction().showToast({ message: message, duration: 2000 });
     } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'event=toast_failed code=%{public}d', (err as BusinessError).code);
     }
   }
 
@@ -692,6 +775,7 @@ struct MainTabs {
 
   private discoverOwnProfile(navigate: boolean): void {
     if (this.rawWeb) { return; }
+    const pageUrl = this.currentUrl;
     // Fast path: a layout that links the account directly (the desktop sidebar
     // does; the mobile web does not).
     let pending: Promise<string> | undefined = undefined;
@@ -707,6 +791,7 @@ struct MainTabs {
       return;
     }
     (pending as Promise<string>).then((raw: string) => {
+      if (!this.avatarAlive || this.currentUrl !== pageUrl || this.appBackground) { return; }
       const direct: string = MainTabs.parseHandle('/' + MainTabs.unquote(raw));
       if (direct !== '') {
         this.acceptHandle(direct, navigate);
@@ -765,6 +850,10 @@ struct MainTabs {
     const changed: boolean = this.ownHandle.toLowerCase() !== handle.toLowerCase();
     if (changed) {
       this.resetAvatar();
+      this.clearNetworkBadgeCounts();
+      this.unreadNotifications = 0;
+      this.unreadMessages = 0;
+      this.badgeShown = -1;
     }
     this.ownHandle = handle;
     this.saveOwnHandle(handle);
@@ -817,11 +906,11 @@ struct MainTabs {
   // tablets and unfolded foldables keep the mobile web app they were built
   // against.
   private userAgent(): string {
-    return userAgentFor(deviceInfo.deviceType === '2in1');
+    return userAgentFor(this.desktopMode || deviceInfo.deviceType === '2in1');
   }
 
   private syncFromUrl(url: string): void {
-    if (url !== this.currentUrl) { this.resetChromeScroll(); }
+    if (url !== this.currentUrl) { this.resetProfileLayout(); this.resetChromeScroll(); }
     const idx: number = routeIndexForUrl(url);
     if (idx >= 0 && idx !== this.currentIndex) {
       this.currentIndex = idx;
@@ -829,6 +918,26 @@ struct MainTabs {
     this.viewingHandle = profileHandleForUrl(url);
     this.currentPath = pathOf(url);
     this.currentUrl = url;
+  }
+
+  private async shareCurrentPage(): Promise<void> {
+    try {
+      await sharePage(this.getUIContext().getHostContext() as common.UIAbilityContext, this.controller.getUrl());
+    } catch (err) {
+      hilog.error(DOMAIN, TAG, 'event=page_share_failed code=%{public}d', (err as BusinessError).code);
+      this.toast($r('app.string.operation_failed'));
+    }
+  }
+
+  /** 网页账号入口不修改会话；切换后重新确认身份和头像。 */
+  private async openAccountSwitcher(): Promise<void> {
+    try {
+      const result = MainTabs.unquote(await this.controller.runJavaScript(ACCOUNT_SWITCH_SCRIPT));
+      if (result !== 'opened') { this.toast($r('app.string.account_unconfirmed')); }
+    } catch (err) {
+      hilog.error(DOMAIN, TAG, 'event=account_switch_open_failed code=%{public}d', (err as BusinessError).code);
+      this.toast($r('app.string.operation_failed'));
+    }
   }
 
   private goRoute(index: number): void {
@@ -885,6 +994,7 @@ struct MainTabs {
 
   private titleMain(): string {
     if (this.viewingHandle !== '') {
+      if (this.profileName !== '') { return this.profileName; }
       // The stock app titles a profile with the display name and puts the
       // handle underneath. x.com titles the page "Abhi (@Abhi_Flex) / X".
       const name: string = MainTabs.nameInTitle(this.pageTitle);
@@ -902,6 +1012,7 @@ struct MainTabs {
   // Handle spelled the way the page spells it, falling back to the one in the
   // URL (which x.com lowercases).
   private profileHandle(): string {
+    if (this.measuredHandle !== '') { return this.measuredHandle; }
     const fromTitle: string = MainTabs.handleInTitle(this.pageTitle);
     return fromTitle !== '' ? fromTitle : this.viewingHandle;
   }
@@ -1034,9 +1145,62 @@ struct MainTabs {
     }
   }
 
+  /** 切页和重载先释放旧坐标，未测量的新主页始终保持透明。 */
+  private resetProfileLayout(): void {
+    this.profileLayout = undefined;
+    this.profileBlurProgress = 0;
+    this.profileTitleOpacity = 0;
+    this.profileHasBanner = true;
+    this.profileName = '';
+    this.measuredHandle = '';
+    this.resetHeaderBlur();
+  }
+
+  /** 只接受当前文档、当前视口的资料节点，SPA 切页中的旧节点不能驱动标题。 */
+  private receiveProfileLayout(payload: string): void {
+    let layout: ProfileLayout;
+    try {
+      layout = JSON.parse(payload) as ProfileLayout;
+    } catch (error) {
+      hilog.error(DOMAIN, TAG, 'event=profile_layout_invalid error=%{public}s', String(error));
+      return;
+    }
+    if (!layout || typeof layout.ready !== 'boolean' || !this.avatarAlive || this.appBackground || this.rawWeb || this.viewingHandle === '' ||
+      layout.url !== this.currentUrl || layout.url !== this.controller.getUrl() ||
+      layout.viewWidth !== this.webWidth) { return; }
+    if (!layout.ready) { this.resetProfileLayout(); return; }
+    if (typeof layout.hasBanner !== 'boolean' || !(layout.width > 0) || !Number.isFinite(layout.width) || !Number.isFinite(layout.scrollY) ||
+      !Number.isFinite(layout.bannerBottom) || !Number.isFinite(layout.identityBottom) ||
+      layout.bannerBottom <= 0 || layout.identityBottom <= 0 || typeof layout.name !== 'string' ||
+      typeof layout.handle !== 'string' || layout.handle.toLowerCase() !== this.viewingHandle.toLowerCase()) { return; }
+    this.profileLayout = layout;
+    this.profileHasBanner = layout.hasBanner;
+    this.profileName = layout.name;
+    this.measuredHandle = layout.handle;
+    this.lastScrollY = Math.max(0, layout.scrollY * this.webWidth / layout.width);
+    this.syncHeaderBlur(this.lastScrollY);
+  }
+
+  private profileBannerButtons(): boolean {
+    return this.viewingHandle !== '' && this.profileHasBanner && this.profileBlurProgress < 0.5;
+  }
+
   /** 把网页滚动位置镜像给 HDS，顶栏在顶部保持全透明，随滚动逐渐模糊。 */
   private syncHeaderBlur(yOffset: number): void {
-    const offset: number = Math.min(HEADER_BLUR_DISTANCE, Math.max(0, yOffset));
+    let position: number = yOffset;
+    if (this.viewingHandle !== '') {
+      const layout = this.profileLayout;
+      if (layout === undefined) { return; }
+      const scale: number = this.webWidth / layout.width;
+      const coveredBottom: number = this.topInset + HEADER_HEIGHT;
+      this.profileBlurProgress = Math.min(1, Math.max(0,
+        (yOffset + coveredBottom - layout.bannerBottom * scale) / 48));
+      const titleProgress: number = Math.min(1, Math.max(0,
+        (yOffset + coveredBottom - layout.identityBottom * scale) / 32));
+      this.profileTitleOpacity = titleProgress * titleProgress * (3 - 2 * titleProgress);
+      position = this.profileBlurProgress * HEADER_BLUR_DISTANCE;
+    }
+    const offset: number = Math.min(HEADER_BLUR_DISTANCE, Math.max(0, position));
     if (Math.abs(offset - this.lastBlurOffset) < 0.5) { return; }
     this.lastBlurOffset = offset;
     try {
@@ -1132,6 +1296,7 @@ struct MainTabs {
 
   private syncChromeInsets(): void {
     if (this.rawWeb || !isSiteUrl(this.currentUrl) || this.webWidth <= 0) { return; }
+    if (this.viewingHandle !== '') { this.syncHeaderBlur(this.lastScrollY); }
     this.controller.runJavaScript(chromeInsetsScript(
       this.overlayTopInset(),
       this.overlaysWeb() ? this.bottomChromeHeight() : 0, this.webWidth
@@ -1143,6 +1308,7 @@ struct MainTabs {
 
   private overlayTopInset(): number {
     if (!this.overlaysWeb() || this.topChromeHeight() === 0) { return 0; }
+    if (this.viewingHandle !== '') { return 0; }
     // 首页滚动内容紧接下划线底缘，保留帖子自身的内边距，不累计标题栏的空白下半区。
     const height: number = this.isHomeRoot()
       ? Math.min(HEADER_HEIGHT, (HEADER_HEIGHT + this.homeTabsHeight) / 2 - HEADER_CONTENT_LIFT)
@@ -1155,6 +1321,11 @@ struct MainTabs {
       await this.putPreference(key, value);
       if (key === FLOATING_BAR_KEY) { this.floatingBar = value; }
       if (key === AUTO_HIDE_BAR_KEY) { this.autoHideBar = value; }
+      if (key === DESKTOP_MODE_KEY) {
+        this.desktopMode = value;
+        this.controller.setCustomUserAgent(this.rawWeb ? web_webview.WebviewController.getDefaultUserAgent() : this.userAgent());
+        this.reloadCurrent();
+      }
       this.resetChromeScroll();
       this.syncChromeInsets();
     } catch (error) {
@@ -1170,9 +1341,10 @@ struct MainTabs {
 
   private settingsPillVisible(): boolean {
     if (this.fullScreen || this.imageViewerOpen || this.sheetOpen || this.networkOpen ||
-      this.appearanceOpen || this.discovering || this.rawWeb || this.isMediaViewer()) {
+      this.appearanceOpen || this.discovering || this.isMediaViewer()) {
       return false;
     }
+    if (this.rawWeb) { return true; }
     // 原生导航页有悬浮底栏，胶囊会与标签栏重叠；这些页面已有头像/错误页入口。
     if (this.showsNativeNavigation()) {
       return false;
@@ -1318,9 +1490,12 @@ struct MainTabs {
   // retried. Moving between tabs used to wipe the badges because a mid-reload
   // read came back empty and was taken at face value.
   private refreshBadges(): void {
-    if (this.rawWeb) { return; }
+    if (this.rawWeb || this.appBackground || !this.avatarAlive) { return; }
+    const owner = this.ownHandle;
+    const pageUrl = this.currentUrl;
     try {
       this.controller.runJavaScript(UNREAD_COUNTS_SCRIPT).then((raw: string) => {
+        if (this.appBackground || !this.avatarAlive || this.ownHandle !== owner || this.currentUrl !== pageUrl) { return; }
         this.applyBadgeCounts(MainTabs.unquote(raw));
       }, (err: BusinessError) => {
         hilog.debug(DOMAIN, TAG, 'badge read failed: %{public}d %{public}s', err.code, err.message);
@@ -1329,6 +1504,14 @@ struct MainTabs {
     } catch (err) {
       this.retryBadgeRead();
     }
+  }
+
+  /** 账号变化后忽略前一会话仍在途的计数响应。 */
+  private clearNetworkBadgeCounts(): void {
+    this.controller.runJavaScript('window.__otBadgeEpoch=(window.__otBadgeEpoch||0)+1;window.__otBadgeCounts=null;')
+      .catch((err: BusinessError) => {
+        hilog.warn(DOMAIN, TAG, 'event=badge_reset_failed code=%{public}d', err.code);
+      });
   }
 
   private applyBadgeCounts(counts: string): void {
@@ -1359,7 +1542,7 @@ struct MainTabs {
 
   // Ask again shortly — bounded, and only while the page still owes an answer.
   private retryBadgeRead(): void {
-    if (this.badgeRetryTimer !== -1 || this.badgeRetries >= BADGE_RETRY_LIMIT) {
+    if (this.appBackground || !this.avatarAlive || this.badgeRetryTimer !== -1 || this.badgeRetries >= BADGE_RETRY_LIMIT) {
       return;
     }
     this.badgeRetries++;
@@ -1439,10 +1622,11 @@ struct MainTabs {
   // The user may allow notifications in Settings instead of in our dialog. Keep
   // checking for a while so the icon picks the count up without a relaunch.
   private retryLauncherBadgeWhenAllowed(attempt: number): void {
-    if (attempt >= NOTIFICATION_POLL_LIMIT) {
+    if (this.appBackground || !this.avatarAlive || attempt >= NOTIFICATION_POLL_LIMIT) {
       return;
     }
-    setTimeout(() => {
+    this.notificationTimer = setTimeout(() => {
+      this.notificationTimer = -1;
       if (this.notificationsAllowed()) {
         this.badgeShown = -1;
         this.syncLauncherBadge();
@@ -1453,6 +1637,7 @@ struct MainTabs {
   }
 
   private armBadgeRefresh(): void {
+    if (this.appBackground) { return; }
     if (this.badgeTimer !== -1) {
       clearInterval(this.badgeTimer);
     }
@@ -1460,22 +1645,6 @@ struct MainTabs {
       this.badgeRetries = 0;
       this.refreshBadges();
     }, BADGE_REFRESH_MS);
-  }
-
-  // Badge for a tab bar item: the count lives on Notifications and Messages,
-  // and clears while that tab is the one on screen — the same thing the stock
-  // app does when you open the tab and read it.
-  private badgeCount(index: number): number {
-    if (index === this.currentIndex) {
-      return 0;
-    }
-    if (index === 2) {
-      return this.unreadNotifications;
-    }
-    if (index === 3) {
-      return this.unreadMessages;
-    }
-    return 0;
   }
 
   private static stripSiteSuffix(raw: string): string {
@@ -1498,11 +1667,14 @@ struct MainTabs {
   // x.com's own header is removed on every page, so the shell takes the page
   // name from the document title instead (e.g. "Abhi (@Abhi_Flex) / X").
   private readPageState(): void {
+    const pageUrl = this.currentUrl;
     try {
       this.controller.runJavaScript('Boolean(document.querySelector(\'input[autocomplete="username"],input[autocomplete="current-password"],input[autocomplete="one-time-code"]\'))')
         .then((raw: string) => {
+          if (!this.avatarAlive || this.currentUrl !== pageUrl || this.appBackground) { return; }
           this.authenticationPage = raw === 'true';
           if (this.authenticationPage) {
+            this.clearNetworkBadgeCounts();
             this.ownHandle = '';
             this.resetAvatar();
             this.unreadNotifications = 0;
@@ -1512,10 +1684,12 @@ struct MainTabs {
           hilog.warn(DOMAIN, TAG, 'event=auth_page_read_failed error=%{public}s', err.message);
         });
       this.controller.runJavaScript('document.title').then((raw: string) => {
+        if (!this.avatarAlive || this.currentUrl !== pageUrl || this.appBackground) { return; }
         const title: string = MainTabs.unquote(raw);
         this.pageTitle = MainTabs.stripSiteSuffix(title);
-      });
+      }).catch((err: BusinessError) => { hilog.warn(DOMAIN, TAG, 'event=page_title_failed code=%{public}d', err.code); });
     } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'event=page_state_failed code=%{public}d', (err as BusinessError).code);
     }
     this.readHomeTab();
     this.readAvatar();
@@ -1529,14 +1703,17 @@ struct MainTabs {
   // Keep the native Home switcher in step with whatever the page selected last
   // (the row is hidden, so this is the only place the state can come from).
   private readHomeTab(): void {
+    const pageUrl = this.currentUrl;
     try {
       this.controller.runJavaScript(HOME_TAB_SCRIPT).then((raw: string) => {
+        if (!this.avatarAlive || this.currentUrl !== pageUrl || this.appBackground) { return; }
         const index: number = Number.parseInt(MainTabs.unquote(raw), 10);
         if (!Number.isNaN(index) && index >= 0) {
           this.homeTabIndex = index;
         }
-      });
+      }).catch((err: BusinessError) => { hilog.warn(DOMAIN, TAG, 'event=home_tab_read_failed code=%{public}d', err.code); });
     } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'event=home_tab_read_failed code=%{public}d', (err as BusinessError).code);
     }
   }
 
@@ -1583,7 +1760,7 @@ struct MainTabs {
 
   /** 水合和下载失败共用有限重试，避免一次失败长期停在占位头像。 */
   private retryAvatarRead(): void {
-    if (!this.avatarAlive || this.rawWeb || this.authenticationPage || this.avatarPath !== '' ||
+    if (!this.avatarAlive || this.appBackground || this.rawWeb || this.authenticationPage || this.avatarPath !== '' ||
       this.avatarRetryTimer !== -1 || this.avatarRetries >= AVATAR_RETRY_LIMIT) { return; }
     this.avatarRetries++;
     this.avatarRetryTimer = setTimeout(() => {
@@ -1599,9 +1776,11 @@ struct MainTabs {
   }
 
   private schedulePageStateRead(): void {
-    if (this.rawWeb) { return; }
-    setTimeout(() => {
-      if (this.rawWeb) { return; }
+    if (this.pageStateTimer !== -1) { clearTimeout(this.pageStateTimer); }
+    if (this.rawWeb || this.appBackground || !this.avatarAlive) { return; }
+    this.pageStateTimer = setTimeout(() => {
+      this.pageStateTimer = -1;
+      if (this.rawWeb || this.appBackground || !this.avatarAlive) { return; }
       this.readPageState();
       this.refreshBadges();
     }, PAGE_STATE_DELAY_MS);
@@ -1751,6 +1930,7 @@ struct MainTabs {
     this.composeLoading = true;
     this.webComposer = false;
     this.posting = false;
+    this.clearComposeSync();
     this.sheetOpen = true;
     try {
       const handle: string = await this.confirmCurrentAccount();
@@ -1801,6 +1981,7 @@ struct MainTabs {
     } finally {
       this.composePreparing = false;
       this.openingCompose = false;
+      this.scheduleComposeSync();
     }
   }
 
@@ -1810,6 +1991,7 @@ struct MainTabs {
       await this.persistDraft();
       await this.putPreference(COMPOSE_DRAFT_KEY, '');
       this.legacyDraft = '';
+      this.scheduleComposeSync();
     } catch (err) {
       this.toast($r('app.string.draft_save_failed'));
     }
@@ -1843,6 +2025,7 @@ struct MainTabs {
     try {
       await this.persistDraft();
       this.stopPostCheck();
+      this.clearComposeSync();
       this.sheetOpen = false;
     } catch (err) {
       this.toast($r('app.string.draft_save_failed'));
@@ -1856,6 +2039,7 @@ struct MainTabs {
   // Drafts are saved as you type, so closing the sheet — or the app — cannot
   // lose what was written.
   private scheduleDraftSave(): void {
+    this.scheduleComposeSync();
     if (this.draftSaveTimer !== -1) {
       clearTimeout(this.draftSaveTimer);
     }
@@ -1865,7 +2049,39 @@ struct MainTabs {
     }, DRAFT_SAVE_DEBOUNCE_MS);
   }
 
+  private clearComposeSync(): void {
+    this.composeRevision++;
+    this.composeReady = false;
+    if (this.composeSyncTimer !== -1) { clearTimeout(this.composeSyncTimer); this.composeSyncTimer = -1; }
+  }
+
+  /** 编辑停止后交给网页校验，过期异步结果不能启用下一份草稿的发布按钮。 */
+  private scheduleComposeSync(): void {
+    this.clearComposeSync();
+    if (this.appBackground || !this.sheetOpen || this.webComposer || this.composeLoading || this.composePreparing ||
+      this.posting || this.postUncertain || this.draft.trim() === '' || this.composeOwner === '') { return; }
+    const revision = this.composeRevision;
+    const text = this.draft;
+    this.composeSyncTimer = setTimeout(async () => {
+      this.composeSyncTimer = -1;
+      try {
+        const filled = MainTabs.unquote(await this.composeController.runJavaScript(fillComposerScript(text)));
+        if (revision !== this.composeRevision || !this.sheetOpen || this.webComposer || this.posting) { return; }
+        if (filled !== 'ok') { this.composeMessage = $r('app.string.compose_fill_failed'); return; }
+        const ready = await this.composeController.runJavaScript(COMPOSER_READY_SCRIPT);
+        if (revision === this.composeRevision) {
+          this.composeReady = ready === 'true';
+          this.composeMessage = this.composeReady ? '' : $r('app.string.compose_submit_unavailable');
+        }
+      } catch (err) {
+        hilog.warn(DOMAIN, TAG, 'event=compose_validation_failed code=%{public}d', (err as BusinessError).code);
+        if (revision === this.composeRevision) { this.composeMessage = $r('app.string.compose_fill_failed'); }
+      }
+    }, DRAFT_SAVE_DEBOUNCE_MS);
+  }
+
   private saveDraft(): void {
+    this.scheduleComposeSync();
     this.persistDraft().catch((err: Error) => {
       hilog.error(DOMAIN, TAG, 'event=draft_save_failed error=%{public}s', err.message);
       this.toast($r('app.string.draft_save_failed'));
@@ -1927,9 +2143,10 @@ struct MainTabs {
 
   /** 先保存提交意图；未知结果不得自动重发或清空草稿。 */
   private async postFromSheet(): Promise<void> {
-    if (this.draft.trim() === '' || this.posting || this.postUncertain || this.webComposer ||
+    if (!this.composeReady || this.draft.trim() === '' || this.posting || this.postUncertain || this.webComposer ||
       this.composePreparing || this.composeLoading || this.composeOwner === '') { return; }
     this.posting = true;
+    this.clearComposeSync();
     this.composeMessage = '';
     if (this.draftSaveTimer !== -1) { clearTimeout(this.draftSaveTimer); this.draftSaveTimer = -1; }
     try {
@@ -1963,10 +2180,13 @@ struct MainTabs {
       hilog.error(DOMAIN, TAG, 'event=post_failed error=%{public}s', JSON.stringify(err));
       this.posting = false;
       this.composeMessage = this.postUncertain ? $r('app.string.post_unknown') : $r('app.string.operation_failed');
+    } finally {
+      if (!this.posting && !this.postUncertain) { this.scheduleComposeSync(); }
     }
   }
 
   private async checkPostResult(): Promise<void> {
+    if (this.appBackground || !this.avatarAlive) { return; }
     try {
       const result = MainTabs.unquote(await this.composeController.runJavaScript(POST_RESULT_SCRIPT));
       if (result === 'confirmed') {
@@ -1983,7 +2203,7 @@ struct MainTabs {
         return;
       }
       if (result === 'unknown' || ++this.postChecks >= 16) { this.markPostUnknown(); return; }
-      this.postTimer = setTimeout(() => { this.checkPostResult(); }, 1000);
+      if (!this.appBackground && this.avatarAlive) { this.postTimer = setTimeout(() => { this.checkPostResult(); }, 1000); }
     } catch (err) {
       hilog.warn(DOMAIN, TAG, 'event=post_result_unknown error=%{public}s', JSON.stringify(err));
       this.markPostUnknown();
@@ -2029,11 +2249,13 @@ struct MainTabs {
       await this.draftWrite;
       await this.putPreference(COMPOSE_DRAFT_KEY + ':' + this.composeOwner, '');
       this.draft = '';
+      this.clearComposeSync();
       this.webComposer = true;
     } catch (err) {
       this.composeMessage = $r('app.string.operation_failed');
     } finally {
       this.posting = false;
+      if (!this.webComposer) { this.scheduleComposeSync(); }
     }
   }
 
@@ -2042,18 +2264,12 @@ struct MainTabs {
     if (this.isHomeRoot()) {
       this.homeTitleBar()
     } else {
-      Row({ space: 0 }) {
-        if (this.showBack()) {
-          this.backButton()
-        }
-        this.headerTitles()
-        this.headerAction()
-      }
-      .height(HEADER_HEIGHT)
-      .width('100%')
-      .alignItems(VerticalAlign.Center)
-      .padding({ left: this.showBack() ? S4 : S12, right: S4 })
-      .translate({ y: -HEADER_CONTENT_LIFT })
+      NativeTopBar({ title: this.headerTitle(), subtitle: this.subtitleMain(), showBack: this.showBack(),
+        titleOpacity: this.viewingHandle !== '' ? this.profileTitleOpacity : 1,
+        bannerButtons: this.profileBannerButtons(),
+        onBack: () => {
+          if (!this.canGoBack) { this.loadWeb(TWITTER_ROUTES[0]); } else { this.goBack(); }
+        }, action: () => { this.headerAction(); } })
     }
   }
 
@@ -2105,24 +2321,6 @@ struct MainTabs {
   }
 
   @Builder
-  backButton() {
-    Button({ type: ButtonType.Circle }) {
-      SymbolGlyph($r('sys.symbol.arrow_left'))
-        .fontSize(22)
-        .fontColor([$r('sys.color.ohos_id_color_text_primary')])
-    }
-    .width(TOUCH_TARGET)
-    .height(TOUCH_TARGET)
-    .backgroundColor(Color.Transparent)
-    .accessibilityText($r('app.string.back'))
-    .accessibilityLevel('yes')
-    .onClick(() => {
-      if (!this.canGoBack) { this.loadWeb(TWITTER_ROUTES[0]); }
-      else { this.goBack(); }
-    })
-  }
-
-  @Builder
   accountPicture($$: AccountPictureState) {
     Stack() {
       SymbolGlyph($r('sys.symbol.person_crop_circle_fill'))
@@ -2163,6 +2361,10 @@ struct MainTabs {
   @Builder
   accountMenu() {
     Menu() {
+      MenuItem({ content: $r('app.string.menu_switch_account') })
+        .onClick(() => { this.openAccountSwitcher(); })
+      MenuItem({ content: $r('app.string.menu_share_page') })
+        .onClick(() => { this.shareCurrentPage(); })
       MenuItem({ content: $r('app.string.appearance_title'),
         symbolStartIcon: new SymbolGlyphModifier($r('sys.symbol.gearshape')) })
         .onClick(() => { this.appearanceOpen = true; })
@@ -2259,30 +2461,6 @@ struct MainTabs {
     })
   }
 
-  @Builder
-  headerTitles() {
-    Column({ space: 0 }) {
-      Text(this.headerTitle())
-        .fontSize(20)
-        .fontFamily(FONT_FAMILY)
-        .fontWeight(FontWeight.Bold)
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
-        .fontColor($r('sys.color.ohos_id_color_text_primary'))
-      if (this.subtitleMain() !== '') {
-        Text(this.subtitleMain())
-          .fontSize(11)
-          .fontFamily(FONT_FAMILY)
-          .maxLines(1)
-          .textOverflow({ overflow: TextOverflow.Ellipsis })
-          .fontColor($r('sys.color.ohos_id_color_text_secondary'))
-      }
-    }
-    .alignItems(HorizontalAlign.Start)
-    .justifyContent(FlexAlign.Center)
-    .layoutWeight(1)
-  }
-
   private headerTitle(): string {
     if (isPostDetailUrl(this.currentUrl)) { return this.localized($r('app.string.post')); }
     const title: string = this.titleMain();
@@ -2332,100 +2510,29 @@ struct MainTabs {
     Button({ type: ButtonType.Circle }) {
       SymbolGlyph(symbol)
         .fontSize(22)
-        .fontColor([$r('sys.color.ohos_id_color_text_primary')])
+        .fontColor([this.profileBannerButtons() ? Color.White : $r('sys.color.ohos_id_color_text_primary')])
     }
     .width(TOUCH_TARGET)
     .height(TOUCH_TARGET)
-    .backgroundColor(Color.Transparent)
+    .backgroundColor(this.profileBannerButtons() ? '#59000000' : Color.Transparent)
     .accessibilityText(label)
     .accessibilityLevel('yes')
     .onClick(action)
   }
 
-  // Filled HarmonyOS Symbols for the tab bar. The bar never falls back to
-  // outline glyphs: the same filled icon is drawn in both states and colour
-  // carries the selection (system blue when active, secondary grey when not).
-  //
-  // Explore uses the compass rather than the magnifier because the HarmonyOS
-  // symbol set ships no filled magnifier (house/bell/envelope/person all have a
-  // _fill twin; magnifyingglass does not), and an outline glyph among four
-  // filled ones reads as a rendering mistake.
-  private tabSymbol(index: number): Resource {
-    if (index === 0) {
-      return $r('sys.symbol.house_fill');
-    } else if (index === 1) {
-      return $r('sys.symbol.compass_circle_fill');
-    } else if (index === 2) {
-      return $r('sys.symbol.bell_fill');
-    } else if (index === 3) {
-      return $r('sys.symbol.envelope_fill');
-    }
-    return $r('sys.symbol.person_fill');
-  }
-
   @Builder
-  navItem(index: number) {
-    Column({ space: S4 }) {
-      Badge({
-        count: this.badgeCount(index),
-        position: BadgePosition.RightTop,
-        style: { fontSize: 10, badgeSize: 16 }
-      }) {
-        SymbolGlyph(this.tabSymbol(index))
-          .fontSize(this.isWide ? 26 : 23)
-          .fontColor([this.currentIndex === index
-            ? $r('sys.color.ohos_id_color_emphasize')
-            : $r('sys.color.ohos_id_color_text_secondary')])
-      }
-      Text(this.tabLabel(index))
-        .fontSize(11)
-        .fontFamily(FONT_FAMILY)
-        .maxLines(1)
-        .textOverflow({ overflow: TextOverflow.Ellipsis })
-        .fontWeight(this.currentIndex === index ? FontWeight.Medium : FontWeight.Regular)
-        .fontColor(this.currentIndex === index
-          ? $r('sys.color.ohos_id_color_emphasize')
-          : $r('sys.color.ohos_id_color_text_secondary'))
-    }
-    .justifyContent(FlexAlign.Center)
-    .alignItems(HorizontalAlign.Center)
-    .width(this.isWide ? RAIL_WIDTH : undefined)
-    .height(this.isWide ? TOUCH_TARGET + S16 : TOUCH_TARGET)
-    .borderRadius(24)
-    .backgroundColor(Color.Transparent)
-    .scale({ x: this.pressedIndex === index ? 0.92 : 1, y: this.pressedIndex === index ? 0.92 : 1 })
-    .animation({ duration: 150, curve: Curve.FastOutSlowIn })
-    .layoutWeight(this.isWide ? 0 : 1)
-    // Mouse hover, so the rail reads as a desktop navigation rail on 2in1.
-    .hoverEffect(HoverEffect.Highlight)
-    .accessibilityText(this.tabLabel(index))
-    .accessibilityDescription(this.tabLabel(index))
-    .accessibilitySelected(this.currentIndex === index)
-    .accessibilityLevel('yes')
-    .onTouch((event: TouchEvent) => {
-      if (event.type === TouchType.Down) { this.pressedIndex = index; }
-      if (event.type === TouchType.Up || event.type === TouchType.Cancel) { this.pressedIndex = -1; }
-    })
-    .onClick(() => {
-      this.resetChromeScroll();
-      this.goRoute(index);
+  nativeTabs() {
+    NativeBottomBar({ currentIndex: this.currentIndex, notifications: this.unreadNotifications,
+      messages: this.unreadMessages, wide: this.isWide,
+      labels: [this.tabLabel(0), this.tabLabel(1), this.tabLabel(2), this.tabLabel(3), this.tabLabel(4)],
+      onSelect: (index: number) => { this.resetChromeScroll(); this.goRoute(index); }
     })
   }
 
   @Builder
   navBar() {
     Column() {
-      Flex({
-        direction: this.isWide ? FlexDirection.Column : FlexDirection.Row,
-        justifyContent: this.isWide ? FlexAlign.Center : FlexAlign.SpaceBetween,
-        alignItems: ItemAlign.Center
-      }) {
-        this.navItem(0)
-        this.navItem(1)
-        this.navItem(2)
-        this.navItem(3)
-        this.navItem(4)
-      }
+      Row() { this.nativeTabs() }
       .width('100%')
       .height(this.isWide ? '100%' : (this.floatingBar ? FLOATING_BAR_HEIGHT : BAR_HEIGHT))
       .padding({ left: this.isWide ? 0 : 6, right: this.isWide ? 0 : 6 })
@@ -2447,11 +2554,7 @@ struct MainTabs {
       this.replyBar()
     } else {
       Row() {
-        this.navItem(0)
-        this.navItem(1)
-        this.navItem(2)
-        this.navItem(3)
-        this.navItem(4)
+        this.nativeTabs()
       }
         .width('100%')
         .height('100%')
@@ -2507,6 +2610,20 @@ struct MainTabs {
         Toggle({ type: ToggleType.Switch, isOn: this.autoHideBar })
           .onChange((value: boolean) => { this.setAppearance(AUTO_HIDE_BAR_KEY, value); })
       }.width('100%')
+      Row() {
+        Text($r('app.string.desktop_site')).layoutWeight(1)
+        Toggle({ type: ToggleType.Switch, isOn: this.desktopMode || deviceInfo.deviceType === '2in1' })
+          .enabled(deviceInfo.deviceType !== '2in1')
+          .onChange((value: boolean) => { this.setAppearance(DESKTOP_MODE_KEY, value); })
+      }.width('100%')
+      Button($r('app.string.menu_share_page')).onClick(() => { this.shareCurrentPage(); })
+      Button(this.rawWeb ? $r('app.string.show_native_shell') : $r('app.string.show_original_page'))
+        .onClick(() => {
+          this.rawWeb = !this.rawWeb;
+          this.appearanceOpen = false;
+          this.controller.setCustomUserAgent(this.rawWeb ? web_webview.WebviewController.getDefaultUserAgent() : this.userAgent());
+          this.reloadCurrent();
+        })
     }
     .width('100%')
     .padding({ left: S16, right: S16, top: S16, bottom: 32 })
@@ -2529,19 +2646,9 @@ struct MainTabs {
     .opacity(this.barsCollapsed ? 0 : 1)
     .animation({ duration: 240, curve: Curve.FastOutSlowIn })
     .hitTestBehavior(this.barsCollapsed ? HitTestMode.None : HitTestMode.Default)
-    .accessibilityText(this.currentIndex === 3
-      ? $r('app.string.menu_new_message')
-      : $r('app.string.compose_title'))
+    .accessibilityText($r('app.string.compose_title'))
     .accessibilityLevel('yes')
-    .onClick(() => {
-      // The stock app's compose button starts a new post everywhere except
-      // Messages, where it starts a new direct message.
-      if (this.currentIndex === 3) {
-        this.loadWeb(TWITTER_DM_COMPOSE);
-      } else {
-        this.openCompose();
-      }
-    })
+    .onClick(() => { this.openCompose(); })
   }
 
   @Builder
@@ -2636,12 +2743,13 @@ struct MainTabs {
       .width('100%')
       .height('100%')
       // 网页遮罩和背景延伸至手势区，交互元素由网页安全区样式避让。
-      .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.BOTTOM])
+      .expandSafeArea([SafeAreaType.SYSTEM], this.viewingHandle !== '' && this.showsNativeNavigation()
+        ? [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM] : [SafeAreaEdge.BOTTOM])
       // Injected at document start, so the page's history hook always finds it.
       .javaScriptProxy({
         object: this.bridge,
         name: 'otNative',
-        methodList: ['onUrlChange', 'onImages'],
+        methodList: ['onUrlChange', 'onImages', 'onTheme', 'onProfileLayout'],
         controller: this.controller
       })
       .onControllerAttached(() => {
@@ -2686,7 +2794,7 @@ struct MainTabs {
         return true;
       })
       .javaScriptAccess(true)
-      .javaScriptOnDocumentStart([{ script: chromeDocumentStartScript(!this.rawWeb),
+      .javaScriptOnDocumentStart([{ script: this.rawWeb ? '' : UNREAD_RESPONSE_SCRIPT + chromeDocumentStartScript(true),
         scriptRules: ['https://x.com', 'https://www.x.com', 'https://twitter.com', 'https://www.twitter.com'] }])
       .domStorageAccess(true)
       // x.com's chat client keeps its session state in browser storage; ArkWeb
@@ -2706,6 +2814,7 @@ struct MainTabs {
       .onTouch((event: TouchEvent) => { this.handleWebTouch(event); })
       .onScroll((event: OnScrollEvent) => { this.handleWebScroll(event.yOffset); })
       .onAreaChange((_old: Area, area: Area) => {
+        if (this.webWidth !== Number(area.width)) { this.resetProfileLayout(); }
         this.webWidth = Number(area.width);
         this.syncChromeInsets();
       })
@@ -2715,10 +2824,12 @@ struct MainTabs {
         }
       })
       .onPageBegin(() => {
+        this.resetProfileLayout();
         this.incomingPageReady = false;
         this.hasError = false;
       })
       .onPageEnd((event) => {
+        if (event && this.controller.getUrl() !== event.url) { return; }
         if (!this.rawWeb && event && isSiteUrl(event.url)) {
           this.controller.runJavaScript(MEDIA_CLICK_SCRIPT).catch((error: Error) => {
             hilog.error(DOMAIN, TAG, 'event=image_bridge_failed error=%{public}s', error.message);
@@ -2732,6 +2843,11 @@ struct MainTabs {
         if (event && event.url) {
           this.syncFromUrl(event.url);
           this.applyPageChrome(event.url);
+        }
+        if (this.appBackground && !this.rawWeb) {
+          this.controller.runJavaScript(chromeActiveScript(false)).catch((err: BusinessError) => {
+            hilog.warn(DOMAIN, TAG, 'event=chrome_lifecycle_failed code=%{public}d', err.code);
+          });
         }
         this.incomingPageReady = true;
         if (this.incomingContent.kind !== '') {
@@ -2799,12 +2915,13 @@ struct MainTabs {
             // HarmonyOS pull-to-refresh drives the WebView directly, so the
             // header does not need a refresh button.
             Refresh({ refreshing: $$this.refreshing }) {
-              this.webView()
+              if (this.preferencesReady) { this.webView() }
             }
             .width('100%')
             .height('100%')
             // Web 位于刷新容器内，两者须使用相同的绘制扩展边界。
-            .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.BOTTOM])
+            .expandSafeArea([SafeAreaType.SYSTEM], this.viewingHandle !== '' && this.showsNativeNavigation()
+              ? [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM] : [SafeAreaEdge.BOTTOM])
             .pullToRefresh(true)
             .onRefreshing(() => {
               this.refreshing = true;
@@ -2850,10 +2967,8 @@ struct MainTabs {
         .backgroundColor($r('sys.color.ohos_id_color_background'))
       }
 
-      // Native compose entry point, like the stock app: on the four content
-      // tabs (never on Profile), and only once a page is on screen.
-      if (this.showsNativeNavigation() && !isPostDetailUrl(this.currentUrl) && !isSecondaryUrl(this.currentUrl) &&
-        this.currentIndex !== 4 && !this.hasError && this.firstLoadDone) {
+      // 发帖入口只属于首页，不能随上一次选中的标签泄漏到其他页面。
+      if (this.showsNativeNavigation() && this.isHomeRoot() && !this.hasError && this.firstLoadDone) {
         this.composeFab()
       }
     }
@@ -2861,26 +2976,15 @@ struct MainTabs {
     .height('100%')
     .flexGrow(1)
     .flexShrink(1)
-    // 遮罩与网页共用底部绘制边界；不额外增加内容留白，按钮由网页安全区避让。
-    .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.BOTTOM])
+    // 资料横幅及其遮罩一起延伸至状态栏；其他页面沿用底部扩展边界。
+    .expandSafeArea([SafeAreaType.SYSTEM], this.viewingHandle !== '' && this.showsNativeNavigation()
+      ? [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM] : [SafeAreaEdge.BOTTOM])
     .backgroundColor($r('sys.color.ohos_id_color_background'))
   }
 
   @Builder
   composeSheet() {
     Column({ space: 0 }) {
-      if (this.webComposer) {
-        Row() {
-          Button($r('app.string.compose_cancel'))
-            .buttonStyle(ButtonStyleMode.TEXTUAL)
-            .fontFamily(FONT_FAMILY)
-            .onClick(() => { this.closeCompose(); })
-          Blank()
-        }
-        .width('100%')
-        .padding({ left: S8, right: S8 })
-        .height(48)
-      }
     Stack({ alignContent: Alignment.TopStart }) {
       // x.com's own composer, kept invisible under the native panel. It exists
       // only so the native Post button submits through the real web session;
@@ -2897,11 +3001,13 @@ struct MainTabs {
               this.getUIContext().getHostContext() as common.UIAbilityContext,
               (result: string) => { this.reportDownload(result); });
           } catch (err) {
+            hilog.error(DOMAIN, TAG, 'event=compose_controller_failed code=%{public}d', (err as BusinessError).code);
+            this.composeMessage = $r('app.string.editor_failed');
           }
         })
         .onLoadIntercept((event) => this.interceptExternal(event))
-        .onPageBegin(() => { this.composeLoading = true; })
-        .onPageEnd(() => { this.composeLoading = false; })
+        .onPageBegin(() => { this.composeLoading = true; this.clearComposeSync(); })
+        .onPageEnd(() => { this.composeLoading = false; this.scheduleComposeSync(); })
         .onFullScreenEnter((event) => { this.enterFullScreen(event.handler); })
         .onFullScreenExit(() => { this.exitFullScreen(); })
         .onRenderExited(() => {
@@ -2922,92 +3028,12 @@ struct MainTabs {
           return this.openFileSelector(event);
         })
 
-      Column({ space: 0 }) {
-        Row() {
-          Button($r('app.string.compose_cancel'))
-            .buttonStyle(ButtonStyleMode.TEXTUAL)
-            .fontFamily(FONT_FAMILY)
-            .fontColor($r('sys.color.ohos_id_color_text_primary'))
-            .onClick(() => {
-              this.closeCompose();
-            })
-          Blank()
-          Text($r('app.string.compose_title'))
-            .fontSize(17)
-            .fontFamily(FONT_FAMILY)
-            .fontWeight(FontWeight.Medium)
-            .fontColor($r('sys.color.ohos_id_color_text_primary'))
-          Blank()
-          Button($r('app.string.compose_post'))
-            .buttonStyle(ButtonStyleMode.EMPHASIZED)
-            .fontFamily(FONT_FAMILY)
-            .enabled(this.draft.trim() !== '' && !this.posting && !this.postUncertain &&
-              !this.composePreparing && !this.composeLoading && this.composeOwner !== '')
-            .onClick(() => {
-              this.postFromSheet();
-            })
-        }
-        .width('100%')
-        .padding({ left: S8, right: S8, top: S8, bottom: S8 })
-        .alignItems(VerticalAlign.Center)
-
-        Divider()
-          .strokeWidth(0.5)
-          .color($r('sys.color.ohos_id_color_list_separator'))
-
-        // Counter and the web-composer escape hatch sit above the field: with
-        // the keyboard up, the bottom of the sheet is off screen.
-        Row() {
-          Text($r('app.string.compose_counter', this.draft.length))
-            .fontSize(13)
-            .fontFamily(FONT_FAMILY)
-            .fontColor(this.draft.length > 280
-              ? $r('sys.color.ohos_id_color_warning')
-              : $r('sys.color.ohos_id_color_text_secondary'))
-          Blank()
-          // The parts of composing that are x.com's, not the shell's: media,
-          // GIFs, polls and threads.
-          Button($r('app.string.compose_more'))
-            .buttonStyle(ButtonStyleMode.TEXTUAL)
-            .fontFamily(FONT_FAMILY)
-            .enabled(!this.composePreparing && !this.composeLoading && this.composeOwner !== '')
-            .onClick(() => {
-              this.openWebComposer();
-            })
-        }
-        .width('100%')
-        .padding({ left: S16, right: S8, top: S4, bottom: S4 })
-        .alignItems(VerticalAlign.Center)
-
-        if (this.composeMessage !== '') {
-          Text(this.composeMessage).fontSize(14).padding(S12)
-        }
-        if (this.composePreparing || this.composeLoading) {
-          LoadingProgress().width(28).height(28).margin(S12)
-        }
-        if (this.postUncertain) {
-          Button($r('app.string.post_verify')).onClick(() => { this.resolveUnknownPost(); })
-        }
-        TextArea({ text: $$this.draft, placeholder: $r('app.string.compose_placeholder') })
-          .width('100%')
-          .layoutWeight(1)
-          .fontFamily(FONT_FAMILY)
-          .fontSize(18)
-          .backgroundColor(Color.Transparent)
-          .padding({ left: S16, right: S16, top: S12 })
-          .enabled(!this.posting && !this.postUncertain && !this.composePreparing && this.composeOwner !== '')
-          .onChange(() => {
-            this.scheduleDraftSave();
-          })
-          // Pre-IME: the editor would otherwise swallow Enter (it is a newline
-          // there), so Ctrl/Cmd+Enter has to be handled before the input method
-          // and the editor ever see the key.
-          .onKeyPreIme((event: KeyEvent) => this.composeKey(event))
-          .defaultFocus(true)
-      }
-      .width('100%')
-      .height('100%')
-      .backgroundColor($r('sys.color.ohos_id_color_background'))
+      ComposerPanel({ draft: $draft, ready: this.composeReady, posting: this.posting,
+        uncertain: this.postUncertain, preparing: this.composePreparing, loading: this.composeLoading,
+        hasOwner: this.composeOwner !== '', message: this.composeMessage,
+        onClose: () => { this.closeCompose(); }, onPost: () => { this.postFromSheet(); },
+        onMore: () => { this.openWebComposer(); }, onVerify: () => { this.resolveUnknownPost(); },
+        onDraftChange: () => { this.scheduleDraftSave(); }, onComposeKey: (event: KeyEvent) => this.composeKey(event) })
       .visibility(this.webComposer ? Visibility.Hidden : Visibility.Visible)
       if (this.webComposer && this.composeLoading) {
         LoadingProgress().width(32).height(32).margin(S16)
@@ -3057,6 +3083,7 @@ struct MainTabs {
   }
 
   build() {
+    WithTheme({ colorMode: this.webColorMode }) {
     HdsNavigation() {
       Stack() {
         // 网络设置面板独占一个 1x1 宿主，避免覆盖外观/发帖/图片查看器的弹层绑定。
@@ -3177,7 +3204,9 @@ struct MainTabs {
       }
     })
     .bindToScrollable([this.blurScroller])
-    .systemBarStyle({ statusBarContentColor: this.isMediaViewer() ? '#FFFFFF' : this.statusBarContentColor }, undefined)
+    .withTheme({ enableThemeColorMode: true })
+    .systemBarStyle({ statusBarContentColor: this.profileBannerButtons() || this.isMediaViewer() || this.webColorMode === ThemeColorMode.DARK ? '#FFFFFF' :
+      this.webColorMode === ThemeColorMode.LIGHT ? '#000000' : this.statusBarContentColor }, undefined)
     .titleMode(HdsNavigationTitleMode.MINI)
     .hideTitleBar(this.topChromeHeight() === 0)
     .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
@@ -3186,14 +3215,15 @@ struct MainTabs {
     // The shell owns the wide layout, so keep Navigation in Stack mode.
     .mode(NavigationMode.Stack)
     .hideBackButton(true)
-    .backgroundColor(this.isMediaViewer() ? Color.Black : $r('sys.color.ohos_id_color_background'))
+    .backgroundColor(this.isMediaViewer() ? Color.Black : this.pageBackground || $r('sys.color.ohos_id_color_background'))
     .bindSheet($$this.sheetOpen, this.composeSheet(), {
       height: SheetSize.LARGE,
       width: this.isWide ? 640 : '100%',
       dragBar: true,
-      showClose: false,
+      showClose: this.webComposer,
       shouldDismiss: (() => { this.closeCompose(); }),
       blurStyle: BlurStyle.COMPONENT_ULTRA_THICK
     })
+    }
   }
 }

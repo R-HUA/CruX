@@ -96,7 +96,8 @@ const compose=vm.runInNewContext(stripTypeScriptTypes('(async function(sharedTex
 });
 const composerState=()=>({openingCompose:false,sheetOpen:false,legacyDraft:'',confirmCurrentAccount:async()=>'alice',
   getUIContext:()=>({getHostContext:()=>({}),showAlertDialog:value=>{dialog=value;}}),
-  acceptHandle(){},async persistDraft(){saved.push(this.draft);},saveDraft(){saved.push(this.draft);},
+  acceptHandle(){},clearComposeSync(){},scheduleComposeSync(){},
+  async persistDraft(){saved.push(this.draft);},saveDraft(){saved.push(this.draft);},
   toast:value=>notices.push(value)});
 let composer=composerState();await compose.call(composer,'外部文字');
 assert.equal(composer.draft,'外部文字');assert.deepEqual(saved,['外部文字']);
