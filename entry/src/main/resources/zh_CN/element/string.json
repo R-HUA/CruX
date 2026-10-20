@@ -17,6 +17,8 @@
     {"name":"media_close","value":"关闭"},
     {"name":"media_loading","value":"正在加载图片…"},
     {"name":"media_failed","value":"图片加载失败"},
+    {"name":"media_view_web","value":"返回网页查看"},
+    {"name":"media_reopen","value":"网页已重新加载，请重新打开图片"},
     {"name":"media_original_size","value":"原始尺寸"},
     {"name":"media_available_size","value":"可用尺寸"},
     {"name":"media_share","value":"分享"},

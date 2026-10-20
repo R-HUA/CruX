@@ -5,6 +5,12 @@ export interface MediaAddress {
   candidates: string[];
 }
 
+/** 默认头像只供账号图标下载，不接管网页中的点击。 */
+export function isMediaDownloadUrl(source: string): boolean {
+  return resolveMedia(source) !== undefined ||
+    /^https:\/\/abs\.twimg\.com\/sticky\/default_profile_images\/[A-Za-z0-9_-]+\.(png|jpg|jpeg|webp)$/i.test(source);
+}
+
 export function resolveMedia(source: string): MediaAddress | undefined {
   const avatar = /^https:\/\/pbs\.twimg\.com\/profile_images\/([0-9]+)\/([A-Za-z0-9_-]+)\.(jpg|jpeg|png|webp|gif)$/i.exec(source);
   if (avatar) {
@@ -12,6 +18,7 @@ export function resolveMedia(source: string): MediaAddress | undefined {
     return { id: 'avatar-' + avatar[1] + '-' + avatar[2], source: source,
       candidates: original === source ? [source] : [original, source] };
   }
+  if (/\s|\\|\/\.\.?(\/|\?|$)/.test(source)) { return undefined; }
   const card = /^https:\/\/pbs\.twimg\.com\/(card_img|amplify_video_thumb|ext_tw_video_thumb)\/([A-Za-z0-9_/-]+)(?:\.(jpg|jpeg|png|webp))?(?:\?[^#]*)?$/i.exec(source);
   if (card) {
     return { id: 'card-' + card[1] + '-' + card[2].replace(/\//g, '-'), source: source, candidates: [source] };

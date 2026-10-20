@@ -5,8 +5,8 @@ import vm from 'node:vm';
 
 const source = name => stripTypeScriptTypes(readFileSync(new URL('../entry/src/main/ets/common/' + name + '.ets', import.meta.url), 'utf8')
   .replace(/^import .*;\r?\n/gm, '')).replace(/^export /gm, '');
-const production = ['WebImageDownloads', 'WebSystem', 'MediaFiles'].map(source).join('\n') +
-  ';({WebImageDownloads,WebImageDownloadError,isWebImageUrl,installDownloads,MediaFiles})';
+const production = ['WebMedia', 'WebImageDownloads', 'WebSystem', 'MediaFiles'].map(source).join('\n') +
+  ';({WebImageDownloads,WebImageDownloadError,isWebImageUrl,installDownloads,MediaFiles,resolveMedia,removeExpiredDownloads})';
 const png = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3, 4]);
 const url = 'https://pbs.twimg.com/media/example?format=jpg&name=orig';
 const avatar = 'https://pbs.twimg.com/profile_images/123/avatar_normal.jpg';
@@ -112,6 +112,28 @@ for (const value of ['https://example.com/photo.png', 'http://pbs.twimg.com/medi
 }
 assert.equal(allowed.dispatched.length, 0); await allowed.images.close();
 
+// Every intercepted image reaches the same downloader classification and local byte pipeline.
+for (const value of [url, avatar, 'https://pbs.twimg.com/card_img/123/card?format=jpg&name=small',
+  'https://pbs.twimg.com/amplify_video_thumb/123/img/cover.jpg', 'https://pbs.twimg.com/ext_tw_video_thumb/123/cover.jpg']) {
+  const h = harness(), address = h.resolveMedia(value), files = new h.MediaFiles(h.images);
+  for (const candidate of address.candidates) { assert.equal(h.isWebImageUrl(candidate), true); }
+  const result = files.load(address, { cacheDir: '/cache' }); await flush();
+  const picture = h.item(address.candidates[0]); h.before(picture); await h.finish(picture);
+  const file = await result;
+  assert.deepEqual(h.storage.get(file.path).bytes, png);
+  if (value.includes('_thumb/') || value.includes('/card_img/')) { assert.equal(file.originalSize, false); }
+  await files.close(); await h.images.close();
+}
+
+// A definite dispatch failure can retry without waiting for a callback that will never arrive.
+{
+  const h = harness(); h.config({ dispatchError: { code: 17100001 } });
+  await assert.rejects(h.images.request(url).result, error => error.stage === 'dispatch');
+  h.config({ dispatchError: undefined });
+  const retry = h.images.request(url), picture = h.item(); h.before(picture); await h.finish(picture); await retry.result;
+  assert.equal(h.images.needsRecovery(), false); await h.images.close();
+}
+
 // One delegate serves native images and normal downloads; bytes and file ownership stay real.
 {
   const h = harness(), first = h.images.request(url), second = h.images.request(url), other = h.images.request(avatar);
@@ -150,6 +172,7 @@ for (const action of ['cancel', 'timeout', 'close']) {
   const rejected = assert.rejects(request.result, error => error.stage === (action === 'close' ? 'closed' : action));
   if (action === 'cancel') { request.cancel(); } else if (action === 'timeout') { h.expire(); } else { await h.images.close(); }
   await rejected;
+  assert.equal(h.images.needsRecovery(), true);
   if (action !== 'close') { await assert.rejects(h.images.request(url).result, error => error.stage === 'pending_cancel'); }
   const late = h.item(url, { url: 'https://example.com/redirected' });
   h.before(late); assert.equal(late.starts, 0); assert.equal(late.cancelled, 1);
@@ -265,7 +288,10 @@ for (const code of [20, 30, 34, 36]) {
   const result = files.load({ id: 'failed', candidates: [url, avatar] }, { cacheDir: '/cache' });
   const rejected = assert.rejects(result, error => error.code === code); await flush();
   const picture = h.item(url, { code }); h.before(picture); h.failed(picture); await rejected;
-  assert.deepEqual(h.dispatched, [url]); assert.equal(h.httpCalls, 0); await files.close(); await h.images.close();
+  assert.deepEqual(h.dispatched, [url]); assert.equal(h.httpCalls, 0);
+  const retry = files.load({ id: 'failed', candidates: [url, avatar] }, { cacheDir: '/cache' }); await flush();
+  const next = h.item(); h.before(next); await h.finish(next); await retry;
+  assert.deepEqual(h.dispatched, [url, url]); await files.close(); await h.images.close();
 }
 {
   const h = harness(), files = new h.MediaFiles(h.images);

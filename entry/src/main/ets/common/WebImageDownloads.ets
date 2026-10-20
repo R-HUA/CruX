@@ -2,13 +2,13 @@ import webview from '@ohos.web.webview';
 import { fileIo } from '@kit.CoreFileKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
+import { isMediaDownloadUrl } from './WebMedia';
 
 const IMAGE_LIMIT: number = 25 * 1024 * 1024;
 const IMAGE_TIMEOUT: number = 40000;
 
 export function isWebImageUrl(url: string): boolean {
-  return /^https:\/\/(pbs\.twimg\.com\/(media|profile_images)|abs\.twimg\.com\/sticky\/default_profile_images)\/[A-Za-z0-9_./:-]+(?:\?[^#\s\\]*)?$/i.test(url) &&
-    !/\/\.\.?(\/|\?|$)/.test(url);
+  return isMediaDownloadUrl(url);
 }
 
 /** ArkWeb 的下载错误码不等同 HTTP 状态码。 */
@@ -97,6 +97,8 @@ export class WebImageDownloads {
       task.timer = setTimeout(() => this.fail(task, new WebImageDownloadError('timeout', 21), true), IMAGE_TIMEOUT);
       try { this.controller.startDownload(url); } catch (error) {
         this.fail(task, new WebImageDownloadError('dispatch', (error as BusinessError).code || 0), true);
+        // 同步参数或控制器错误表示未派发，无需等候不会到达的 GUID。
+        this.byUrl.delete(url);
       }
     }
     return { result: result, cancel: () => {
@@ -106,6 +108,11 @@ export class WebImageDownloads {
       task.subscribers = task.subscribers.filter((value: ImageSubscriber) => value !== subscriber);
       if (task.subscribers.length === 0) { this.fail(task, new WebImageDownloadError('cancel', 40), true); }
     } };
+  }
+
+  /** 无 GUID 的已派发任务只能随所属 Web 一起重建，避免旧回调认领新请求。 */
+  needsRecovery(): boolean {
+    return Array.from(this.byUrl.values()).some((task: ImageTransfer) => task.done && task.guid === '');
   }
 
   beforeDownload(item: webview.WebDownloadItem): boolean {

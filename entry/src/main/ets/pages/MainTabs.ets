@@ -11,7 +11,7 @@ import { NativeBottomBar } from './NativeBottomBar';
 import { NativeTopBar } from './NativeTopBar';
 import { NetworkConfig, NetworkSnapshot } from '../common/NetworkConfig';
 import { preferences } from '@kit.ArkData';
-import { isSiteUrl, isAuthUrl, mediaAcceptTypes, chooseMedia, installDownloads, sharePage } from '../common/WebSystem';
+import { isSiteUrl, isAuthUrl, mediaAcceptTypes, chooseMedia, installDownloads, sharePage, removeExpiredDownloads } from '../common/WebSystem';
 import { abilityAccessCtrl, common, PermissionRequestResult, Permissions } from '@kit.AbilityKit';
 import { BusinessError, deviceInfo } from '@kit.BasicServicesKit';
 import { notificationManager } from '@kit.NotificationKit';
@@ -236,6 +236,8 @@ struct MainTabs {
   @State rawWeb: boolean = false;
   @State desktopMode: boolean = false;
   @State preferencesReady: boolean = false;
+  @State webSession: number = 0;
+  private webSource: string = TWITTER_ROUTES[0];
   @State composeReady: boolean = false;
   private composeSyncTimer: number = -1;
   private composeRevision: number = 0;
@@ -343,6 +345,7 @@ struct MainTabs {
     this.armFirstLoadTimeout();
     this.armBadgeRefresh();
     try {
+      await removeExpiredDownloads(shellContext.cacheDir);
       const ctx: common.Context | undefined = this.getUIContext().getHostContext();
       if (ctx !== undefined) {
         const prefs: preferences.Preferences = await preferences.getPreferences(ctx, PREFS_NAME);
@@ -1089,6 +1092,25 @@ struct MainTabs {
       this.refreshing = false;
       hilog.error(DOMAIN, TAG, 'event=refresh_failed error=%{public}s', JSON.stringify(err));
     }
+  }
+
+  /** 重建所属 Web 隔离无 GUID 的旧下载；保留共享登录会话和当前站内地址。 */
+  private recoverMediaWeb(showWeb: boolean): void {
+    this.imageViewerOpen = false;
+    this.rawWeb = showWeb;
+    this.webSource = this.currentUrl || TWITTER_ROUTES[0];
+    this.webImages?.close().catch((error: Error) => {
+      hilog.error(DOMAIN, TAG, 'event=web_image_close_failed error=%{public}s', error.message);
+      this.toast($r('app.string.operation_failed'));
+    });
+    this.webImages = undefined;
+    this.incomingControllerReady = false;
+    this.incomingPageReady = false;
+    this.controller = new web_webview.WebviewController();
+    this.hasError = false;
+    this.progress = 0;
+    this.webSession++;
+    if (!showWeb) { this.toast($r('app.string.media_reopen')); }
   }
 
   /** 账号读取失败不应使原生界面消失；登录与未知路由交给网页。 */
@@ -2739,7 +2761,7 @@ struct MainTabs {
 
   @Builder
   webView() {
-    Web({ src: TWITTER_ROUTES[0], controller: this.controller, renderMode: RenderMode.ASYNC_RENDER })
+    Web({ src: this.webSource, controller: this.controller, renderMode: RenderMode.ASYNC_RENDER })
       .width('100%')
       .height('100%')
       // 网页遮罩和背景延伸至手势区，交互元素由网页安全区样式避让。
@@ -2915,7 +2937,11 @@ struct MainTabs {
             // HarmonyOS pull-to-refresh drives the WebView directly, so the
             // header does not need a refresh button.
             Refresh({ refreshing: $$this.refreshing }) {
-              if (this.preferencesReady) { this.webView() }
+              Column() {
+                if (this.preferencesReady) {
+                  ForEach([this.webSession], () => { this.webView() }, (session: number) => session.toString())
+                }
+              }.width('100%').height('100%')
             }
             .width('100%')
             .height('100%')
@@ -3079,7 +3105,8 @@ struct MainTabs {
   @Builder
   imageViewer() {
     NativeImageViewer({ items: this.imageItems, initialIndex: this.imageIndex,
-      webImages: this.webImages, onClose: () => { this.imageViewerOpen = false; } })
+      webImages: this.webImages, onClose: () => { this.imageViewerOpen = false; },
+      onRecover: () => { this.recoverMediaWeb(false); }, onWeb: () => { this.recoverMediaWeb(true); } })
   }
 
   build() {

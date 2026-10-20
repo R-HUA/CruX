@@ -15,6 +15,8 @@ export struct NativeImageViewer {
   initialIndex: number = 0;
   webImages: WebImageDownloads | undefined = undefined;
   onClose: () => void = () => {};
+  onRecover: () => void = () => {};
+  onWeb: () => void = () => {};
   @State index: number = 0;
   @State loadedFiles: (MediaFile | undefined)[] = [];
   @State loadingIndices: number[] = [];
@@ -118,6 +120,8 @@ export struct NativeImageViewer {
       }
     } catch (error) {
       if (this.alive) {
+        this.chromeVisible = true;
+        clearTimeout(this.chromeHideTimer);
         this.failedIndices = [...this.failedIndices, index];
         hilog.error(0x0A11, 'OpenTwit', 'event=image_load_failed error=%{public}s', JSON.stringify(error));
       }
@@ -226,6 +230,15 @@ export struct NativeImageViewer {
   bottomBar() {
     Column({ space: S12 }) {
       this.metadata()
+      if (this.failedIndices.includes(this.index)) {
+        Row({ space: S12 }) {
+          Button($r('app.string.retry')).onClick(() => {
+            if (this.webImages?.needsRecovery()) { this.onRecover(); }
+            else { this.loadIndex(this.index); }
+          })
+          Button($r('app.string.media_view_web')).onClick(this.onWeb)
+        }
+      }
       Row({ space: 28 }) {
         Stack() {
           // 安全控件仅用其支持的样式；模糊材质在背后，不能遮盖控件或降低控件透明度。
@@ -262,7 +275,7 @@ export struct NativeImageViewer {
       Swiper(this.swiper) {
         ForEach(this.items, (item: MediaAddress, index: number) => {
           ZoomImage({
-            source: this.loadedFiles[index] ? 'file://' + this.loadedFiles[index]!.path : item.source,
+            source: this.loadedFiles[index] ? 'file://' + this.loadedFiles[index]!.path : '',
             pixelWidth: this.loadedFiles[index] ? this.loadedFiles[index]!.width : 0,
             pixelHeight: this.loadedFiles[index] ? this.loadedFiles[index]!.height : 0,
             active: index === this.index,
@@ -379,9 +392,11 @@ struct ZoomImage {
 
   build() {
     Stack() {
-      Image(this.source).width('100%').height('100%').objectFit(ImageFit.Contain)
-        .scale({ x: this.scaleValue, y: this.scaleValue }).translate({ x: this.x, y: this.y })
-        .draggable(false)
+      if (this.source !== '') {
+        Image(this.source).width('100%').height('100%').objectFit(ImageFit.Contain)
+          .scale({ x: this.scaleValue, y: this.scaleValue }).translate({ x: this.x, y: this.y })
+          .draggable(false)
+      }
     }.width('100%').height('100%')
     .onAreaChange((_old: Area, area: Area) => {
       this.widthValue = Number(area.width); this.heightValue = Number(area.height);

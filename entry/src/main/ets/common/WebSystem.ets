@@ -4,6 +4,7 @@ import { photoAccessHelper } from '@kit.MediaLibraryKit';
 import { systemShare } from '@kit.ShareKit';
 import webview from '@ohos.web.webview';
 import { hilog } from '@kit.PerformanceAnalysisKit';
+import { BusinessError } from '@kit.BasicServicesKit';
 import { WebImageDownloads } from './WebImageDownloads';
 
 /** 只将站内业务留在当前页面，普通外链交给浏览器。 */
@@ -60,27 +61,60 @@ export async function sharePage(context: common.UIAbilityContext, link: string):
   await new systemShare.ShareController(data).show(context, { anchor: 'page-share' });
 }
 
+/** 仅回收本应用拥有的下载文件；已被系统移除等同回收完成。 */
+async function removeDownload(path: string): Promise<void> {
+  try { await fileIo.unlink(path); } catch (error) {
+    if ((error as BusinessError).code !== 13900002) { throw error as Error; }
+  }
+}
+
+/** 启动时清理上次进程留下的普通下载，不触碰当前下载代理的文件。 */
+export async function removeExpiredDownloads(directory: string): Promise<void> {
+  const names = await fileIo.listFile(directory);
+  for (const name of names) {
+    if (!/^web-download-\d+-\d+$/.test(name)) { continue; }
+    await removeDownload(directory + '/' + name);
+  }
+}
+
 /** 下载由 ArkWeb 保留会话，完成后由用户选择保存位置。 */
 export function installDownloads(controller: webview.WebviewController, context: common.UIAbilityContext,
   report: (result: string) => void, images?: WebImageDownloads): webview.WebDownloadDelegate {
   const delegate = new webview.WebDownloadDelegate();
   let sequence: number = 0;
+  const paths: Map<string, string> = new Map();
   delegate.onBeforeDownload((item: webview.WebDownloadItem) => {
     if (images && images.beforeDownload(item)) { return; }
     try {
-      item.start(context.cacheDir + '/web-download-' + Date.now() + '-' + (++sequence));
+      const path = context.cacheDir + '/web-download-' + Date.now() + '-' + (++sequence);
+      paths.set(item.getGuid(), path);
+      item.start(path);
     } catch (err) {
       hilog.error(0x0A11, 'OpenTwit', 'event=download_start_failed error=%{public}s', JSON.stringify(err));
       report('failed');
+      const path = paths.get(item.getGuid());
+      if (path) {
+        removeDownload(path).then(() => { paths.delete(item.getGuid()); }).catch((error: Error) => {
+          hilog.error(0x0A11, 'OpenTwit', 'event=download_cleanup_failed error=%{public}s', error.message);
+          report('cleanup_failed');
+        });
+      }
     }
   });
   delegate.onDownloadUpdated((item: webview.WebDownloadItem) => {
     if (images) { images.downloadUpdated(item); }
   });
-  delegate.onDownloadFailed((item: webview.WebDownloadItem) => {
+  delegate.onDownloadFailed(async (item: webview.WebDownloadItem) => {
     if (images && images.downloadFailed(item)) { return; }
     hilog.error(0x0A11, 'OpenTwit', 'event=download_failed code=%{public}d', item.getLastErrorCode());
     report('failed');
+    const path = paths.get(item.getGuid());
+    if (path) {
+      try { await removeDownload(path); paths.delete(item.getGuid()); } catch (error) {
+        hilog.error(0x0A11, 'OpenTwit', 'event=download_cleanup_failed error=%{public}s', JSON.stringify(error));
+        report('cleanup_failed');
+      }
+    }
   });
   delegate.onDownloadFinish(async (item: webview.WebDownloadItem) => {
     if (images && images.downloadFinish(item)) { return; }
@@ -101,7 +135,7 @@ export function installDownloads(controller: webview.WebviewController, context:
       hilog.error(0x0A11, 'OpenTwit', 'event=download_save_failed error=%{public}s', JSON.stringify(err));
       result = 'failed';
     } finally {
-      try { await fileIo.unlink(path); } catch (err) {
+      try { await removeDownload(path); paths.delete(item.getGuid()); } catch (err) {
         hilog.error(0x0A11, 'OpenTwit', 'event=download_cleanup_failed error=%{public}s', JSON.stringify(err));
         result = 'cleanup_failed';
       }

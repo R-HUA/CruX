@@ -17,6 +17,8 @@
     {"name":"media_close","value":"Close"},
     {"name":"media_loading","value":"Loading image…"},
     {"name":"media_failed","value":"Image could not be loaded"},
+    {"name":"media_view_web","value":"View on webpage"},
+    {"name":"media_reopen","value":"Page reloaded. Open the image again"},
     {"name":"media_original_size","value":"Original dimensions"},
     {"name":"media_available_size","value":"Available dimensions"},
     {"name":"media_share","value":"Share"},

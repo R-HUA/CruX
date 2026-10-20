@@ -59,13 +59,21 @@ export class MediaFiles {
   load(address: MediaAddress, context: common.UIAbilityContext): Promise<MediaFile> {
     const existing = this.downloads.get(address.id);
     if (existing) { return existing; }
-    const task = this.download(address, context.cacheDir);
+    const task = this.download(address, context.cacheDir).catch((error: Error) => {
+      this.downloads.delete(address.id);
+      throw error;
+    });
     this.downloads.set(address.id, task);
     return task;
   }
 
   private async download(address: MediaAddress, directory: string): Promise<MediaFile> {
-    if (!MediaFiles.cacheCleanup) { MediaFiles.cacheCleanup = this.removeExpired(directory); }
+    if (!MediaFiles.cacheCleanup) {
+      MediaFiles.cacheCleanup = this.removeExpired(directory).catch((error: Error) => {
+        MediaFiles.cacheCleanup = undefined;
+        throw error;
+      });
+    }
     await MediaFiles.cacheCleanup;
     const policy: DohPolicy = NetworkConfig.getInstance().getDohPolicy();
     const useWeb: boolean = this.webImages !== undefined && NetworkConfig.getInstance().snapshot().syncImageDownloader;
@@ -90,7 +98,7 @@ export class MediaFiles {
       const extension = imageExtension(buffer);
       const path = directory + '/x-image-' + this.stamp + '-' + address.id + '.' + extension;
       const file = await fileIo.open(path, fileIo.OpenMode.CREATE | fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.TRUNC);
-      this.files.push(path);
+      if (!this.files.includes(path)) { this.files.push(path); }
       try {
         let written = 0;
         while (written < buffer.byteLength) {
@@ -166,9 +174,15 @@ export class MediaFiles {
       if (!/^x-image-\d+-[A-Za-z0-9_-]+\.(jpg|png|webp|gif)$/.test(name) &&
         !/^x-web-image-\d+-\d+-\d+\.tmp$/.test(name)) { continue; }
       const path = directory + '/' + name;
-      const stat = await fileIo.stat(path);
+      let stat: fileIo.Stat;
+      try { stat = await fileIo.stat(path); } catch (error) {
+        if ((error as BusinessError).code === 13900002) { continue; }
+        throw error as Error;
+      }
       if (Date.now() / 1000 - stat.mtime > 86400) {
-        await fileIo.unlink(path);
+        try { await fileIo.unlink(path); } catch (error) {
+          if ((error as BusinessError).code !== 13900002) { throw error as Error; }
+        }
       } else {
         retained.push({ path: path, size: stat.size, mtime: stat.mtime });
         total += stat.size;
@@ -177,7 +191,9 @@ export class MediaFiles {
     retained.sort((left: CachedImageFile, right: CachedImageFile) => left.mtime - right.mtime);
     for (const file of retained) {
       if (total <= 128 * 1024 * 1024) { break; }
-      await fileIo.unlink(file.path);
+      try { await fileIo.unlink(file.path); } catch (error) {
+        if ((error as BusinessError).code !== 13900002) { throw error as Error; }
+      }
       total -= file.size;
     }
   }
