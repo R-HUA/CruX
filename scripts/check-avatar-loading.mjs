@@ -17,7 +17,8 @@ const fields = prefix.split('\n').filter(line =>
   .map(line => line.replace('@State ', '')).join('\n');
 const methods = ['unquote', 'loadAvatar', 'resetAvatar', 'avatarImageFailed', 'closeAvatarFiles',
   'closeRetiredAvatarFiles', 'retireAvatarFiles', 'readAvatar', 'restoreAvatar', 'saveAvatar',
-  'acceptHandle', 'reloadCurrent', 'aboutToDisappear', 'applyPageChrome', 'updateChromeFlag', 'logChromeResult'];
+  'acceptHandle', 'reloadCurrent', 'aboutToDisappear', 'applyPageChrome', 'updateChromeFlag', 'logChromeResult',
+  'retryAvatarRead', 'clearAvatarRetry'];
 const cleanup = main.match(/^class AvatarCleanupFrame extends FrameCallback \{[\s\S]*?^\}/m)[0];
 // Execute the production methods and real MediaFiles downloader; only platform I/O is substituted.
 const code = stripTypeScriptTypes(media + '\n' + cleanup + '\nclass MainTabs {\n' + fields + '\n' +
@@ -33,6 +34,8 @@ const settle = () => new Promise(resolve => setImmediate(resolve));
 let policy = { mode: 'auto', url: 'https://dns.example/dns-query' };
 let responses = [], requests = [], frames = [], removed = [], logs = [], puts = [];
 let jsResults = [], cache = new Map(), cacheRead;
+let timerId = 0;
+const timers = new Map();
 const prefs = {
   get: async key => cacheRead ? cacheRead.promise : cache.get(key) || '',
   put: async (key, value) => { cache.set(key, value); puts.push([key, value]); },
@@ -41,10 +44,13 @@ const prefs = {
 const runtime = {
   ArrayBuffer, Uint8Array, Map, Promise, Date, FrameCallback: class {},
   DOMAIN: 0x0A11, TAG: 'OpenTwit', PREFS_NAME: 'opentwit_web', AVATAR_KEY: 'own_avatar',
-  clearTimeout, clearInterval,
+  setTimeout: callback => { const id = ++timerId; timers.set(id, callback); return id; },
+  clearTimeout: id => timers.delete(id), clearInterval,
+  AVATAR_RETRY_MS: 1200, AVATAR_RETRY_LIMIT: 6,
   preferences: { getPreferences: async () => prefs },
   NetworkConfig: { getInstance: () => ({ getDohPolicy: () => policy }) },
-  accountAvatarScript: () => 'avatar', chromeScript: () => 'apply', chromeFlagScript: () => 'flag',
+  accountAvatarScript: () => 'avatar', accountAvatarDiagScript: () => 'diag',
+  chromeScript: () => 'apply', chromeFlagScript: () => 'flag',
   usesNativeNavigation: () => true, usesNativeHeader: () => true,
   http: { RequestMethod: { GET: 0 }, HttpDataType: { ARRAY_BUFFER: 0 }, createHttp: () => {
     let record;
@@ -77,7 +83,8 @@ const makePage = () => {
     toast() {}, refreshes: 0, networkReloadTimer: -1, firstLoadTimer: -1, badgeTimer: -1,
     badgeRetryTimer: -1, draftSaveTimer: -1 });
   page.controller = {
-    runJavaScript() {
+    runJavaScript(script) {
+      if (script === 'diag') { return Promise.resolve('"[]"'); }
       assert.ok(jsResults.length, 'Unexpected JavaScript request');
       const result = jsResults.shift();
       if (result instanceof Error) { return Promise.reject(result); }
@@ -88,6 +95,12 @@ const makePage = () => {
   return page;
 };
 const read = async (page, url) => { jsResults.push(JSON.stringify(url)); page.readAvatar(); await settle(); };
+const retry = async (page, url) => {
+  const callback = timers.get(page.avatarRetryTimer);
+  assert.ok(callback, 'Expected an avatar retry');
+  timers.delete(page.avatarRetryTimer);
+  jsResults.push(JSON.stringify(url)); callback(); await settle();
+};
 const flushFrames = async () => { while (frames.length) { frames.shift().onIdle(2000000); } await settle(); };
 const urlA = 'https://pbs.twimg.com/profile_images/1/first_normal.jpg';
 const urlB = 'https://pbs.twimg.com/profile_images/2/second_normal.jpg';
@@ -128,9 +141,45 @@ assert.equal(responses.length, 0, 'SECURE_ONLY must not issue a system-DNS fallb
 const failedRequests = requests.length;
 await read(page, urlA); assert.equal(requests.length, failedRequests);
 policy = { mode: 'off' }; responses.push(ok());
-page.reloadCurrent(); await settle();
+await retry(page, urlA);
 assert.notEqual(page.avatarPath, ''); assert.equal(requests.at(-1).options.dnsOverHttps, undefined);
+assert.equal(page.avatarRetryTimer, -1);assert.equal(page.avatarRetries, 1);
+page.clearAvatarRetry();assert.equal(page.avatarRetries,0);
 page.aboutToDisappear(); await settle();
+
+// 水合延迟、持续失败都只有六次重试，重复页面通知不会重新打开失败循环。
+page = makePage(); await read(page, '');
+responses.push(ok()); await retry(page, urlA);
+assert.notEqual(page.avatarPath, '');assert.equal(page.avatarRetryTimer, -1);
+page.aboutToDisappear();await settle();
+page = makePage(); responses.push(Error('network'));await read(page, urlA);
+for(let i=0;i<6;i++){responses.push(Error('network'));await retry(page,urlA);}
+assert.equal(page.avatarRetries,6);assert.equal(page.avatarRetryTimer,-1);
+const exhaustedRequests=requests.length;
+await read(page,urlA);assert.equal(requests.length,exhaustedRequests);assert.equal(page.avatarRetryTimer,-1);
+page.aboutToDisappear();await settle();
+page = makePage();await read(page,'');
+page.authenticationPage=true;page.resetAvatar();
+assert.equal(page.avatarRetryTimer,-1);assert.equal(page.avatarRetries,0);
+page.aboutToDisappear();await settle();
+
+// 下载完成但原生渲染持续失败，也不能无限重启预算。
+page=makePage();responses.push(ok());await read(page,urlA);
+for(let i=0;i<6;i++){
+  page.avatarImageFailed(page.avatarPath);responses.push(ok());await retry(page,urlA);
+}
+page.avatarImageFailed(page.avatarPath);
+assert.equal(page.avatarRetries,6);assert.equal(page.avatarRetryTimer,-1);
+page.aboutToDisappear();await settle();
+
+// 上次账号仅预热头像；重复确认同一账号不作废正在读取的请求。
+page = makePage();page.ownHandle='';cache.set('own_avatar:alice',urlA);responses.push(ok());
+await page.restoreAvatar('alice',true);await settle();
+assert.equal(page.ownHandle,'');assert.notEqual(page.avatarPath,'');
+page.aboutToDisappear();await settle();cache.clear();
+page=makePage();const sameAccountRead=deferred();jsResults.push(sameAccountRead);page.readAvatar();
+page.acceptHandle('ALICE',false);responses.push(ok());sameAccountRead.resolve(JSON.stringify(urlA));await settle();
+assert.notEqual(page.avatarPath,'');page.aboutToDisappear();await settle();
 
 // Out-of-order page reads cannot overwrite a newer URL or a switched account.
 page = makePage();
@@ -211,8 +260,8 @@ page.logChromeResult('apply', JSON.stringify({ error: 'TypeError: https://x.com/
 assert.ok(logs.some(log => log.level === 'warn' && log.args.includes('TypeError')));
 assert.ok(!JSON.stringify(logs).includes('secret-message'));
 assert.ok(!JSON.stringify(logs).includes(urlA));
-assert.match(main, /accountPicture\(path: string\)[\s\S]*?Image\(path\)/);
-assert.equal((main.match(/this\.accountPicture\(this\.avatarPath\)/g) || []).length, 2);
+assert.match(main, /accountPicture\(\$\$: AccountPictureState\)[\s\S]*?Image\(\$\$\.path\)/);
+assert.equal((main.match(/this\.accountPicture\(\{ path: this\.avatarPath \}\)/g) || []).length, 2);
 assert.ok(method('acceptHandle').includes('this.resetAvatar()'));
 assert.ok(method('openCompose').includes('this.acceptHandle(handle, false)'));
 assert.equal(responses.length, 0); assert.equal(jsResults.length, 0);

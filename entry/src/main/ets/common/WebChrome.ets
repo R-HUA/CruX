@@ -220,7 +220,7 @@ export function chromeScript(nativeNavigation: boolean, nativeHeader: boolean, u
     'if(window.__otPend){return;}window.__otPend=1;' +
     'window.__otTimer=setTimeout(window.__otPass,' + CHROME_OBSERVER_MS + ');});' +
     'try{window.__otObs.observe(document.documentElement,{childList:true,subtree:true,' +
-    'attributes:true,attributeFilter:["src","srcset"]});}catch(e){}' +
+    'attributes:true,attributeFilter:["src","srcset","style","href"]});}catch(e){}' +
     'window.addEventListener("pagehide",function(e){if(!e.persisted){window.__otObs.disconnect();clearTimeout(window.__otTimer);}}, {once:true});}' +
     'window.__otChromeReport=function(){return JSON.stringify({' +
     'navigation:Boolean(window.__otNativeNavigation&&!window.__otAuth&&routeKey(window.__otChromeUrl)===routeKey(location.href)),' +
@@ -291,7 +291,9 @@ export function accountAvatarScript(handle: string): string {
   return `(function(handle){
     function avatar(root){
       if(!root)return '';
-      var images=root.querySelectorAll('img,image,[style*="background-image"]');
+      var selector='img,image,[style*="background-image"]';
+      var images=Array.from(root.querySelectorAll(selector));
+      if(root.matches(selector))images.unshift(root);
       for(var i=0;i<images.length;i++){
         var background=images[i].style&&images[i].style.backgroundImage||'';
         var match=/^url\\(["']?(.*?)["']?\\)$/.exec(background);
@@ -303,11 +305,35 @@ export function accountAvatarScript(handle: string): string {
     }
     var controls=document.querySelectorAll('[data-testid="DashButton_ProfileIcon_Link"],'+
       '[data-testid="SideNav_AccountSwitcher_Button"],[data-testid="AppTabBar_Profile_Link"]');
-    for(var i=0;i<controls.length;i++){var src=avatar(controls[i]);if(src)return src;}
+    var content='article,[data-testid="cellInnerDiv"],[data-testid="tweet"]';
+    for(var i=0;i<controls.length;i++){
+      if(controls[i].closest(content))continue;
+      var src=avatar(controls[i]);if(src)return src;
+    }
+    var candidates=document.querySelectorAll(handle?'[data-testid^="UserAvatar-Container-"],a[href]':
+      'header[role="banner"] [data-testid^="UserAvatar-Container-"],'+
+      '[data-testid="TopNavBar"] [data-testid^="UserAvatar-Container-"]');
+    var topAvatar='';
+    for(var c=0;c<candidates.length;c++){
+      var node=candidates[c];
+      if(node.closest(content))continue;
+      var id=(node.getAttribute('data-testid')||'').toLowerCase();
+      var href=(node.getAttribute('href')||'').toLowerCase();
+      if(handle&&(id==='useravatar-container-'+handle.toLowerCase()||href==='/'+handle.toLowerCase())){
+        var ownControl=avatar(node);if(ownControl)return ownControl;
+      }
+      if(id.indexOf('useravatar-container-')!==0||
+        !node.closest('header[role="banner"],[data-testid="TopNavBar"]'))continue;
+      var top=avatar(node);
+      if(topAvatar&&top&&topAvatar!==top)return '';
+      if(top)topAvatar=top;
+    }
+    if(topAvatar)return topAvatar;
     var path=location.pathname.replace(/\\/$/,'').toLowerCase();
     if(handle&&path==='/'+handle.toLowerCase()){
       var links=document.querySelectorAll('a[href]');
       for(var j=0;j<links.length;j++){
+        if(links[j].closest(content))continue;
         if((links[j].getAttribute('href')||'').toLowerCase()===path+'/photo'){
           var own=avatar(links[j]);if(own)return own;
         }
@@ -315,6 +341,36 @@ export function accountAvatarScript(handle: string): string {
     }
     return '';
   })(` + JSON.stringify(handle) + ')';
+}
+
+/** 只报告控件结构和图片域名，避免将账号、图片地址或页面正文写入日志。 */
+export function accountAvatarDiagScript(): string {
+  return `(function(){
+    var selectors=['[data-testid="DashButton_ProfileIcon_Link"]',
+      '[data-testid="SideNav_AccountSwitcher_Button"]','[data-testid="AppTabBar_Profile_Link"]',
+      'header[role="banner"]','[data-testid="TopNavBar"]','nav[role="navigation"]'];
+    return JSON.stringify(selectors.map(function(selector){
+      var nodes=Array.from(document.querySelectorAll(selector));
+      return {selector:selector,count:nodes.length,nodes:nodes.map(function(node){
+        var style=getComputedStyle(node);
+        var images=Array.from(node.querySelectorAll('img,image,[style*="background-image"]'));
+        if(node.matches('img,image,[style*="background-image"]'))images.unshift(node);
+        return {tag:node.tagName,display:style.display,visibility:style.visibility,
+          avatars:node.querySelectorAll('[data-testid^="UserAvatar-Container-"]').length,
+          images:images.map(function(img){
+            var background=img.style&&img.style.backgroundImage||'';
+            var match=/^url\\(["']?(.*?)["']?\\)$/.exec(background);
+            var src=img.currentSrc||img.getAttribute('src')||img.getAttribute('href')||(match?match[1]:'');
+            var host=/^https:\\/\\/([^/]+)/i.exec(src);
+            var parent=img.parentElement;
+            var id=parent&&parent.getAttribute('data-testid')||'';
+            return {tag:img.tagName,host:host?(/^(pbs|abs)\\.twimg\\.com$/i.test(host[1])?host[1]:'other'):'empty',
+              parentTag:parent?parent.tagName:'',parentTestId:id.indexOf('UserAvatar-Container-')===0?
+                'UserAvatar-Container-*':(/^(DashButton_ProfileIcon_Link|SideNav_AccountSwitcher_Button|AppTabBar_Profile_Link)$/.test(id)?id:'other')};
+          })};
+      })};
+    }));
+  })()`;
 }
 
 // Unread counters for the shell's own tab bar and for the launcher badge.

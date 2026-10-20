@@ -31,7 +31,7 @@ import {
 import {
   OWN_HANDLE_SCRIPT, chromeScript, chromeFlagScript, chromeInsetsScript, chromeDocumentStartScript, scrollToTopScript,
   CLICK_POST_BUTTON_SCRIPT, POST_RESULT_SCRIPT, profileBootstrapScript, clickRouteScript, fillComposerScript,
-  HOME_TAB_SCRIPT, selectHomeTabScript, accountAvatarScript, UNREAD_COUNTS_SCRIPT
+  HOME_TAB_SCRIPT, selectHomeTabScript, accountAvatarScript, accountAvatarDiagScript, UNREAD_COUNTS_SCRIPT
 } from '../common/WebChrome';
 
 // 原生层提供导航、纯文字编辑与系统交互，网页保留搜索及业务页面。
@@ -71,6 +71,8 @@ const BADGE_REFRESH_MS: number = 30000;
 // leaving the badges blank until the next tick.
 const BADGE_RETRY_MS: number = 1200;
 const BADGE_RETRY_LIMIT: number = 6;
+const AVATAR_RETRY_MS: number = 1200;
+const AVATAR_RETRY_LIMIT: number = 6;
 // After the notification prompt, keep watching for a while in case the user
 // allows it from Settings rather than in the dialog.
 const NOTIFICATION_POLL_MS: number = 5000;
@@ -103,6 +105,10 @@ const BOOTSTRAP_SETTLE_MS: number = 1800;
 interface ImagePayload {
   urls: string[];
   index: number;
+}
+
+interface AccountPictureState {
+  path: string;
 }
 
 interface ChromeDiagnostics {
@@ -145,6 +151,8 @@ struct MainTabs {
   private avatarGeneration: number = 0;
   private avatarReadRequest: number = 0;
   private avatarAlive: boolean = false;
+  private avatarRetryTimer: number = -1;
+  private avatarRetries: number = 0;
   private retiredAvatarFiles: MediaFiles[] = [];
   private avatarCleanupScheduled: boolean = false;
   // Which Home timeline the native switcher has selected: 0 = For you,
@@ -175,8 +183,13 @@ struct MainTabs {
   @State webWidth: number = 0;
   private lastScrollY: number = 0;
   private scrollDistance: number = 0;
-  // 切页恢复也会滚动，收到实际拖动后才允许自动收起。
-  private webScrollFromTouch: boolean = false;
+  private webTouchActive: boolean = false;
+  // 方向确认后保留到明确反转，避免手指微抖触发相反动画。
+  private webTouchDirection: number = 0;
+  private webCollapseInertia: boolean = false;
+  private lastWebScrollTime: number = 0;
+  private lastTouchX: number = 0;
+  private lastTouchY: number = 0;
   @State firstLoadDone: boolean = false;
   @State sheetOpen: boolean = false;
   // Native composer state. "webComposer" is the escape hatch: when the page's
@@ -284,6 +297,9 @@ struct MainTabs {
         this.notificationAsked = await prefs.get(NOTIFICATION_ASKED_KEY, false) as boolean;
         this.floatingBar = await prefs.get(FLOATING_BAR_KEY, true) as boolean;
         this.autoHideBar = await prefs.get(AUTO_HIDE_BAR_KEY, true) as boolean;
+        // 上次账号只预热头像，不用于资料跳转或发帖身份确认。
+        const cachedHandle = await prefs.get(OWN_HANDLE_KEY, '') as string;
+        if (this.ownHandle === '' && cachedHandle !== '') { this.restoreAvatar(cachedHandle, true); }
         this.syncChromeInsets();
       }
     } catch (err) {
@@ -489,7 +505,7 @@ struct MainTabs {
     }
   }
 
-  private async restoreAvatar(handle: string): Promise<void> {
+  private async restoreAvatar(handle: string, preview: boolean = false): Promise<void> {
     const generation: number = this.avatarGeneration;
     try {
       const ctx: common.Context | undefined = this.getUIContext().getHostContext();
@@ -497,7 +513,7 @@ struct MainTabs {
       const prefs: preferences.Preferences = await preferences.getPreferences(ctx, PREFS_NAME);
       const url = await prefs.get(AVATAR_KEY + ':' + handle.toLowerCase(), '') as string;
       if (this.avatarAlive && generation === this.avatarGeneration && !this.authenticationPage &&
-        this.ownHandle.toLowerCase() === handle.toLowerCase() && this.avatarUrl === '' &&
+        (preview ? this.ownHandle === '' : this.ownHandle.toLowerCase() === handle.toLowerCase()) && this.avatarUrl === '' &&
         /^https:\/\/(pbs|abs)\.twimg\.com\//i.test(url)) {
         this.loadAvatar(url);
       }
@@ -526,6 +542,9 @@ struct MainTabs {
       if (!this.avatarAlive || generation !== this.avatarGeneration || this.ownHandle.toLowerCase() !== handle ||
         this.authenticationPage) { return; }
       this.avatarPath = 'file://' + file.path;
+      if (this.avatarRetryTimer !== -1) { clearTimeout(this.avatarRetryTimer); }
+      this.avatarRetryTimer = -1;
+      if (handle !== '') { this.saveAvatar(handle, url); }
       hilog.debug(DOMAIN, TAG, 'event=avatar_loaded');
     } catch (err) {
       if (!this.avatarAlive || generation !== this.avatarGeneration) { return; }
@@ -533,10 +552,12 @@ struct MainTabs {
       this.avatarFiles = undefined;
       this.retireAvatarFiles(files, false);
       hilog.warn(DOMAIN, TAG, 'event=avatar_download_failed code=%{public}d', (err as BusinessError).code);
+      this.retryAvatarRead();
     }
   }
 
   private resetAvatar(): void {
+    this.clearAvatarRetry();
     this.avatarGeneration++;
     this.avatarReadRequest++;
     const files: MediaFiles | undefined = this.avatarFiles;
@@ -556,6 +577,7 @@ struct MainTabs {
     this.avatarFiles = undefined;
     this.retireAvatarFiles(files, true);
     hilog.warn(DOMAIN, TAG, 'event=avatar_image_load_failed');
+    this.retryAvatarRead();
   }
 
   private closeAvatarFiles(files: MediaFiles): void {
@@ -706,8 +728,10 @@ struct MainTabs {
     }
     this.ownHandle = handle;
     this.saveOwnHandle(handle);
-    if (changed) { this.restoreAvatar(handle); }
-    this.readAvatar();
+    if (changed) {
+      this.restoreAvatar(handle);
+      this.readAvatar();
+    }
     this.finishDiscover(navigate);
   }
 
@@ -903,6 +927,7 @@ struct MainTabs {
     // A retry replaces the error surface with the normal progress UI.
     this.hasError = false;
     this.avatarReadRequest++;
+    this.clearAvatarRetry();
     if (this.avatarFailedUrl !== '' && this.avatarUrl !== '') { this.loadAvatar(this.avatarUrl, true); }
     this.progress = 0;
     this.refreshing = true;
@@ -945,6 +970,11 @@ struct MainTabs {
     else { this.tabsController.applyShowAnimation(HdsAnimationMode.SCROLL_ANIMATION); }
   }
 
+  /** 同一目标状态只下发一次，避免连续滚动重启动画。 */
+  private setBarsCollapsed(collapsed: boolean): void {
+    if (collapsed !== this.barsCollapsed) { this.barsCollapsed = collapsed; }
+  }
+
   private topChromeHeight(): number {
     return this.showsNativeNavigation() && usesNativeHeader(this.currentUrl) ? HEADER_HEIGHT : 0;
   }
@@ -979,32 +1009,83 @@ struct MainTabs {
   private resetChromeScroll(): void {
     this.lastScrollY = 0;
     this.scrollDistance = 0;
-    this.webScrollFromTouch = false;
+    this.webTouchActive = false;
+    this.webTouchDirection = 0;
+    this.webCollapseInertia = false;
+    this.lastWebScrollTime = 0;
     this.resetHeaderBlur();
-    this.barsCollapsed = false;
+    this.setBarsCollapsed(false);
   }
 
-  /** Web 滚动回调已经使用 vp，只累计同向位移以避免轻微抖动收起导航。 */
+  /** 展开只接受当前向下拖动，抬手后仅保留向下浏览的惯性收起。 */
+  private handleWebTouch(event: TouchEvent): void {
+    if (event.type === TouchType.Down) {
+      this.scrollDistance = 0;
+      this.webTouchActive = event.touches.length === 1;
+      this.webTouchDirection = 0;
+      this.webCollapseInertia = false;
+      this.lastWebScrollTime = 0;
+      if (this.webTouchActive) {
+        this.lastTouchX = event.touches[0].x;
+        this.lastTouchY = event.touches[0].y;
+      }
+    } else if (event.type === TouchType.Move && this.webTouchActive && event.touches.length === 1) {
+      const dx: number = event.touches[0].x - this.lastTouchX;
+      const dy: number = event.touches[0].y - this.lastTouchY;
+      if (Math.abs(dy) <= Math.abs(dx)) { return; }
+      const direction: number = dy > 0 ? 1 : -1;
+      if (direction !== this.webTouchDirection) {
+        if (Math.abs(dy) < 8) { return; }
+        this.scrollDistance = 0;
+        this.webTouchDirection = direction;
+      }
+      this.lastTouchX = event.touches[0].x;
+      this.lastTouchY = event.touches[0].y;
+    } else if (event.type === TouchType.Up && this.webTouchActive && event.touches.length <= 1) {
+      this.webTouchActive = false;
+      this.webCollapseInertia = this.webTouchDirection === -1 && this.lastWebScrollTime > 0 &&
+        Date.now() - this.lastWebScrollTime <= 200;
+      this.webTouchDirection = 0;
+      if (!this.webCollapseInertia) { this.scrollDistance = 0; }
+    } else if (event.type !== TouchType.Move || event.touches.length !== 1) {
+      this.webTouchActive = false;
+      this.webTouchDirection = 0;
+      this.webCollapseInertia = false;
+      this.scrollDistance = 0;
+    }
+  }
+
+  /** 网页偏移可能自行调整，只有与已确认手势方向一致的 vp 位移参与显隐。 */
   private handleWebScroll(yOffset: number): void {
     const y: number = Math.max(0, yOffset);
     const delta: number = y - this.lastScrollY;
+    const now: number = Date.now();
+    if (!this.webTouchActive && (delta < 0 || now - this.lastWebScrollTime > 200)) {
+      this.webCollapseInertia = false;
+      this.scrollDistance = 0;
+    }
     this.lastScrollY = y;
+    this.lastWebScrollTime = now;
     this.syncHeaderBlur(y);
     if (!this.overlaysWeb() || isPostDetailUrl(this.currentUrl) || !this.autoHideBar || this.isWide || y < 48) {
-      this.barsCollapsed = false;
+      this.setBarsCollapsed(false);
+      this.scrollDistance = 0;
+      this.webCollapseInertia = false;
+      return;
+    }
+    const direction: number = this.webTouchActive ? this.webTouchDirection : (this.webCollapseInertia ? -1 : 0);
+    if (direction === 0 || delta * direction >= 0) { return; }
+    if ((direction === 1 && !this.barsCollapsed) || (direction === -1 && this.barsCollapsed)) {
       this.scrollDistance = 0;
       return;
     }
-    // 切页恢复位置和视口调整也会回调，实际拖动之前不触发底栏滚动动画。
-    if (!this.webScrollFromTouch) { return; }
-    if (Math.abs(delta) < 1.5) { return; }
-    if (delta * this.scrollDistance < 0) { this.scrollDistance = 0; }
+    // 小步位移照常累计；抖动由手势方向的确认距离过滤。
     this.scrollDistance += delta;
     if (y > 80 && this.scrollDistance > 44) {
-      this.barsCollapsed = true;
+      this.setBarsCollapsed(true);
       this.scrollDistance = 0;
-    } else if (this.scrollDistance < -22) {
-      this.barsCollapsed = false;
+    } else if (this.scrollDistance <= -56) {
+      this.setBarsCollapsed(false);
       this.scrollDistance = 0;
     }
   }
@@ -1420,7 +1501,7 @@ struct MainTabs {
   }
 
   // 首页即可读取账号控件；资料页仅使用已确认本人的头像链接作为补充。
-  private readAvatar(): void {
+  private readAvatar(retryFailed: boolean = false): void {
     if (!this.avatarAlive || this.rawWeb || this.authenticationPage) { return; }
     const handle: string = this.ownHandle;
     const pageUrl: string = this.currentUrl;
@@ -1428,18 +1509,53 @@ struct MainTabs {
     try {
       this.controller.runJavaScript(accountAvatarScript(handle)).then((raw: string) => {
         if (!this.avatarAlive || request !== this.avatarReadRequest || this.authenticationPage ||
-          this.currentUrl !== pageUrl || this.ownHandle !== handle) { return; }
+          this.rawWeb || this.currentUrl !== pageUrl || this.ownHandle.toLowerCase() !== handle.toLowerCase()) { return; }
         const url: string = MainTabs.unquote(raw);
-        if (/^https:\/\/(pbs|abs)\.twimg\.com\//i.test(url) && url !== this.avatarUrl) {
-          this.loadAvatar(url);
-          if (handle !== '') { this.saveAvatar(handle, url); }
+        if (/^https:\/\/(pbs|abs)\.twimg\.com\//i.test(url)) {
+          const failed: boolean = this.avatarFailedUrl === url;
+          if (url !== this.avatarUrl || (failed && retryFailed)) {
+            hilog.info(DOMAIN, TAG, 'event=avatar_url_matched retry=%{public}s', String(failed));
+            this.loadAvatar(url, failed);
+          } else if (failed) {
+            this.retryAvatarRead();
+          }
+        } else if (this.avatarPath === '') {
+          hilog.info(DOMAIN, TAG, 'event=avatar_read_empty tab=%{public}d hasHandle=%{public}s attempt=%{public}d',
+            this.currentIndex, String(handle !== ''), this.avatarRetries);
+          if (this.avatarRetries === 0) {
+            this.controller.runJavaScript(accountAvatarDiagScript()).then((diagnostics: string) => {
+              hilog.info(DOMAIN, TAG, 'event=avatar_dom_diagnostics data=%{public}s', MainTabs.unquote(diagnostics));
+            }).catch((err: BusinessError) => {
+              hilog.warn(DOMAIN, TAG, 'event=avatar_diagnostics_failed code=%{public}d', err.code);
+            });
+          }
+          this.retryAvatarRead();
         }
       }).catch((err: Error) => {
         hilog.debug(DOMAIN, TAG, 'event=avatar_read_failed code=%{public}d', (err as BusinessError).code);
+        this.retryAvatarRead();
       });
     } catch (err) {
       hilog.debug(DOMAIN, TAG, 'event=avatar_read_failed code=%{public}d', (err as BusinessError).code);
+      this.retryAvatarRead();
     }
+  }
+
+  /** 水合和下载失败共用有限重试，避免一次失败长期停在占位头像。 */
+  private retryAvatarRead(): void {
+    if (!this.avatarAlive || this.rawWeb || this.authenticationPage || this.avatarPath !== '' ||
+      this.avatarRetryTimer !== -1 || this.avatarRetries >= AVATAR_RETRY_LIMIT) { return; }
+    this.avatarRetries++;
+    this.avatarRetryTimer = setTimeout(() => {
+      this.avatarRetryTimer = -1;
+      this.readAvatar(true);
+    }, AVATAR_RETRY_MS);
+  }
+
+  private clearAvatarRetry(): void {
+    if (this.avatarRetryTimer !== -1) { clearTimeout(this.avatarRetryTimer); }
+    this.avatarRetryTimer = -1;
+    this.avatarRetries = 0;
   }
 
   private schedulePageStateRead(): void {
@@ -1950,15 +2066,18 @@ struct MainTabs {
   }
 
   @Builder
-  accountPicture(path: string) {
+  accountPicture($$: AccountPictureState) {
     Stack() {
       SymbolGlyph($r('sys.symbol.person_crop_circle_fill'))
         .fontSize(32)
         .fontColor([$r('sys.color.ohos_id_color_text_secondary')])
-      if (path !== '') {
-        Image(path)
+      if ($$.path !== '') {
+        Image($$.path)
           .width(32).height(32).borderRadius(16).objectFit(ImageFit.Cover)
-          .onError(() => this.avatarImageFailed(path))
+          .onComplete(() => {
+            if ($$.path === this.avatarPath) { this.clearAvatarRetry(); }
+          })
+          .onError(() => this.avatarImageFailed($$.path))
       }
     }
     .width(32).height(32)
@@ -1968,7 +2087,7 @@ struct MainTabs {
   @Builder
   accountAvatar() {
     Row() {
-      this.accountPicture(this.avatarPath)
+      this.accountPicture({ path: this.avatarPath })
     }
     .width(TOUCH_TARGET)
     .height(32)
@@ -2231,8 +2350,7 @@ struct MainTabs {
       if (event.type === TouchType.Up || event.type === TouchType.Cancel) { this.pressedIndex = -1; }
     })
     .onClick(() => {
-      this.webScrollFromTouch = false;
-      this.barsCollapsed = false;
+      this.resetChromeScroll();
       this.goRoute(index);
     })
   }
@@ -2302,7 +2420,7 @@ struct MainTabs {
   @Builder
   replyBar() {
     Row({ space: S12 }) {
-      this.accountPicture(this.avatarPath)
+      this.accountPicture({ path: this.avatarPath })
       Text($r('app.string.reply_prompt'))
         .fontSize(16).fontFamily(FONT_FAMILY).layoutWeight(1)
         .fontColor($r('sys.color.ohos_id_color_text_secondary'))
@@ -2526,9 +2644,7 @@ struct MainTabs {
       .mediaPlayGestureAccess(false)
       .darkMode(WebDarkMode.Auto)
       .textZoomRatio(100)
-      .onTouch((event: TouchEvent) => {
-        if (event.type === TouchType.Move) { this.webScrollFromTouch = true; }
-      })
+      .onTouch((event: TouchEvent) => { this.handleWebTouch(event); })
       .onScroll((event: OnScrollEvent) => { this.handleWebScroll(event.yOffset); })
       .onAreaChange((_old: Area, area: Area) => {
         this.webWidth = Number(area.width);
