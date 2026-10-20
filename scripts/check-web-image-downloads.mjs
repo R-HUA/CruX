@@ -17,7 +17,7 @@ function harness() {
   const storage = new Map(), handles = new Map(), timers = new Map(), logs = [];
   const dispatched = [], removed = [], reports = [], nativeOptions = [];
   let timerId = 0, fd = 0, inBefore = false, pickerCalls = 0, copied = 0, releases = 0, httpCalls = 0;
-  let delegate, dispatchError, startError, readError, unlinkError, readGate, nativeResponses = [];
+  let delegate, dispatchError, startError, readError, unlinkError, readGate, listError, nativeResponses = [];
   const controller = {
     setDownloadDelegate(value) { assert.equal(delegate, undefined); delegate = value; },
     startDownload(value) { dispatched.push(value); if (dispatchError) { throw dispatchError; } }
@@ -39,7 +39,10 @@ function harness() {
       request: async (_url, options) => { httpCalls++; nativeOptions.push(options); const response = nativeResponses.shift(); if (response instanceof Error) { throw response; } return response; }, destroy() {}
     }) },
     fileIo: { OpenMode: { READ_ONLY: 0, CREATE: 1, READ_WRITE: 2, TRUNC: 4 },
-      listFile: async () => [],
+      listFile: async () => {
+        if (listError) { throw listError; }
+        return [...storage.keys()].filter(path => path.startsWith('/cache/')).map(path => path.slice(7));
+      },
       stat: async path => { const entry = storage.get(path); if (!entry) { throw { code: 13900002 }; } return { size: entry.size ?? entry.bytes.length, mtime: Date.now() / 1000 }; },
       open: async (path, mode) => {
         if (mode & 1) { storage.set(path, { bytes: new Uint8Array() }); }
@@ -86,6 +89,7 @@ function harness() {
   }
   return { ...api, images, controller, item, storage, handles, timers, dispatched, removed, reports, logs, nativeOptions, state,
     before(value) { inBefore = true; try { delegate.before(value); } finally { inBefore = false; } },
+    beforeUsing(service, value) { inBefore = true; try { service.beforeDownload(value); } finally { inBefore = false; } },
     updated: value => delegate.updated(value), failed: value => delegate.failed(value), finish: value => delegate.finish(value),
     expire() { for (const callback of [...timers.values()]) { callback(); } },
     config(options) {
@@ -94,6 +98,7 @@ function harness() {
       if (Object.hasOwn(options, 'readError')) { readError = options.readError; }
       if (Object.hasOwn(options, 'unlinkError')) { unlinkError = options.unlinkError; }
       if (Object.hasOwn(options, 'readGate')) { readGate = options.readGate; }
+      if (Object.hasOwn(options, 'listError')) { listError = options.listError; }
       if (Object.hasOwn(options, 'nativeResponses')) { nativeResponses = options.nativeResponses; }
     },
     get pickerCalls() { return pickerCalls; }, get copied() { return copied; }, get releases() { return releases; }, get httpCalls() { return httpCalls; }
@@ -111,6 +116,34 @@ for (const value of ['https://example.com/photo.png', 'http://pbs.twimg.com/medi
   await assert.rejects(allowed.images.request(value).result, error => error.stage === 'url');
 }
 assert.equal(allowed.dispatched.length, 0); await allowed.images.close();
+
+// Process leftovers are reclaimed, and a failed first cleanup can retry in the same media session.
+{
+  const h = harness();
+  h.storage.set('/cache/web-download-123-1', { bytes: png }); h.storage.set('/cache/unrelated', { bytes: png });
+  await h.removeExpiredDownloads('/cache');
+  assert.equal(h.storage.has('/cache/web-download-123-1'), false); assert.equal(h.storage.has('/cache/unrelated'), true);
+  const files = new h.MediaFiles(h.images), address = { id: 'cleanup', candidates: [url] };
+  h.config({ listError: Error('temporary I/O failure') });
+  await assert.rejects(files.load(address, { cacheDir: '/cache' }), /temporary I\/O/);
+  h.config({ listError: undefined });
+  const retry = files.load(address, { cacheDir: '/cache' }); await flush();
+  const picture = h.item(); h.before(picture); await h.finish(picture); await retry;
+  await files.close(); await h.images.close();
+}
+
+// Recovery does not depend on an old callback arriving; the old delegate still owns any later callback.
+{
+  const h = harness(), old = h.images.request(url);
+  const rejected = assert.rejects(old.result, error => error.stage === 'timeout'); h.expire(); await rejected;
+  assert.equal(h.images.needsRecovery(), true);
+  const dispatched = [], replacement = new h.WebImageDownloads({ startDownload: value => dispatched.push(value) }, '/cache');
+  const retry = replacement.request(url), picture = h.item();
+  h.beforeUsing(replacement, picture); replacement.downloadFinish(picture); await retry.result;
+  const late = h.item(); h.before(late); assert.equal(late.cancelled, 1); assert.equal(late.starts, 0);
+  assert.deepEqual(dispatched, [url]); assert.equal(h.pickerCalls, 0);
+  await replacement.close(); await h.images.close();
+}
 
 // Every intercepted image reaches the same downloader classification and local byte pipeline.
 for (const value of [url, avatar, 'https://pbs.twimg.com/card_img/123/card?format=jpg&name=small',

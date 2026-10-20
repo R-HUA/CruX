@@ -596,21 +596,25 @@ export function fillComposerScript(text: string): string {
 /** 移动网页需打开账号抽屉才能确认本人资料入口，导航沿用网页点击事件。 */
 export function profileBootstrapScript(navigate: boolean): string {
   return '(function(navigate){try{' +
-  'var btn=null;' +
-  'btn=document.querySelector("[data-testid=DashButton_ProfileIcon_Link],[data-testid=SideNav_AccountSwitcher_Button]");' +
+  'if(window.__otBootCancel)window.__otBootCancel();' +
+  'var btn=null,opened=false,launched=false,done=false,observer=null,timer=0;' +
   'window.__otBoot="";' +
-  'if(!btn){return "nobutton";}' +
-  'var opened=!document.querySelector("[role=dialog]");' +
-  'if(opened){try{btn.click();}catch(e){return "noclick";}}' +
-  'setTimeout(function(){try{' +
-  'window.__otBoot=' + OWN_HANDLE_SCRIPT + ';' +
-  'if(navigate&&window.__otBoot){var links=document.querySelectorAll("[role=dialog] a[href]");' +
-  'for(var i=0;i<links.length;i++){if(links[i].getAttribute("href").toLowerCase()==="/"+window.__otBoot.toLowerCase()){' +
-  'links[i].click();return;}}}' +
+  'function stop(){if(done)return;done=true;if(observer)observer.disconnect();clearTimeout(timer);' +
   'if(opened){var dialog=document.querySelector("[role=dialog]");' +
   'if(dialog){var close=dialog.querySelector("[data-testid=app-bar-close]");' +
-  'if(close)close.click();else btn.click();}}' +
-  '}catch(e){window.__otBoot="";}},1500);' +
+  'if(close)close.click();else btn.click();}}}' +
+  'window.__otBootCancel=stop;' +
+  'function read(){if(done)return;try{' +
+  'if(!launched){btn=document.querySelector("[data-testid=DashButton_ProfileIcon_Link],[data-testid=SideNav_AccountSwitcher_Button]");' +
+  'if(!btn)return;launched=true;opened=!document.querySelector("[role=dialog]");if(opened)btn.click();}' +
+  'window.__otBoot=' + OWN_HANDLE_SCRIPT + ';' +
+  'if(!window.__otBoot)return;' +
+  'if(navigate&&window.__otBoot){var links=document.querySelectorAll("[role=dialog] a[href]");' +
+  'for(var i=0;i<links.length;i++){if(links[i].getAttribute("href").toLowerCase()==="/"+window.__otBoot.toLowerCase()){' +
+  'links[i].click();break;}}}stop();' +
+  '}catch(e){window.__otBoot="";stop();}}' +
+  'observer=new MutationObserver(read);observer.observe(document.documentElement,{childList:true,subtree:true,attributes:true});' +
+  'timer=setTimeout(stop,10000);read();' +
   'return "armed";' +
   '}catch(e){window.__otBoot="";return "err";}})(' + navigate + ')';
 }

@@ -134,7 +134,7 @@ export function parseDohUrl(raw: string): ParsedDohUrl | undefined {
       url: value,
       host: parsed.hostname,
       path: parsed.pathname,
-      key: parsed.hostname.toLowerCase() + parsed.pathname + parsed.search
+      key: parsed.protocol + '//' + parsed.hostname.toLowerCase() + ':' + (parsed.port || '443') + parsed.pathname + parsed.search
     };
   } catch (err) {
     return undefined;
@@ -155,7 +155,7 @@ export function isIpAddress(value: string): boolean {
   if (text.length === 0) {
     return false;
   }
-  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
+  const v4 = /^(0|[1-9]\d{0,2})\.(0|[1-9]\d{0,2})\.(0|[1-9]\d{0,2})\.(0|[1-9]\d{0,2})$/;
   const match = v4.exec(text);
   if (match !== null) {
     for (let i = 1; i <= 4; i++) {
@@ -169,7 +169,22 @@ export function isIpAddress(value: string): boolean {
   if (text.indexOf(':') < 0 || text.length > 45) {
     return false;
   }
-  return /^[0-9a-fA-F:.]+$/.test(text) && text.indexOf(':::') < 0;
+  if (text.includes(':::') || text.split('::').length > 2) { return false; }
+  const compressed = text.includes('::');
+  if (!compressed && (text.startsWith(':') || text.endsWith(':'))) { return false; }
+  const groups = text.split(':').filter((part: string) => part.length > 0);
+  let count = 0;
+  for (let i = 0; i < groups.length; i++) {
+    const part = groups[i];
+    if (part.includes('.')) {
+      if (i !== groups.length - 1 || !text.endsWith(part) || !isIpAddress(part)) { return false; }
+      count += 2;
+    } else {
+      if (!/^[0-9a-fA-F]{1,4}$/.test(part)) { return false; }
+      count++;
+    }
+  }
+  return compressed ? count < 8 : count === 8;
 }
 
 export class NetworkConfig {
@@ -291,7 +306,7 @@ export class NetworkConfig {
   }
 
   getDohPolicy(): DohPolicy {
-    if (!this.syncImageDownloader || !this.dohActive || this.mode === 'off') {
+    if (!this.syncImageDownloader || this.suspended || this.mode === 'off') {
       return { mode: 'off' };
     }
     const node = this.activeNode();
@@ -564,12 +579,13 @@ export class NetworkConfig {
   private applyNow(forcePins: boolean = false): void {
     const node = this.activeNode();
     const configUrl = node.url.length > 0 ? node.url : FALLBACK_DOH_URL;
-    this.dohActive = this.mode !== 'off' && !this.suspended;
+    const requestedActive = this.mode !== 'off' && !this.suspended;
     try {
-      if (!this.dohActive) {
+      if (!requestedActive) {
         this.clearPins();
         web_webview.WebviewController.setHttpDns(web_webview.SecureDnsMode.OFF, configUrl);
         this.applyError = false;
+        this.dohActive = false;
         hilog.info(DOMAIN, TAG, 'event=doh_apply mode=off node=%{public}s vpn=%{public}s',
           node.id, this.vpn);
         return;
@@ -580,11 +596,13 @@ export class NetworkConfig {
         : web_webview.SecureDnsMode.AUTO;
       web_webview.WebviewController.setHttpDns(secureMode, configUrl);
       this.applyError = false;
+      this.dohActive = true;
       hilog.info(DOMAIN, TAG, 'event=doh_apply mode=%{public}s node=%{public}s vpn=%{public}s',
         this.mode, node.id, this.vpn);
     } catch (err) {
       const error = err as BusinessError;
       this.applyError = true;
+      this.dohActive = false;
       hilog.error(DOMAIN, TAG, 'event=doh_apply_failed code=%{public}d mode=%{public}s node=%{public}s',
         error.code, this.mode, node.id);
     }
@@ -682,6 +700,7 @@ export class NetworkConfig {
     this.recomputeSuspended(state);
     const changed = previousVpn !== state || previousSuspended !== this.suspended;
     if (changed || force) {
+      if (this.mode !== 'off' && previousSuspended !== this.suspended) { this.generation++; }
       this.applyNow(force);
       hilog.info(DOMAIN, TAG, 'event=vpn_state state=%{public}s suspended=%{public}s',
         this.vpn, String(this.suspended));

@@ -18,12 +18,14 @@ const runtime = { Promise, Date, clearTimeout, DOMAIN: 1, TAG: 'test', PREFS_NAM
   preferences: { getPreferences: async () => prefs },
   fillComposerScript: text => 'fill:' + text, clickRouteScript: url => 'route:' + url,
   web_webview: { WebviewController: class {} },
-  hilog: { warn() {}, error() {} } };
+  hilog: { info() {}, warn() {}, error() {} } };
 const methods = ['unquote', 'persistDraft', 'openWebComposer', 'openCompose', 'loadWeb', 'clearPendingPost', 'clearHandoffDraft'];
 const Page = vm.runInNewContext(stripTypeScriptTypes('class MainTabs {\n' + methods.map(method).join('\n') + '\n}; MainTabs'), runtime);
 function page() {
   const p = new Page();
   Object.assign(p, { draft: '保留完整文本\nsecond line', composeOwner: 'alice', posting: false, postUncertain: false,
+    webNetworkReady: true, navigationGeneration: 0, profileNavigation: 0, avatarAlive: true,
+    appBackground: false, cancelProfileNavigation() {},
     composeHandoff: false, composeRevision: 0, draftSaveTimer: -1, draftWrite: Promise.resolve(), sheetOpen: false,
     getUIContext: () => ({ getHostContext: () => ({}), showAlertDialog() {} }),
     clearComposeSync() { this.composeRevision++; }, scheduleComposeSync() {}, acceptHandle() {},
@@ -86,3 +88,118 @@ const viewer = read('entry/src/main/ets/pages/NativeImageViewer.ets');
 assert.doesNotMatch(viewer, /:\s*item\.source/);
 assert.match(viewer, /needsRecovery\(\)/);
 console.log('PASS: editor fallback, durable handoff, restart barrier, explicit recovery and local-only image display');
+
+// Real startup reaches its final mount state even when optional material/window APIs fail.
+const extraMethods = ['aboutToAppear', 'openOwnProfile', 'cancelProfileNavigation', 'isHomeRoot', 'syncLauncherBadge', 'recoverMediaWeb'];
+const extra = Object.fromEntries(extraMethods.map(name => {
+  const code = method(name).replace(/^  (?:private )?/, '');
+  return [name, code];
+}));
+let networkListener, badgeError, badgeGate;
+const badgeCalls = [], waits = [];
+const net = { ensureInitialized() {}, snapshot: () => ({ generation: 1, mode: 'secure_only', suspended: false, applyError: false }),
+  subscribe(callback) { networkListener = callback; return () => {}; } };
+Object.assign(runtime, { PROFILE_TIMEOUT_MS: 10000, BADGE_RETRY_LIMIT: 3,
+  TWITTER_ROUTES: ['https://x.com/home'], NOTIFICATION_ASKED_KEY: 'asked', FLOATING_BAR_KEY: 'floating',
+  AUTO_HIDE_BAR_KEY: 'hide', DESKTOP_MODE_KEY: 'desktop', OWN_HANDLE_KEY: 'owner',
+  hdsMaterial: { getSystemMaterialTypes() { throw Error('unsupported'); } },
+  window: { getLastWindow: async () => { throw Error('window unavailable'); } },
+  removeExpiredDownloads: async () => {}, NetworkConfig: { getInstance: () => net },
+  notificationManager: { async setBadgeNumber(total) { badgeCalls.push(total); if (badgeGate) { await badgeGate; } if (badgeError) { throw badgeError; } } },
+  setTimeout: callback => { waits.push(callback); return waits.length; },
+  isSiteUrl: () => true });
+const ExtraPage = vm.runInNewContext(stripTypeScriptTypes('class ExtraPage {\n' + Object.values(extra).join('\n') + '\n};ExtraPage'), runtime);
+const tick = async () => { for (let i = 0; i < 30; i++) { await Promise.resolve(); } };
+// Navigation already waiting on JavaScript must not use a rebuilt controller or bypass a policy block.
+for (const transition of ['blocked', 'rebuilt']) {
+  const p = page(), loaded = []; let rejectRoute;
+  p.controller = { runJavaScript: () => new Promise((_resolve, reject) => { rejectRoute = reject; }),
+    setCustomUserAgent() {}, loadUrl: url => loaded.push(url) };
+  p.userAgent = () => 'mobile';
+  const navigation = p.loadWeb('https://x.com/explore'); await tick();
+  if (transition === 'blocked') { p.webNetworkReady = false; p.navigationGeneration++; p.hasError = true; }
+  else { ExtraPage.prototype.recoverMediaWeb.call(p, false, false); p.controller.loadUrl = url => loaded.push(url); }
+  rejectRoute(Error('old script')); await navigation;
+  assert.deepEqual(loaded, []);
+  if (transition === 'blocked') { assert.equal(p.hasError, true); }
+}
+{
+  const p = page();
+  Object.assign(p, { avatarAlive: true, ownHandle: '',
+    bridge: Object.fromEntries(['setImageHandler','setProfileHandler','setThemeHandler','setHandler'].map(name => [name, () => {}])),
+    applyBreakpoints() {}, armFirstLoadTimeout() {}, armBadgeRefresh() {}, syncChromeInsets() {},
+    recoverMediaWeb: ExtraPage.prototype.recoverMediaWeb });
+  await ExtraPage.prototype.aboutToAppear.call(p);
+  assert.equal(p.preferencesReady, true); assert.equal(p.webNetworkReady, true);
+  networkListener({ generation: 2, mode: 'secure_only', suspended: false, applyError: true });
+  assert.equal(p.webNetworkReady, false); assert.equal(p.hasError, true); assert.equal(p.incomingControllerReady, false);
+  p.webSession = 0;
+  networkListener({ generation: 3, mode: 'secure_only', suspended: false, applyError: false });
+  assert.equal(p.webNetworkReady, true); assert.equal(p.webSession, 1);
+  const failedContext = page(); failedContext.getUIContext = () => { throw Error('context'); };
+  await ExtraPage.prototype.aboutToAppear.call(failedContext);
+  assert.equal(failedContext.preferencesReady, true);
+}
+// Home can become ready after the previous fixed delay; cancelled identity reads cannot navigate.
+{
+  const p = page(), accepted = [];
+  Object.assign(p, { currentPath: '/search', incomingControllerReady: false,
+    isHomeRoot: ExtraPage.prototype.isHomeRoot, cancelProfileNavigation: ExtraPage.prototype.cancelProfileNavigation,
+    loadWeb: async () => {}, acceptHandle: (...args) => accepted.push(args) });
+  const navigating = ExtraPage.prototype.openOwnProfile.call(p); await tick();
+  assert.equal(accepted.length, 0); assert.equal(p.discovering, true);
+  waits.shift()(); await tick();
+  assert.equal(accepted.length, 0); assert.equal(p.discovering, true);
+  p.currentPath = '/home'; waits.shift()(); await navigating;
+  assert.deepEqual(accepted, [['Alice', true]]);
+  let finish;
+  p.confirmCurrentAccount = () => new Promise(resolve => { finish = resolve; });
+  const stale = ExtraPage.prototype.openOwnProfile.call(p); await tick();
+  p.cancelProfileNavigation(); p.currentPath = '/explore'; finish('old'); await stale;
+  assert.equal(accepted.length, 1); assert.equal(p.discovering, false);
+}
+// Launcher state commits only after success, serializes writes, and bounds failures for an unchanged count.
+{
+  const p = page(); let retried = 0;
+  Object.assign(p, { ownHandle: 'alice', unreadNotifications: 2, unreadMessages: 1, badgeShown: -1,
+    badgeSyncFailures: 0, badgeSyncTarget: '', badgeSyncing: false,
+    notificationsAllowed: () => true, retryBadgeRead() { retried++; }, syncLauncherBadge: ExtraPage.prototype.syncLauncherBadge });
+  badgeError = Error('system busy'); await p.syncLauncherBadge();
+  assert.equal(p.badgeShown, -1); assert.equal(retried, 1);
+  badgeError = undefined; await p.syncLauncherBadge(); assert.equal(p.badgeShown, 3);
+  let release;
+  badgeGate = new Promise(resolve => { release = resolve; }); p.unreadMessages = 3;
+  const first = p.syncLauncherBadge(); const before = badgeCalls.length;
+  await p.syncLauncherBadge(); assert.equal(badgeCalls.length, before);
+  p.unreadMessages = 4; badgeGate = undefined; release(); await first; await tick();
+  assert.equal(p.badgeShown, 6);
+  badgeError = Error('still busy'); p.unreadMessages = 5;
+  for (let i = 0; i < 5; i++) { await p.syncLauncherBadge(); }
+  assert.equal(p.badgeSyncFailures, 3); assert.equal(badgeCalls.filter(total => total === 7).length, 3);
+  badgeError = undefined;
+}
+
+// Run the production network parser and effective-policy transitions with platform calls substituted.
+let applyFails = false;
+const networkSource = read('entry/src/main/ets/common/NetworkConfig.ets').replace(/^import .*;\r?\n/gm, '').replace(/^export /gm, '');
+const network = vm.runInNewContext(stripTypeScriptTypes(networkSource) + ';({NetworkConfig,parseDohUrl,isIpAddress})', {
+  Map, Date, url: { URL: { parseURL: raw => new URL(raw) } }, hilog: runtime.hilog,
+  web_webview: { SecureDnsMode: { OFF: 0, AUTO: 1, SECURE_ONLY: 2 }, WebviewController: {
+    setHttpDns() { if (applyFails) { throw { code: 17100001 }; } }, setHostIP() {}, clearHostIP() {} } }
+});
+for (const ip of ['::', '::1', '2001:db8::1', '1:2:3:4:5:6:7:8', '::ffff:192.0.2.1', '1.2.3.4']) {
+  assert.equal(network.isIpAddress(ip), true, ip);
+}
+for (const ip of ['1:2:3', '1:::2', '1::2::3', ':1:2:3:4:5:6:7', '1:2:3:4:5:6:7:8::', '12345::', '::ffff:999.1.1.1', '192.0.2.1::', '01.2.3.4']) {
+  assert.equal(network.isIpAddress(ip), false, ip);
+}
+assert.equal(network.parseDohUrl('https://dns.example/dns-query').key, network.parseDohUrl('https://dns.example:443/dns-query').key);
+assert.notEqual(network.parseDohUrl('https://dns.example/dns-query').key, network.parseDohUrl('https://dns.example:444/dns-query').key);
+const config = network.NetworkConfig.getInstance(); config.mode = 'secure_only';
+config.updateVpnState('active', false); assert.equal(config.snapshot().generation, 1);
+config.updateVpnState('inactive', false); assert.equal(config.snapshot().generation, 2);
+config.updateVpnState('unknown', true); assert.equal(config.snapshot().generation, 2);
+applyFails = true; config.applyNow();
+assert.equal(config.snapshot().dohActive, false); assert.equal(config.snapshot().applyError, true);
+assert.equal(config.getDohPolicy().mode, 'secure_only');
+console.log('PASS: optional startup failure, forced-policy mount gate, slow navigation, stale cancellation, badge retry and network validation');

@@ -17,10 +17,10 @@ CruX 是用 ArkTS 编写的 HarmonyOS 客户端，把真实的 x.com 网页应�
 - **原生顶栏**：首页顶部是账号头像加"为你推荐 / 正在关注"切换器（点击驱动网页里真实的 tab，而不是伪造切换）；搜索和私信保留官网完整顶栏，其余已支持页面显示原生页面标题与副标题（个人主页显示 `@handle`），左侧按需出现返回箭头，右侧最多一个齿轮。原生顶栏滚动前全透明，随滚动渐变出模糊材质。
 - **账号菜单**：点击首页头像展开原生菜单，可进入网页账号切换、个人资料、书签、列表、设置与隐私、页面分享，以及外观和网络设置。
 - **搜索**：沿用官网搜索框、候选词和搜索历史，由网页处理输入与结果页跳转。
-- **原生发帖**：首页显示发帖悬浮按钮，底部编辑面板提供文字输入、"媒体与更多"、取消和发布操作。发布按钮按网页对当前账号和文本的校验结果启用；提交结果不明确时保留草稿并提示核查。"媒体与更多"切换到完整网页编辑器。草稿按账号保存，支持 Ctrl/Cmd+Enter 发布、Esc 关闭。
+- **原生发帖**：首页显示发帖悬浮按钮，底部编辑面板提供文字输入、"媒体与更多"、取消和发布操作。发布按钮按网页对当前账号和文本的校验结果启用；提交结果不明确时保留草稿并提示核查。"媒体与更多"切换到完整网页编辑器，账号识别或自动填充失败时仍可进入并复制原草稿。移交时保留按账号保存的原正文，重启后须确认发布结果才能恢复或清除；网页内后续编辑由网页管理。支持 Ctrl/Cmd+Enter 发布、Esc 关闭。
 - **帖子详情**：底部标签栏替换为回复栏，点击进入 `/intent/tweet?in_reply_to=<帖子 ID>` 的网页回复流程。
 - **未读角标**：优先读取网页已有 `ViewerBadgeCounts` 响应中的通知与聊天计数；没有新鲜响应时，从网页自身导航项读取（`document.title` 的 `(3) …` 前缀作为通知兜底）。显示在标签栏角标上，并同步给桌面图标角标；账号变化后丢弃旧响应。每 30 秒、每次页面跳转和回到前台时刷新；页面尚未上报时保留旧值而非清零。
-- **原生图片查看器**：支持帖子图片和个人主页头像，卡片图片可长按查看。支持图片翻页、缩放、保存、系统分享和复制链接；可查看真实 GIF 图片，视频形式的动图由网页播放。
+- **原生图片查看器**：支持帖子图片和个人主页头像，卡片和视频封面可长按查看，封面仅标记为可用尺寸。支持图片翻页、缩放、保存、系统分享和复制链接；加载失败可重试或返回网页查看。下载任务无法确认时，重试会重新加载当前网页，需要重新打开图片。可查看真实 GIF 图片，视频形式的动图由网页播放。
 - **系统集成**：站外链接交给系统浏览器，Google / Apple 登录留在应用内；上传媒体使用系统相册选择器；ArkWeb 下载完成后由用户选择保存位置；定位请求先弹原生确认框再申请运行时权限；网页全屏视频接管系统栏。
 - **外部分享与链接**：接收系统分享的文字和链接。单独的 X 链接在应用内打开，其他文字和外部链接预填到发帖面板；已有草稿时可选择追加，不会自动发布。支持 `twitter://status?id=123`、`twitter://user?screen_name=alice` 和对应的 `crux://` 链接。已声明 X 网站的 HTTPS 候选打开方式，是否显示选择器取决于来源应用和系统，不属于已验证的 App Linking。暂不接收外部图片分享。
 - **加载与刷新**：首次加载显示居中进度指示，之后顶部有 2vp 线性进度条；下拉刷新由 HarmonyOS 的 `Refresh` 容器直接驱动 WebView；主框架加载失败时显示"无法加载 X"错误页，提供重试与网络设置入口。
@@ -83,13 +83,15 @@ ohpm install
 hvigorw --no-daemon assembleHap --mode module -p product=default -p buildMode=debug
 ```
 
+正式构建将 `buildMode=debug` 改为 `buildMode=release`；两种模式均保留 API 24 兼容目标。
+
 产物位于 `entry/build/default/outputs/default/entry-default-unsigned.hap`；安装用 `hdc install <hap>`。仓库未提交 `hvigorw` 包装脚本，需要使用 DevEco Studio 自带的 command-line-tools 里的 `hvigorw`。
 
 **签名**：`build-profile.json5` 的 `signingConfigs` 为空，默认产出未签名 HAP。`scripts/sign-hap.sh` 用 SDK `toolchains/lib` 内的 OpenHarmony 测试签名材料（`OpenHarmony.p12`、`hap-sign-tool.jar` 与 profile 模板）完成签名，输出文件名自动跟随 `AppScope/app.json5` 的 versionName，默认写到 `dist/CruX-Web-<versionName>-signed.hap`。可用环境变量覆盖 SDK 路径（`OH_SDK_LIB`）、`JAVA_BIN`、`KEYTOOL_BIN` 以及输入输出路径。这套测试身份只被信任 OpenHarmony 测试根的模拟器/开发设备接受，正式发布需替换为 AGC 签发的证书。
 
 **图标**：`scripts/make-icons.py` 从 `scripts/icon-src/` 的源图重新生成分层图标（`background.png`、`foreground.png`）与 216/512 尺寸的应用图标，需要 Python 3 与 Pillow。
 
-**静态检查**：`scripts/check-*.mjs` 是一组 Node 脚本，用 `node:vm` 直接执行注入到网页的脚本与纯逻辑模块并断言行为，覆盖媒体下载与 DoH 策略回退、未读计数解析、路由分类、发帖结果判定、文件类型边界，以及"ArkWeb 引擎必须在 DoH 应用之前初始化"这类启动顺序约束。直接 `node scripts/check-web-flows.mjs` 即可运行。
+**行为检查**：`scripts/check-*.mjs` 使用 Node 24 和 `node:vm` 执行生产逻辑，覆盖媒体分类与下载、失败重试、草稿移交与恢复、启动异常、导航竞态、角标及网络策略；平台调用由测试替身提供。可逐个执行，例如 `node scripts/check-reliability.mjs`。PR 检查会执行全部脚本；这些检查不能替代设备上的 ArkWeb 回调、登录、相册授权和网络抓包验证。
 
 **其他脚本**：`scripts/` 下还有 JDK/环境变量配置、模拟器启动与 HAP 安装、Previewer 运行、系统镜像导入、设备点击抓屏等辅助脚本，均按 macOS + Huawei command-line-tools 的路径习惯编写（默认 `$HOME/Developer/command-line-tools`），在其他平台上需要自行调整路径。
 
@@ -97,13 +99,13 @@ hvigorw --no-daemon assembleHap --mode module -p product=default -p buildMode=de
 
 应用内置独立的网络与安全面板，入口有三处：首屏加载或加载失败时底部的"设置"胶囊、首页头像菜单中的"网络与安全"，以及错误页上的"网络设置"按钮。
 
-- **三种模式**：`off` 使用系统 DNS；`auto`（默认）优先 DoH、失败回退系统 DNS；`secure_only` 强制 DoH、绝不回退（会先弹确认框，节点不可达时网页和图片都加载不出来）。
+- **三种模式**：关闭时使用系统 DNS；自动模式（默认）优先 DoH、失败回退系统 DNS；强制模式要求 DoH，配置应用失败时停止挂载网页，并保留重试与网络设置入口。VPN 自动旁路和图片下载同步分别按对应开关生效。
 - **内置节点**：Cloudflare（`https://cloudflare-dns.com/dns-query`，引导 IP 1.1.1.1）、Google Public DNS（8.8.8.8）、AliDNS（223.5.5.5）、DNSPod（1.12.12.12），默认选中 Cloudflare。
 - **自定义节点**：最多 8 个，要求 HTTPS 且带路径，可选填 IPv4/IPv6 引导 IP；名称、URL 长度和重复地址都会校验。
 - **如何生效**：通过 ArkWeb 的 `WebviewController.setHttpDns` 设置加密 DNS 模式，并用 `setHostIP` / `clearHostIP` 为节点主机名钉住引导 IP（有效期 3600 秒）。必须在 `initializeWebEngine()` 之后、`loadContent` 之前应用，因此 `EntryAbility` 在 `onCreate` 里初始化引擎和网络配置，在 `onWindowStageCreate` 里再补一次 `ensureApplied()`。
 - **节点测速**：`DohProbe` 直接构造 DNS A 记录的 wire 格式查询（base64url、`Accept: application/dns-message`）并解析 rcode，结果分为可用（显示毫秒延迟）、不可达、响应无效、解析失败。
 - **VPN 感知**：监听网络变化（400ms 防抖），检测到 `BEARER_VPN` 时暂停 DoH，避免与 fake-IP 方案冲突；该自动旁路可在面板中关闭。
-- **头像与原图下载**：“同步加速原图下载”开启时，头像和原生查看器共享网页的 ArkWeb 下载通道，沿用当前 DoH、引导 IP 和网络环境；图片保存在应用缓存中，不弹出文件保存窗口。关闭同步后沿用独立 HTTP 下载策略。同步下载失败时不会另外切换到独立 HTTP；系统 DNS 回退遵循网页本身的 DoH 模式。
+- **头像与图片下载**：“同步加速原图下载”开启时，头像和原生查看器共享网页的 ArkWeb 下载通道；原生图片组件只接收下载完成的本地文件，不自行加载远程预览。图片保存在应用缓存中，不弹出文件保存窗口。关闭同步后使用独立 HTTP 下载策略。同步下载失败时不会切换到独立 HTTP；系统 DNS 回退按网页的 DoH 模式配置。
 - 配置写在 preferences 的 `opentwit_network`；改动后当前页面会自动重载，让新设置立刻生效。
 
 需要说明的是，DoH 只加密 DNS 查询本身：它不隐藏 TLS SNI、不改变 IP 路由，也不能绕过基于 IP/SNI 的封锁。

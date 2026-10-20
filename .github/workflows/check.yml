@@ -1,0 +1,17 @@
+name: 回归检查
+
+on: pull_request
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: 执行行为检查
+        run: |
+          for script in scripts/check-*.mjs; do
+            node "$script"
+          done

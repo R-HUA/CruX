@@ -78,6 +78,7 @@ const context = { cacheDir: '/cache' };
 const makePage = () => {
   const page = new MainTabs();
   Object.assign(page, { avatarAlive: true, ownHandle: 'alice', currentUrl: 'https://x.com/home',
+    webNetworkReady: true, profileNavigation: 0, cancelProfileNavigation() {},
     getUIContext: () => ({ getHostContext: () => context, postFrameCallback: frame => frames.push(frame) }),
     saveOwnHandle() {}, finishDiscover() {}, stopPostCheck() {}, stopBackgroundWork() {}, clearComposeSync() {}, clearNetworkBadgeCounts() {}, syncChromeInsets() {},
     toast() {}, refreshes: 0, networkReloadTimer: -1, firstLoadTimer: -1, badgeTimer: -1,

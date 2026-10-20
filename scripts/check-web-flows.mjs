@@ -123,7 +123,7 @@ hasBanner=false;measure();assert.equal(profileReports.at(-1).bannerBottom,520);a
 profileContext.location={pathname:'/bob',href:'https://x.com/bob'};measure();assert.equal(profileReports.at(-1).ready,false);
 domHandle='bob';measure();assert.equal(profileReports.at(-1).ready,true);assert.equal(profileReports.at(-1).scrollY,100);
 identityHeight=0;measure();assert.equal(profileReports.at(-1).ready,false,'Loading placeholders cannot reveal the title');
-assert.match(mainSource,/onPageBegin\(\(\) => \{\s*this.resetProfileLayout\(\)/);
+assert.match(mainSource,/onPageBegin\(\(\) => \{\s*if \(!this.webNetworkReady\) \{ return; \}\s*this.resetProfileLayout\(\)/);
 assert.match(mainSource,/onAreaChange\([\s\S]*?this.webWidth !== Number\(area.width\)[\s\S]*?this.resetProfileLayout\(\)/);
 const replyMethod=mainSource.match(/private replyToPost\(\): void \{([\s\S]*?)\n  \}/)[1];
 const reply=vm.runInNewContext(stripTypeScriptTypes('(function(){'+replyMethod+'})'),{
@@ -161,17 +161,18 @@ new vm.Script(scripts.chromeScript(true,true,'https://x.com/home'));
 let profileClicks=0;
 const profileLink={textContent:'Profile',getAttribute:name=>name==='href'?'/alice':null,
   click(){profileClicks++;menuOpen=false;}};
-let menuOpen=false, ambiguous=false, clicks=0;
+let menuOpen=false, ambiguous=false, clicks=0, profileReady=true, accountChanged;
 const profileButton={click(){menuOpen=!menuOpen;clicks++;}};
 const dialog={textContent:'Profile',querySelector:()=>null,querySelectorAll:()=>ambiguous?
   [profileLink,{textContent:'Profile',getAttribute:name=>name==='href'?'/bob':null}]:[profileLink]};
 const accountDocument={
   querySelectorAll:selector=>selector==='[role="dialog"]'?(menuOpen?[dialog]:[]):
     selector==='[role=dialog] a[href]'&&menuOpen?[profileLink]:[],
-  querySelector:selector=>selector==='[role=dialog]'?(menuOpen?dialog:null):profileButton
+  querySelector:selector=>selector==='[role=dialog]'?(menuOpen?dialog:null):(profileReady?profileButton:null)
 };
 assert.equal(vm.runInNewContext(scripts.OWN_HANDLE_SCRIPT,{document:accountDocument}),'');
-const accountContext={window:{},document:accountDocument,setTimeout:callback=>callback()};
+const accountContext={window:{},document:accountDocument,setTimeout:()=>1,clearTimeout(){},
+  MutationObserver:class{constructor(callback){accountChanged=callback;}observe(){}disconnect(){}}};
 assert.equal(vm.runInNewContext(scripts.profileBootstrapScript(false),accountContext),'armed');
 assert.equal(accountContext.window.__otBoot,'alice');assert.equal(menuOpen,false);assert.equal(clicks,2);
 menuOpen=true;assert.equal(vm.runInNewContext(scripts.OWN_HANDLE_SCRIPT,{document:accountDocument}),'alice');
@@ -180,6 +181,11 @@ assert.equal(vm.runInNewContext(scripts.OWN_HANDLE_SCRIPT,{document:accountDocum
 ambiguous=false;menuOpen=false;
 assert.equal(vm.runInNewContext(scripts.profileBootstrapScript(true),accountContext),'armed');
 assert.equal(profileClicks,1);assert.equal(menuOpen,false);
+profileReady=false;
+assert.equal(vm.runInNewContext(scripts.profileBootstrapScript(false),accountContext),'armed');
+assert.equal(accountContext.window.__otBoot,'');
+profileReady=true;accountChanged();
+assert.equal(accountContext.window.__otBoot,'alice');assert.equal(menuOpen,false);
 let routeClicks=0;
 const link={getAttribute:name=>name==='href'?'/i/chat':null,click(){routeClicks++;}};
 const routeContext={URL,location:{href:'https://x.com/home'},document:{querySelectorAll:()=>[link]}};

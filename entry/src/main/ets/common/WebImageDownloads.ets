@@ -3,6 +3,7 @@ import { fileIo } from '@kit.CoreFileKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { isMediaDownloadUrl } from './WebMedia';
+import { NetworkConfig } from './NetworkConfig';
 
 const IMAGE_LIMIT: number = 25 * 1024 * 1024;
 const IMAGE_TIMEOUT: number = 40000;
@@ -71,6 +72,10 @@ export class WebImageDownloads {
   }
 
   request(url: string): WebImageRequest {
+    const network = NetworkConfig.getInstance().snapshot();
+    if (network.mode === 'secure_only' && !network.suspended && network.applyError) {
+      return { result: Promise.reject(new WebImageDownloadError('network_policy', 0)), cancel: () => {} };
+    }
     if (this.closed || !isWebImageUrl(url)) {
       return { result: Promise.reject(new WebImageDownloadError(this.closed ? 'closed' : 'url', 0)), cancel: () => {} };
     }
@@ -96,9 +101,10 @@ export class WebImageDownloads {
     if (created) {
       task.timer = setTimeout(() => this.fail(task, new WebImageDownloadError('timeout', 21), true), IMAGE_TIMEOUT);
       try { this.controller.startDownload(url); } catch (error) {
-        this.fail(task, new WebImageDownloadError('dispatch', (error as BusinessError).code || 0), true);
+        const code = (error as BusinessError).code || 0;
+        this.fail(task, new WebImageDownloadError('dispatch', code), true);
         // 同步参数或控制器错误表示未派发，无需等候不会到达的 GUID。
-        this.byUrl.delete(url);
+        if (code === 401 || code === 17100001 || code === 17100002) { this.byUrl.delete(url); }
       }
     }
     return { result: result, cancel: () => {

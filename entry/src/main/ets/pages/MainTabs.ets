@@ -110,8 +110,8 @@ class PageBridge {
     if (source === 'main') { this.handler(url); }
   }
 }
-// How long the account menu needs before it has rendered its links.
-const BOOTSTRAP_SETTLE_MS: number = 1800;
+// 网页路由与账号入口共用有界就绪检查，避免慢网误判。
+const PROFILE_TIMEOUT_MS: number = 10000;
 
 interface ImagePayload {
   urls: string[];
@@ -237,6 +237,7 @@ struct MainTabs {
   @State desktopMode: boolean = false;
   @State preferencesReady: boolean = false;
   @State webSession: number = 0;
+  @State webNetworkReady: boolean = true;
   private webSource: string = TWITTER_ROUTES[0];
   @State composeReady: boolean = false;
   private composeSyncTimer: number = -1;
@@ -291,9 +292,13 @@ struct MainTabs {
   // Whether the notification prompt (the one that lets the icon carry a badge)
   // has been shown, so a decline is respected and never repeated.
   private notificationAsked: boolean = false;
-  // Last count handed to the launcher, so the shell only calls out when it
-  // actually changes.
+  // 只缓存系统已接受的角标计数，失败不能阻止后续同步。
   private badgeShown: number = -1;
+  private badgeSyncing: boolean = false;
+  private badgeSyncTarget: string = '';
+  private badgeSyncFailures: number = 0;
+  private profileNavigation: number = 0;
+  private navigationGeneration: number = 0;
   private networkUnsubscribe: (() => void) | undefined = undefined;
   private networkGeneration: number = 0;
   private networkPendingReload: boolean = false;
@@ -307,46 +312,79 @@ struct MainTabs {
 
   async aboutToAppear(): Promise<void> {
     this.avatarAlive = true;
-    this.immersiveMaterial = hdsMaterial.getSystemMaterialTypes().includes(hdsMaterial.MaterialType.IMMERSIVE);
-    hilog.info(DOMAIN, TAG, 'event=material_support immersive=%{public}s', String(this.immersiveMaterial));
-    const shellContext = this.getUIContext().getHostContext() as common.UIAbilityContext;
-    this.shellWindow = await window.getLastWindow(shellContext);
-    // 状态栏透出页面底色，文字颜色继续由导航组件管理。
-    await this.shellWindow.setWindowSystemBarProperties({ statusBarColor: '#00000000' });
-    this.shellWindow.on('avoidAreaChange', this.avoidChanged);
-    this.updateShellInsets();
-    const net = NetworkConfig.getInstance();
-    net.ensureInitialized(shellContext);
-    const netSnapshot: NetworkSnapshot = net.snapshot();
-    this.networkGeneration = netSnapshot.generation;
-    this.networkUnsubscribe = net.subscribe((snapshot: NetworkSnapshot) => {
-      if (snapshot.generation !== this.networkGeneration) {
-        this.networkPendingReload = true;
-      }
-    });
-    this.bridge.setImageHandler((payload: string) => this.openImages(payload));
-    this.bridge.setProfileHandler((payload: string) => this.receiveProfileLayout(payload));
-    this.bridge.setThemeHandler((color: string) => {
-      const match = /^rgb\((\d{1,3}),\s*(\d{1,3}),\s*(\d{1,3})\)$/.exec(color);
-      if (!match || !isSiteUrl(this.controller.getUrl())) { return; }
-      const red = Number(match[1]), green = Number(match[2]), blue = Number(match[3]);
-      if (red > 255 || green > 255 || blue > 255) { return; }
-      this.pageBackground = color;
-      this.webColorMode = red * 0.299 + green * 0.587 + blue * 0.114 < 128 ? ThemeColorMode.DARK : ThemeColorMode.LIGHT;
-    });
-    this.bridge.setHandler((url: string) => {
-      this.saveWebSession();
-      if (this.rawWeb) { return; }
-      this.syncFromUrl(url);
-      this.updateChromeFlag(url);
-      this.applyPageChrome(url);
-      this.schedulePageStateRead();
-    });
-    this.applyBreakpoints();
-    this.armFirstLoadTimeout();
-    this.armBadgeRefresh();
     try {
-      await removeExpiredDownloads(shellContext.cacheDir);
+      const shellContext = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      try {
+        this.immersiveMaterial = hdsMaterial.getSystemMaterialTypes().includes(hdsMaterial.MaterialType.IMMERSIVE);
+      } catch (error) {
+        hilog.warn(DOMAIN, TAG, 'event=material_unavailable error=%{public}s', JSON.stringify(error));
+      }
+      try {
+        this.shellWindow = await window.getLastWindow(shellContext);
+        if (!this.avatarAlive) { return; }
+        // 状态栏透出页面底色，文字颜色继续由导航组件管理。
+        await this.shellWindow.setWindowSystemBarProperties({ statusBarColor: '#00000000' });
+        this.shellWindow.on('avoidAreaChange', this.avoidChanged);
+        this.updateShellInsets();
+      } catch (error) {
+        hilog.warn(DOMAIN, TAG, 'event=shell_window_unavailable error=%{public}s', JSON.stringify(error));
+      }
+      if (!this.avatarAlive) { return; }
+      const net = NetworkConfig.getInstance();
+      net.ensureInitialized(shellContext);
+      const netSnapshot: NetworkSnapshot = net.snapshot();
+      this.webNetworkReady = !(netSnapshot.mode === 'secure_only' && !netSnapshot.suspended && netSnapshot.applyError);
+      if (!this.webNetworkReady) { this.hasError = true; }
+      this.networkGeneration = netSnapshot.generation;
+      this.networkUnsubscribe = net.subscribe((snapshot: NetworkSnapshot) => {
+        const ready = !(snapshot.mode === 'secure_only' && !snapshot.suspended && snapshot.applyError);
+        if (!ready) {
+          this.navigationGeneration++;
+          this.webNetworkReady = false;
+          this.hasError = true;
+          this.incomingControllerReady = false;
+          this.incomingPageReady = false;
+          this.cancelProfileNavigation();
+          this.clearComposeSync();
+          if (this.posting) { this.markPostUnknown(); }
+          this.webImages?.close().catch((error: Error) => {
+            hilog.error(DOMAIN, TAG, 'event=web_image_close_failed error=%{public}s', error.message);
+          });
+          this.webImages = undefined;
+        } else if (!this.webNetworkReady) {
+          this.webNetworkReady = true;
+          this.recoverMediaWeb(this.rawWeb, false);
+          this.composeController = new web_webview.WebviewController();
+        }
+        if (snapshot.generation !== this.networkGeneration) {
+          this.networkPendingReload = true;
+        }
+      });
+      this.bridge.setImageHandler((payload: string) => this.openImages(payload));
+      this.bridge.setProfileHandler((payload: string) => this.receiveProfileLayout(payload));
+      this.bridge.setThemeHandler((color: string) => {
+        const match = /^rgb\((\d{1,3}),\s*(\d{1,3}),\s*(\d{1,3})\)$/.exec(color);
+        if (!match || !isSiteUrl(this.controller.getUrl())) { return; }
+        const red = Number(match[1]), green = Number(match[2]), blue = Number(match[3]);
+        if (red > 255 || green > 255 || blue > 255) { return; }
+        this.pageBackground = color;
+        this.webColorMode = red * 0.299 + green * 0.587 + blue * 0.114 < 128 ? ThemeColorMode.DARK : ThemeColorMode.LIGHT;
+      });
+      this.bridge.setHandler((url: string) => {
+        this.saveWebSession();
+        if (this.rawWeb) { return; }
+        this.syncFromUrl(url);
+        this.updateChromeFlag(url);
+        this.applyPageChrome(url);
+        this.schedulePageStateRead();
+      });
+      this.applyBreakpoints();
+      this.armFirstLoadTimeout();
+      this.armBadgeRefresh();
+      try { await removeExpiredDownloads(shellContext.cacheDir); } catch (error) {
+        hilog.warn(DOMAIN, TAG, 'event=download_cleanup_failed error=%{public}s', JSON.stringify(error));
+        this.toast($r('app.string.operation_failed'));
+      }
       const ctx: common.Context | undefined = this.getUIContext().getHostContext();
       if (ctx !== undefined) {
         const prefs: preferences.Preferences = await preferences.getPreferences(ctx, PREFS_NAME);
@@ -362,7 +400,7 @@ struct MainTabs {
         this.syncChromeInsets();
       }
     } catch (err) {
-      hilog.warn(DOMAIN, TAG, 'preferences unavailable: %{public}s', JSON.stringify(err));
+      hilog.error(DOMAIN, TAG, 'event=shell_initialization_failed error=%{public}s', JSON.stringify(err));
       this.toast($r('app.string.operation_failed'));
     } finally {
       this.preferencesReady = true;
@@ -370,6 +408,8 @@ struct MainTabs {
   }
 
   aboutToDisappear(): void {
+    this.navigationGeneration++;
+    this.cancelProfileNavigation();
     this.incomingControllerReady = false;
     this.incomingPageReady = false;
     this.avatarAlive = false;
@@ -380,7 +420,9 @@ struct MainTabs {
     this.webImages?.close().catch((err: Error) => {
       hilog.warn(DOMAIN, TAG, 'event=web_image_close_failed code=%{public}d', (err as BusinessError).code);
     });
-    this.shellWindow?.off('avoidAreaChange', this.avoidChanged);
+    try { this.shellWindow?.off('avoidAreaChange', this.avoidChanged); } catch (error) {
+      hilog.warn(DOMAIN, TAG, 'event=shell_window_release_failed error=%{public}s', JSON.stringify(error));
+    }
     if (this.networkUnsubscribe !== undefined) {
       this.networkUnsubscribe();
       this.networkUnsubscribe = undefined;
@@ -423,6 +465,7 @@ struct MainTabs {
   // on the timer.
   onBackgroundChanged(): void {
     if (this.appBackground) {
+      this.cancelProfileNavigation();
       this.stopBackgroundWork();
       this.clearAvatarRetry();
       this.clearComposeSync();
@@ -565,6 +608,7 @@ struct MainTabs {
   // Home tab, and only then let the system close the app (HarmonyOS UX
   // requirement — back must not drop the user out of a page they can leave).
   onBackPress(): boolean {
+    this.cancelProfileNavigation();
     if (this.imageViewerOpen) { this.imageViewerOpen = false; return true; }
     if (this.appearanceOpen) { this.appearanceOpen = false; return true; }
     if (this.networkOpen) { this.networkOpen = false; return true; }
@@ -777,82 +821,35 @@ struct MainTabs {
     return out.length >= 1 ? out : '';
   }
 
-  private discoverOwnProfile(navigate: boolean): void {
-    if (this.rawWeb) { return; }
+  private async discoverOwnProfile(): Promise<void> {
+    if (this.rawWeb || this.discovering || this.sheetOpen) { return; }
     const pageUrl = this.currentUrl;
-    // Fast path: a layout that links the account directly (the desktop sidebar
-    // does; the mobile web does not).
-    let pending: Promise<string> | undefined = undefined;
+    const generation = this.profileNavigation;
     try {
-      pending = this.controller.runJavaScript(OWN_HANDLE_SCRIPT);
-    } catch (err) {
-      pending = undefined;
-    }
-    if (pending === undefined) {
-      if (navigate) {
-        this.bootstrapProfile();
-      }
-      return;
-    }
-    (pending as Promise<string>).then((raw: string) => {
-      if (!this.avatarAlive || this.currentUrl !== pageUrl || this.appBackground) { return; }
+      const raw = await this.controller.runJavaScript(OWN_HANDLE_SCRIPT);
+      if (!this.avatarAlive || this.currentUrl !== pageUrl || this.appBackground || generation !== this.profileNavigation) { return; }
       const direct: string = MainTabs.parseHandle('/' + MainTabs.unquote(raw));
-      if (direct !== '') {
-        this.acceptHandle(direct, navigate);
-        return;
-      }
-      if (navigate) {
-        this.bootstrapProfile();
-      }
-    }).catch(() => {
-      if (navigate) {
-        this.bootstrapProfile();
-      }
-    });
+      if (direct !== '') { this.acceptHandle(direct, false); }
+    } catch (error) {
+      hilog.warn(DOMAIN, TAG, 'event=account_read_failed code=%{public}d', (error as BusinessError).code);
+    }
   }
 
-  /** 手机网页通过账号抽屉进入本人资料，不使用缓存账号猜测当前身份。 */
-  private bootstrapProfile(): void {
-    this.discovering = true;
-    let pending: Promise<string> | undefined = undefined;
-    try {
-      pending = this.controller.runJavaScript(profileBootstrapScript(true));
-    } catch (err) {
-      pending = undefined;
-    }
-    if (pending === undefined) {
-      this.finishBootstrap('');
-      return;
-    }
-    (pending as Promise<string>).then(() => {
-      setTimeout(() => {
-        try {
-          this.controller.runJavaScript('window.__otBoot||""').then((raw: string) => {
-            this.finishBootstrap(MainTabs.parseHandle('/' + MainTabs.unquote(raw)));
-          }).catch(() => {
-            this.finishBootstrap('');
-          });
-        } catch (err) {
-          this.finishBootstrap('');
-        }
-      }, BOOTSTRAP_SETTLE_MS);
-    }).catch(() => {
-      this.finishBootstrap('');
-    });
-  }
-
-  private finishBootstrap(handle: string): void {
+  /** 切换路由或生命周期后，旧资料读取不能再驱动导航。 */
+  private async cancelProfileNavigation(): Promise<void> {
+    this.profileNavigation++;
     this.discovering = false;
-    if (handle !== '') {
-      this.acceptHandle(handle, false);
-      return;
+    if (this.incomingControllerReady) {
+      try { await this.controller.runJavaScript('window.__otBootCancel&&window.__otBootCancel()'); } catch (error) {
+        hilog.warn(DOMAIN, TAG, 'event=account_read_cancel_failed code=%{public}d', (error as BusinessError).code);
+      }
     }
-    this.toast($r('app.string.account_unconfirmed'));
   }
 
   private acceptHandle(handle: string, navigate: boolean): void {
     const changed: boolean = this.ownHandle.toLowerCase() !== handle.toLowerCase();
     if (changed) {
+      this.cancelProfileNavigation();
       this.resetAvatar();
       this.clearNetworkBadgeCounts();
       this.unreadNotifications = 0;
@@ -881,13 +878,18 @@ struct MainTabs {
     this.toast($r('app.string.account_unconfirmed'));
   }
 
-  private async loadWeb(url: string): Promise<void> {
+  private async loadWeb(url: string, keepProfile: boolean = false): Promise<void> {
+    if (!this.webNetworkReady) { this.hasError = true; return; }
+    if (!keepProfile) { this.cancelProfileNavigation(); }
+    const generation = ++this.navigationGeneration;
     try {
       const result: string = MainTabs.unquote(await this.controller.runJavaScript(clickRouteScript(url)));
+      if (generation !== this.navigationGeneration || !this.webNetworkReady) { return; }
       if (result === 'clicked') { this.hasError = false; return; }
     } catch (err) {
       hilog.warn(DOMAIN, TAG, 'event=page_route_script_failed error=%{public}s', JSON.stringify(err));
     }
+    if (generation !== this.navigationGeneration || !this.webNetworkReady) { return; }
     this.hasError = false;
     this.progress = 0;
     try {
@@ -914,6 +916,7 @@ struct MainTabs {
   }
 
   private syncFromUrl(url: string): void {
+    if (this.discovering && url !== this.currentUrl && pathOf(url) !== '/home') { this.cancelProfileNavigation(); }
     if (url !== this.currentUrl) { this.resetProfileLayout(); this.resetChromeScroll(); }
     const idx: number = routeIndexForUrl(url);
     if (idx >= 0 && idx !== this.currentIndex) {
@@ -935,6 +938,7 @@ struct MainTabs {
 
   /** 网页账号入口不修改会话；切换后重新确认身份和头像。 */
   private async openAccountSwitcher(): Promise<void> {
+    this.cancelProfileNavigation();
     try {
       const result = MainTabs.unquote(await this.controller.runJavaScript(ACCOUNT_SWITCH_SCRIPT));
       if (result !== 'opened') { this.toast($r('app.string.account_unconfirmed')); }
@@ -949,6 +953,7 @@ struct MainTabs {
       this.openOwnProfile();
       return;
     }
+    this.cancelProfileNavigation();
     if (index === this.currentIndex) {
       // Tapping the active tab scrolls to top, like the stock app.
       try {
@@ -981,19 +986,29 @@ struct MainTabs {
   }
 
   private async openOwnProfile(): Promise<void> {
+    this.cancelProfileNavigation();
+    const generation = this.profileNavigation;
+    this.discovering = true;
     this.hasError = false;
-    // 搜索结果页没有账号抽屉入口，先经网页首页确认当前账号，不能套用旧账号。
-    if (!this.isHomeRoot()) {
-      this.discovering = true;
-      await this.loadWeb(TWITTER_ROUTES[0]);
-      setTimeout(() => {
-        this.discovering = false;
-        if (this.isHomeRoot()) { this.discoverOwnProfile(true); }
-        else { this.toast($r('app.string.account_unconfirmed')); }
-      }, PAGE_STATE_DELAY_MS);
-      return;
+    try {
+      // 路由到达后再查 DOM，慢网只受总超时限制，不依赖固定页面加载时长。
+      if (!this.isHomeRoot()) { await this.loadWeb(TWITTER_ROUTES[0], true); }
+      const deadline = Date.now() + PROFILE_TIMEOUT_MS;
+      while (!this.isHomeRoot() && Date.now() < deadline) {
+        if (generation !== this.profileNavigation || !this.avatarAlive || this.appBackground) { return; }
+        await new Promise<void>((resolve) => { setTimeout(resolve, 100); });
+      }
+      if (generation !== this.profileNavigation || !this.avatarAlive || this.appBackground) { return; }
+      const handle = this.isHomeRoot() ? await this.confirmCurrentAccount() : '';
+      if (generation !== this.profileNavigation || !this.avatarAlive || this.appBackground) { return; }
+      if (handle === '') { this.toast($r('app.string.account_unconfirmed')); return; }
+      this.acceptHandle(handle, true);
+    } catch (error) {
+      hilog.warn(DOMAIN, TAG, 'event=profile_navigation_failed error=%{public}s', JSON.stringify(error));
+      if (generation === this.profileNavigation) { this.toast($r('app.string.account_unconfirmed')); }
+    } finally {
+      if (generation === this.profileNavigation) { this.discovering = false; }
     }
-    this.discoverOwnProfile(true);
   }
 
   private titleMain(): string {
@@ -1079,6 +1094,7 @@ struct MainTabs {
   }
 
   private reloadCurrent(): void {
+    if (!this.webNetworkReady) { NetworkConfig.getInstance().refresh(); return; }
     // A retry replaces the error surface with the normal progress UI.
     this.hasError = false;
     this.avatarReadRequest++;
@@ -1096,7 +1112,9 @@ struct MainTabs {
   }
 
   /** 重建所属 Web 隔离无 GUID 的旧下载；保留共享登录会话和当前站内地址。 */
-  private recoverMediaWeb(showWeb: boolean): void {
+  private recoverMediaWeb(showWeb: boolean, notify: boolean = true): void {
+    this.navigationGeneration++;
+    this.cancelProfileNavigation();
     this.imageViewerOpen = false;
     this.rawWeb = showWeb;
     this.webSource = this.currentUrl || TWITTER_ROUTES[0];
@@ -1111,7 +1129,7 @@ struct MainTabs {
     this.hasError = false;
     this.progress = 0;
     this.webSession++;
-    if (!showWeb) { this.toast($r('app.string.media_reopen')); }
+    if (notify && !showWeb) { this.toast($r('app.string.media_reopen')); }
   }
 
   /** 账号读取失败不应使原生界面消失；登录与未知路由交给网页。 */
@@ -1578,9 +1596,12 @@ struct MainTabs {
   // Keep the launcher icon's own badge in step with what the tab bar shows, so
   // the count is visible without opening the app (HarmonyOS draws the badge on
   // the desktop icon or the folder the icon sits in).
-  private syncLauncherBadge(): void {
+  private async syncLauncherBadge(): Promise<void> {
     const total: number = this.unreadNotifications + this.unreadMessages;
-    if (total === this.badgeShown) {
+    const target = this.ownHandle + ':' + total;
+    if (target !== this.badgeSyncTarget) { this.badgeSyncTarget = target; this.badgeSyncFailures = 0; }
+    if (this.badgeSyncFailures >= BADGE_RETRY_LIMIT) { return; }
+    if (this.badgeSyncing || total === this.badgeShown) {
       return;
     }
     if (total > 0 && !this.notificationsAllowed()) {
@@ -1590,18 +1611,21 @@ struct MainTabs {
       this.askForNotificationsOnce();
       return;
     }
-    this.badgeShown = total;
+    const owner = this.ownHandle;
+    this.badgeSyncing = true;
     hilog.info(DOMAIN, TAG, 'launcher badge -> %{public}d', total);
     try {
-      notificationManager.setBadgeNumber(total)
-        .then(() => {
-          hilog.info(DOMAIN, TAG, 'launcher badge accepted: %{public}d', total);
-        })
-        .catch((err: BusinessError) => {
-          hilog.warn(DOMAIN, TAG, 'launcher badge rejected: %{public}d %{public}s', err.code, err.message);
-        });
+      await notificationManager.setBadgeNumber(total);
+      if (owner === this.ownHandle) { this.badgeShown = total; }
+      this.badgeSyncFailures = 0;
+      hilog.info(DOMAIN, TAG, 'event=launcher_badge_applied total=%{public}d', total);
     } catch (err) {
-      hilog.warn(DOMAIN, TAG, 'launcher badge unavailable: %{public}s', JSON.stringify(err));
+      hilog.warn(DOMAIN, TAG, 'event=launcher_badge_failed error=%{public}s', JSON.stringify(err));
+      this.badgeSyncFailures++;
+      if (this.badgeSyncFailures < BADGE_RETRY_LIMIT) { this.retryBadgeRead(); }
+    } finally {
+      this.badgeSyncing = false;
+      if (owner !== this.ownHandle || total !== this.unreadNotifications + this.unreadMessages) { this.syncLauncherBadge(); }
     }
   }
 
@@ -1702,7 +1726,7 @@ struct MainTabs {
             this.resetAvatar();
             this.unreadNotifications = 0;
             this.unreadMessages = 0;
-          } else { this.discoverOwnProfile(false); }
+          } else { this.discoverOwnProfile(); }
         }).catch((err: Error) => {
           hilog.warn(DOMAIN, TAG, 'event=auth_page_read_failed error=%{public}s', err.message);
         });
@@ -1930,13 +1954,22 @@ struct MainTabs {
 
   /** 账号必须由当前网页确认，缓存不能决定草稿归属。 */
   private async confirmCurrentAccount(): Promise<string> {
+    const pageUrl = this.currentUrl;
+    const generation = this.profileNavigation;
     const direct = MainTabs.unquote(await this.controller.runJavaScript(OWN_HANDLE_SCRIPT));
+    if (pageUrl !== this.currentUrl || generation !== this.profileNavigation) { return ''; }
     if (/^[A-Za-z0-9_]{1,15}$/.test(direct)) { return direct; }
     const result = MainTabs.unquote(await this.controller.runJavaScript(profileBootstrapScript(false)));
     if (result !== 'armed') { return ''; }
-    await new Promise<void>((resolve) => { setTimeout(resolve, BOOTSTRAP_SETTLE_MS); });
-    const handle = MainTabs.unquote(await this.controller.runJavaScript('window.__otBoot||""'));
-    return /^[A-Za-z0-9_]{1,15}$/.test(handle) ? handle : '';
+    const deadline = Date.now() + PROFILE_TIMEOUT_MS;
+    while (Date.now() < deadline && this.avatarAlive && !this.appBackground &&
+      pageUrl === this.currentUrl && generation === this.profileNavigation) {
+      const handle = MainTabs.unquote(await this.controller.runJavaScript('window.__otBoot||""'));
+      if (pageUrl !== this.currentUrl || generation !== this.profileNavigation) { return ''; }
+      if (/^[A-Za-z0-9_]{1,15}$/.test(handle)) { return handle; }
+      await new Promise<void>((resolve) => { setTimeout(resolve, 100); });
+    }
+    return '';
   }
 
   /** 当前账号确认后才读取其草稿，旧草稿需要用户确认归属。 */
@@ -2892,11 +2925,13 @@ struct MainTabs {
         }
       })
       .onPageBegin(() => {
+        if (!this.webNetworkReady) { return; }
         this.resetProfileLayout();
         this.incomingPageReady = false;
         this.hasError = false;
       })
       .onPageEnd((event) => {
+        if (!this.webNetworkReady) { return; }
         if (event && this.controller.getUrl() !== event.url) { return; }
         if (!this.rawWeb && event && isSiteUrl(event.url)) {
           this.controller.runJavaScript(MEDIA_CLICK_SCRIPT).catch((error: Error) => {
@@ -2925,7 +2960,7 @@ struct MainTabs {
         if (this.rawWeb) { return; }
         this.schedulePageStateRead();
         if (this.ownHandle === '') {
-          this.discoverOwnProfile(false);
+          this.discoverOwnProfile();
         }
       })
       .onErrorReceive((event) => {
@@ -2984,7 +3019,7 @@ struct MainTabs {
             // header does not need a refresh button.
             Refresh({ refreshing: $$this.refreshing }) {
               Column() {
-                if (this.preferencesReady) {
+                if (this.preferencesReady && this.webNetworkReady) {
                   ForEach([this.webSession], () => { this.webView() }, (session: number) => session.toString())
                 }
               }.width('100%').height('100%')
@@ -3071,6 +3106,7 @@ struct MainTabs {
       // only so the native Post button submits through the real web session;
       // if it has to surface (media, polls, threads, or an undrivable editor)
       // it is revealed and the native panel steps aside.
+      if (this.webNetworkReady) {
       Web({ src: this.composeUrl, controller: this.composeController })
         .width('100%')
         .height('100%')
@@ -3108,6 +3144,7 @@ struct MainTabs {
         .onShowFileSelector((event) => {
           return this.openFileSelector(event);
         })
+      }
 
       ComposerPanel({ draft: $draft, ready: this.composeReady, posting: this.posting,
         uncertain: this.postUncertain, preparing: this.composePreparing, loading: this.composeLoading,
