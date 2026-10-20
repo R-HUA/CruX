@@ -1,6 +1,7 @@
 {
   "string": [
     {"name":"appearance_title","value":"外观"},
+    {"name":"settings_title","value":"设置"},
     {"name":"appearance_floating","value":"悬浮导航栏"},
     {"name":"appearance_auto_hide","value":"浏览时收起导航栏"},
     {"name":"media_close","value":"关闭"},
@@ -114,7 +115,7 @@
     },
     {
       "name": "vibrate_reason",
-      "value": "OpenTwit 在切换标签页时会提供轻微的触感反馈。"
+      "value": "CruX 在切换标签页时会提供轻微的触感反馈。"
     },
     {
       "name": "error_title",
@@ -150,11 +151,11 @@
     },
     {
       "name": "internet_reason",
-      "value": "OpenTwit 会在应用内加载完整的 Twitter 网页（x.com）。"
+      "value": "CruX 会在应用内加载完整的 Twitter 网页（x.com）。"
     },
     {
       "name": "location_reason",
-      "value": "OpenTwit 中的网页可能为发布带位置的帖子而请求你的位置信息。"
+      "value": "CruX 中的网页可能为发布带位置的帖子而请求你的位置信息。"
     },
     {
       "name": "back",

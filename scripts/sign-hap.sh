@@ -26,9 +26,9 @@ APP_VERSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["
   "$REPO_ROOT/AppScope/app.json5")"
 
 IN_HAP="${1:-$REPO_ROOT/entry/build/default/outputs/default/entry-default-unsigned.hap}"
-OUT_HAP="${2:-$REPO_ROOT/dist/OpenTwit-Web-$APP_VERSION-signed.hap}"
+OUT_HAP="${2:-$REPO_ROOT/dist/CruX-Web-$APP_VERSION-signed.hap}"
 
-BUNDLE_NAME="com.opentwit.web"
+BUNDLE_NAME="com.crux.web"
 KEYSTORE="$SDK_LIB/OpenHarmony.p12"
 PROFILE_CERT="$SDK_LIB/OpenHarmonyProfileRelease.pem"
 SIGN_TOOL="$SDK_LIB/hap-sign-tool.jar"

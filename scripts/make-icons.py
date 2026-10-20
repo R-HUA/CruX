@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
-"""Generate OpenTwit-Web launcher icons.
+"""Generate the CruX launcher icons from the brand source images.
 
-HarmonyOS needs a *layered* app icon (background + foreground) in
-AppScope/resources/base/media plus a square ability icon. The previous
-placeholders were 1x1 transparent PNGs, which the launcher rendered as a
-flat coloured square. This script draws real ones from scratch (no binary
-assets checked in, no external image dependency beyond Pillow).
+Sources live in scripts/icon-src/ (transparent mark + dark backdrop). Outputs
+are the HarmonyOS layered icon plus the square ability/start-window icons.
 
     pip3 install --user Pillow
     python3 scripts/make-icons.py
@@ -13,90 +10,104 @@ assets checked in, no external image dependency beyond Pillow).
 
 import os
 
-from PIL import Image, ImageDraw
-
-SS = 4  # supersampling factor for anti-aliasing
+from PIL import Image, ImageChops, ImageDraw
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SOURCE = os.path.join(REPO, "scripts", "icon-src")
 APPSCOPE_MEDIA = os.path.join(REPO, "AppScope", "resources", "base", "media")
 ENTRY_MEDIA = os.path.join(REPO, "entry", "src", "main", "resources", "base", "media")
 
 LAYER_SIZE = 1024
 ICON_SIZE = 216
-MARK_RATIO = 0.52  # X glyph bounding box as a fraction of the canvas
-BAR_RATIO = 0.115  # bar thickness as a fraction of the canvas
+STORE_SIZE = 512
+MARK_RATIO = 0.84
+CORNER_RATIO = 0.225
+ALPHA_FLOOR = 16
+EDGE_COVERAGE = 24
+SPECK_CLEARANCE = 8
 
 
-def gradient(size, top, bottom):
-    img = Image.new("RGBA", (size, size))
-    draw = ImageDraw.Draw(img)
-    for y in range(size):
-        t = y / float(size - 1)
-        color = tuple(int(round(top[i] + (bottom[i] - top[i]) * t)) for i in range(3))
-        draw.line([(0, y), (size, y)], fill=color + (255,))
-    return img
+def square(image):
+    width, height = image.size
+    side = min(width, height)
+    left = (width - side) // 2
+    top = (height - side) // 2
+    return image.crop((left, top, left + side, top + side))
 
 
-def draw_mark(img, size, color=(255, 255, 255, 255), inset=0.0):
-    """Draw the crossing-bar mark centred on a transparent/solid canvas."""
-    draw = ImageDraw.Draw(img)
-    lo = (0.5 - MARK_RATIO / 2.0 + inset) * size
-    hi = (0.5 + MARK_RATIO / 2.0 - inset) * size
-    width = int(round(BAR_RATIO * size))
-    radius = width / 2.0
-    for a, b in (((lo, lo), (hi, hi)), ((hi, lo), (lo, hi))):
-        draw.line([a, b], fill=color, width=width)
-        for point in (a, b):
-            draw.ellipse(
-                [
-                    point[0] - radius,
-                    point[1] - radius,
-                    point[0] + radius,
-                    point[1] + radius,
-                ],
-                fill=color,
-            )
-    return img
+def clean_mark(image):
+    """Drop isolated alpha specks that would otherwise skew the framing."""
+    alpha = image.getchannel("A")
+    width, height = image.size
+    pixels = alpha.load()
+    columns = [0] * width
+    rows = [0] * height
+    for y in range(height):
+        for x in range(width):
+            if pixels[x, y] >= ALPHA_FLOOR:
+                columns[x] += 1
+                rows[y] += 1
+    xs = [x for x in range(width) if columns[x] >= EDGE_COVERAGE]
+    ys = [y for y in range(height) if rows[y] >= EDGE_COVERAGE]
+    if not xs or not ys:
+        raise SystemExit("front.png has no visible mark")
+    keep = Image.new("L", image.size, 0)
+    ImageDraw.Draw(keep).rectangle(
+        (max(0, xs[0] - SPECK_CLEARANCE),
+         max(0, ys[0] - SPECK_CLEARANCE),
+         min(width - 1, xs[-1] + SPECK_CLEARANCE),
+         min(height - 1, ys[-1] + SPECK_CLEARANCE)),
+        fill=255,
+    )
+    alpha = ImageChops.multiply(alpha, keep)
+    alpha = alpha.point(lambda value: 0 if value < ALPHA_FLOOR else value)
+    cleaned = image.copy()
+    cleaned.putalpha(alpha)
+    return cleaned
 
 
-def rounded_mask(size, radius_ratio=0.225):
+def place_mark(logo, size, ratio):
+    canvas = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    target = int(size * ratio)
+    scale = min(target / logo.width, target / logo.height)
+    width = max(1, round(logo.width * scale))
+    height = max(1, round(logo.height * scale))
+    mark = logo.resize((width, height), Image.LANCZOS)
+    canvas.alpha_composite(mark, ((size - width) // 2, (size - height) // 2))
+    return canvas
+
+
+def rounded_mask(size):
     mask = Image.new("L", (size, size), 0)
     ImageDraw.Draw(mask).rounded_rectangle(
         [(0, 0), (size - 1, size - 1)],
-        radius=int(size * radius_ratio),
+        radius=int(size * CORNER_RATIO),
         fill=255,
     )
     return mask
-
-
-def layered_background(size):
-    return gradient(size, (10, 89, 247), (63, 182, 255))
-
-
-def standalone_icon(size):
-    canvas = layered_background(size)
-    draw_mark(canvas, size)
-    canvas.putalpha(rounded_mask(size))
-    return canvas
 
 
 def main():
     os.makedirs(APPSCOPE_MEDIA, exist_ok=True)
     os.makedirs(ENTRY_MEDIA, exist_ok=True)
 
-    # Layered icon (system masks the background, foreground keeps a safe zone).
-    background = layered_background(LAYER_SIZE * 1)
-    foreground = Image.new("RGBA", (LAYER_SIZE, LAYER_SIZE), (0, 0, 0, 0))
-    draw_mark(foreground, LAYER_SIZE, inset=0.06)
+    front = clean_mark(square(Image.open(os.path.join(SOURCE, "front.png")).convert("RGBA")))
+    backdrop = square(Image.open(os.path.join(SOURCE, "backend.png")).convert("RGBA"))
+
+    background = backdrop.resize((LAYER_SIZE, LAYER_SIZE), Image.LANCZOS)
+    foreground = place_mark(front, LAYER_SIZE, MARK_RATIO)
     background.save(os.path.join(APPSCOPE_MEDIA, "background.png"))
     foreground.save(os.path.join(APPSCOPE_MEDIA, "foreground.png"))
 
-    # Square ability / start-window icon.
-    standalone_icon(ICON_SIZE).save(os.path.join(APPSCOPE_MEDIA, "app_icon.png"))
-    standalone_icon(ICON_SIZE).save(os.path.join(ENTRY_MEDIA, "app_icon.png"))
-
-    # High-res fallback for store listings.
-    standalone_icon(512).save(os.path.join(APPSCOPE_MEDIA, "app_icon_512.png"))
+    composite = background.copy()
+    composite.alpha_composite(foreground)
+    composite.putalpha(rounded_mask(LAYER_SIZE))
+    for size in (ICON_SIZE, STORE_SIZE):
+        icon = composite.resize((size, size), Image.LANCZOS)
+        icon.save(os.path.join(APPSCOPE_MEDIA, "app_icon.png" if size == ICON_SIZE
+                               else "app_icon_512.png"))
+        if size == ICON_SIZE:
+            icon.save(os.path.join(ENTRY_MEDIA, "app_icon.png"))
 
     print("wrote layered background/foreground plus app_icon.png (216, 512)")
 

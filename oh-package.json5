@@ -1,7 +1,7 @@
 {
-  "name": "opentwit",
+  "name": "crux",
   "version": "1.0.0",
-  "description": "OpenTwit HarmonyOS Stage-model scaffold",
+  "description": "CruX HarmonyOS Stage-model scaffold",
   "modelVersion": "26.0.0",
   "author": "",
   "license": "Apache-2.0",

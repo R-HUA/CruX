@@ -34,14 +34,14 @@ export const TAB_COUNT: number = 5;
 // tagged so breakages can be traced back to this port.
 export const TWITTER_UA: string =
   'Mozilla/5.0 (Linux; HarmonyOS; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) ' +
-  'Chrome/120.0 Mobile Safari/537.36 OpenTwit-Web/1.0 HarmonyOS';
+  'Chrome/120.0 Mobile Safari/537.36 CruX-Web/1.0 HarmonyOS';
 
 // Desktop user agent. Needed for the parts of x.com that the mobile web path
 // refuses to serve — notably "email sign-up is only available in the app",
 // which blocks creating an account without the native X app.
 export const TWITTER_UA_DESKTOP: string =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) ' +
-  'Chrome/120.0.0.0 Safari/537.36 OpenTwit-Web/1.0 HarmonyOS';
+  'Chrome/120.0.0.0 Safari/537.36 CruX-Web/1.0 HarmonyOS';
 
 export function userAgentFor(desktop: boolean): string {
   return desktop ? TWITTER_UA_DESKTOP : TWITTER_UA;

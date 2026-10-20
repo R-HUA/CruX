@@ -1,6 +1,7 @@
 {
   "string": [
     {"name":"appearance_title","value":"Appearance"},
+    {"name":"settings_title","value":"Settings"},
     {"name":"appearance_floating","value":"Floating navigation bar"},
     {"name":"appearance_auto_hide","value":"Hide navigation while scrolling"},
     {"name":"media_close","value":"Close"},
@@ -114,7 +115,7 @@
     },
     {
       "name": "vibrate_reason",
-      "value": "OpenTwit gives light tactile feedback when you switch tabs."
+      "value": "CruX gives light tactile feedback when you switch tabs."
     },
     {
       "name": "error_title",
@@ -150,11 +151,11 @@
     },
     {
       "name": "internet_reason",
-      "value": "OpenTwit loads full Twitter web (x.com) in-app."
+      "value": "CruX loads full Twitter web (x.com) in-app."
     },
     {
       "name": "location_reason",
-      "value": "OpenTwit web pages may request your location for location-tagged posts."
+      "value": "CruX web pages may request your location for location-tagged posts."
     },
     {
       "name": "back",

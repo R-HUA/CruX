@@ -125,9 +125,8 @@ struct MainTabs {
   @State isWide: boolean = false;
   @State floatingBar: boolean = true;
   @State autoHideBar: boolean = true;
-  @State appearanceOpen: boolean = false;
+  @State @Watch('onAppearanceOpenChanged') appearanceOpen: boolean = false;
   @State @Watch('onNetworkOpenChanged') networkOpen: boolean = false;
-  @State networkSecureOnly: boolean = false;
   @State @Watch('onBarsCollapsedChanged') barsCollapsed: boolean = false;
   @State immersiveMaterial: boolean = false;
   @State bottomInset: number = 0;
@@ -225,10 +224,8 @@ struct MainTabs {
     const net = NetworkConfig.getInstance();
     net.ensureInitialized(shellContext);
     const netSnapshot: NetworkSnapshot = net.snapshot();
-    this.networkSecureOnly = netSnapshot.mode === 'secure_only';
     this.networkGeneration = netSnapshot.generation;
     this.networkUnsubscribe = net.subscribe((snapshot: NetworkSnapshot) => {
-      this.networkSecureOnly = snapshot.mode === 'secure_only';
       if (snapshot.generation !== this.networkGeneration) {
         this.networkPendingReload = true;
       }
@@ -760,6 +757,8 @@ struct MainTabs {
   }
 
   private reloadCurrent(): void {
+    // A retry replaces the error surface with the normal progress UI.
+    this.hasError = false;
     this.progress = 0;
     this.refreshing = true;
     try {
@@ -889,8 +888,31 @@ struct MainTabs {
     }
   }
 
+  /** 登录/欢迎页没有原生底栏；胶囊占用同一位置，避开 X 的登录按钮与顶栏。 */
+  private settingsPillBottom(): number {
+    return this.bottomInset + S16;
+  }
+
+  private settingsPillVisible(): boolean {
+    if (this.fullScreen || this.imageViewerOpen || this.sheetOpen || this.networkOpen ||
+      this.appearanceOpen || this.discovering || this.rawWeb || this.isMediaViewer()) {
+      return false;
+    }
+    // 原生导航页有悬浮底栏，胶囊会与标签栏重叠；这些页面已有头像/错误页入口。
+    if (this.showsNativeNavigation()) {
+      return false;
+    }
+    // 首屏加载与错误页没有其他设置入口。
+    if (!this.firstLoadDone || this.hasError) {
+      return true;
+    }
+    // X 自己的设置页不再叠加原生入口。
+    return !(isSiteUrl(this.currentUrl) && this.currentPath.startsWith('/settings'));
+  }
+
   private openNetworkSettings(): void {
-    if (this.imageViewerOpen || this.sheetOpen || this.fullScreen) {
+    if (this.imageViewerOpen || this.sheetOpen || this.fullScreen ||
+      this.appearanceOpen || this.discovering) {
       return;
     }
     this.networkOpen = true;
@@ -902,24 +924,53 @@ struct MainTabs {
     }
   }
 
+  private onAppearanceOpenChanged(): void {
+    if (!this.appearanceOpen) {
+      this.flushNetworkReload();
+    }
+  }
+
+  private modalBlocksNetworkReload(): boolean {
+    return this.imageViewerOpen || this.sheetOpen || this.networkOpen ||
+      this.appearanceOpen || this.discovering;
+  }
+
   /** DoH changes apply to new resolutions; reload once after the panel closes. */
   private flushNetworkReload(): void {
-    if (!this.networkPendingReload || this.appBackground || this.fullScreen) {
+    if (!this.networkPendingReload || this.appBackground || this.fullScreen ||
+      this.modalBlocksNetworkReload()) {
       return;
     }
-    if (this.authenticationPage || !isSiteUrl(this.currentUrl) || !this.firstLoadDone) {
-      this.networkPendingReload = false;
-      return;
-    }
-    this.networkPendingReload = false;
-    this.networkGeneration = NetworkConfig.getInstance().snapshot().generation;
     if (this.networkReloadTimer !== -1) {
-      clearTimeout(this.networkReloadTimer);
+      return;
     }
     this.networkReloadTimer = setTimeout(() => {
       this.networkReloadTimer = -1;
-      this.reloadCurrent();
+      if (!this.networkPendingReload || this.appBackground || this.fullScreen ||
+        this.modalBlocksNetworkReload()) {
+        return;
+      }
+      this.networkPendingReload = false;
+      this.networkGeneration = NetworkConfig.getInstance().snapshot().generation;
+      this.recoverAfterNetworkChange();
     }, 200);
+  }
+
+  /** 登录页/首屏加载同样需要重载，否则新 DoH 只影响后续请求而当前页继续失败。 */
+  private recoverAfterNetworkChange(): void {
+    hilog.info(DOMAIN, TAG, 'event=network_reload');
+    if (!this.firstLoadDone) {
+      if (this.firstLoadTimer !== -1) {
+        clearTimeout(this.firstLoadTimer);
+        this.firstLoadTimer = -1;
+      }
+      this.armFirstLoadTimeout();
+    }
+    if (this.currentUrl.length === 0) {
+      this.loadWeb(TWITTER_ROUTES[0]);
+    } else {
+      this.reloadCurrent();
+    }
   }
 
   @Builder
@@ -2122,6 +2173,53 @@ struct MainTabs {
   }
 
   @Builder
+  settingsMenu() {
+    Menu() {
+      MenuItem({ content: $r('app.string.network_title'),
+        symbolStartIcon: new SymbolGlyphModifier($r('sys.symbol.lock_shield')) })
+        .onClick(() => { this.openNetworkSettings(); })
+      MenuItem({ content: $r('app.string.appearance_title'),
+        symbolStartIcon: new SymbolGlyphModifier($r('sys.symbol.paintbrush_fill')) })
+        .onClick(() => { this.appearanceOpen = true; })
+    }
+  }
+
+  @Builder
+  settingsPill() {
+    Row() {
+      Row({ space: S8 }) {
+        SymbolGlyph($r('sys.symbol.gearshape'))
+          .fontSize(16)
+          .fontColor([$r('sys.color.ohos_id_color_text_primary')])
+        Text($r('app.string.settings_title'))
+          .fontSize(13)
+          .fontFamily(FONT_FAMILY)
+          .fontWeight(FontWeight.Medium)
+          .fontColor($r('sys.color.ohos_id_color_text_primary'))
+          .maxLines(1)
+      }
+      .constraintSize({ minHeight: 36 })
+      .padding({ left: S12, right: S12 })
+      .borderRadius(18)
+      .backgroundBlurStyle(BlurStyle.COMPONENT_THICK)
+      .border({ width: 0.5, color: $r('sys.color.ohos_id_color_list_separator') })
+      .clip(true)
+      .shadow({ radius: 16, color: '#24000000', offsetY: 4 })
+      .responseRegion({ x: 0, y: -6, width: '100%', height: TOUCH_TARGET })
+      .hoverEffect(HoverEffect.Highlight)
+      .accessibilityText($r('app.string.settings_title'))
+      .accessibilityLevel('yes')
+      .bindMenu(this.settingsMenu)
+    }
+    .width('100%')
+    .height(TOUCH_TARGET)
+    .justifyContent(FlexAlign.Center)
+    .alignItems(VerticalAlign.Center)
+    .position({ bottom: this.settingsPillBottom(), left: 0 })
+    .hitTestBehavior(HitTestMode.Transparent)
+  }
+
+  @Builder
   errorState() {
     Column({ space: S12 }) {
       SymbolGlyph($r('sys.symbol.wifi_slash'))
@@ -2150,16 +2248,14 @@ struct MainTabs {
           } catch (err) {
           }
         })
-      if (this.networkSecureOnly) {
-        Button($r('app.string.network_open_settings'))
-          .type(ButtonType.Capsule)
-          .fontFamily(FONT_FAMILY)
-          .backgroundColor($r('sys.color.ohos_id_color_button_normal'))
-          .fontColor($r('sys.color.ohos_id_color_text_primary'))
-          .onClick(() => {
-            this.openNetworkSettings();
-          })
-      }
+      Button($r('app.string.network_open_settings'))
+        .type(ButtonType.Capsule)
+        .fontFamily(FONT_FAMILY)
+        .backgroundColor($r('sys.color.ohos_id_color_button_normal'))
+        .fontColor($r('sys.color.ohos_id_color_text_primary'))
+        .onClick(() => {
+          this.openNetworkSettings();
+        })
     }
     .width('100%')
     .height('100%')
@@ -2654,6 +2750,10 @@ struct MainTabs {
           dragBar: true,
           showClose: true
         })
+
+        if (this.settingsPillVisible()) {
+          this.settingsPill()
+        }
       }
       .width('100%')
       .height(LayoutPolicy.matchParent)

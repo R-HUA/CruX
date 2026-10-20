@@ -1,7 +1,7 @@
 {
   "app": {
-    "bundleName": "com.opentwit.web",
-    "vendor": "opentwit",
+    "bundleName": "com.crux.web",
+    "vendor": "crux",
     "versionCode": 2,
     "versionName": "1.1.0",
     "minAPIVersion": 24,

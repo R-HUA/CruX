@@ -115,6 +115,23 @@ const main = read('entry/src/main/ets/pages/MainTabs.ets');
 assert(main.includes('this.networkSettingsSheet()'), 'network sheet is not mounted');
 assert(main.includes('bindSheet($$this.networkOpen'), 'network sheet host missing');
 assert(main.includes("app.string.network_title"), 'network menu entry missing');
+assert(main.includes('this.settingsPill()'), 'pre-login settings pill missing');
+assert(main.includes('bindMenu(this.settingsMenu)'), 'settings menu is not bound');
+assert(main.includes('app.string.settings_title'), 'settings pill label missing');
+assert(main.includes('settingsPillVisible'), 'settings pill visibility rule missing');
+assert(!main.includes('networkSecureOnly'), 'secure-only gating must not hide error recovery');
+assert(main.includes('network_open_settings'), 'error screen network settings button missing');
+
+const flushStart = main.indexOf('private flushNetworkReload');
+const recoverStart = main.indexOf('private recoverAfterNetworkChange');
+assert(flushStart >= 0 && recoverStart > flushStart, 'network reload methods missing');
+const flushBody = main.substring(flushStart, recoverStart);
+assert(!flushBody.includes('authenticationPage'), 'network reload must not drop auth pages');
+assert(!flushBody.includes('firstLoadDone'), 'network reload must not drop the first load');
+const recoverBody = main.substring(recoverStart, main.indexOf('@Builder', recoverStart));
+assert(recoverBody.includes('reloadCurrent()'), 'network recovery must reload the current page');
+assert(recoverBody.includes('TWITTER_ROUTES[0]'), 'network recovery needs a first-load fallback');
+assert(recoverBody.includes('armFirstLoadTimeout()'), 'first-load watchdog must be re-armed');
 
 const sourceFiles = [
   'entry/src/main/ets/pages/MainTabs.ets',
@@ -123,7 +140,7 @@ const sourceFiles = [
 const referenced = new Set();
 for (const file of sourceFiles) {
   const source = read(file);
-  const matches = source.matchAll(/app\.string\.(network_[a-z0-9_]+)/g);
+  const matches = source.matchAll(/app\.string\.((?:network|settings|appearance)_[a-z0-9_]+)/g);
   for (const match of matches) {
     referenced.add(match[1]);
   }
@@ -131,12 +148,14 @@ for (const file of sourceFiles) {
 for (const key of referenced) {
   assert(baseKeys.has(key), 'referenced string missing: ' + key);
 }
+assert(baseKeys.has('settings_title'), 'settings_title string missing');
 
 const sysResource = 'D:/Program Files/DevEco Studio/sdk/default/openharmony/ets/build-tools/ets-loader/sysResource.js';
 if (existsSync(sysResource)) {
   const symbols = readFileSync(sysResource, 'utf8');
   for (const name of ['lock_shield', 'checkmark_shield_fill', 'globe_badge_heart',
-    'arrow_left_arrow_right', 'arrow_clockwise', 'plus', 'trash_fill']) {
+    'arrow_left_arrow_right', 'arrow_clockwise', 'plus', 'trash_fill',
+    'gearshape', 'paintbrush_fill']) {
     assert(new RegExp('\\b' + name + ':').test(symbols), 'system symbol missing: ' + name);
   }
 }
