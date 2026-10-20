@@ -1,5 +1,10 @@
 {
   "string": [
+    {"name":"incoming_failed","value":"无法打开此次分享内容或链接"},
+    {"name":"incoming_busy","value":"请关闭当前面板后重新分享或打开链接"},
+    {"name":"incoming_draft_title","value":"已有草稿"},
+    {"name":"incoming_draft_message","value":"将分享的文字追加到现有草稿？"},
+    {"name":"incoming_append","value":"追加"},
     {"name":"appearance_title","value":"外观"},
     {"name":"settings_title","value":"设置"},
     {"name":"appearance_floating","value":"悬浮导航栏"},

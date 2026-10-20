@@ -85,7 +85,7 @@ export function pathOf(url: string): string {
 }
 
 // Single-segment product roots that are NOT profiles.
-const RESERVED_ROOTS: Record<string, boolean> = {
+export const RESERVED_ROOTS: Record<string, boolean> = {
   '/settings': true,
   '/i': true,
   '/compose': true,
@@ -144,10 +144,7 @@ export function routeIndexForUrl(url: string): number {
   if (path === '/settings/profile') {
     return 4;
   }
-  if (path.indexOf('/', 1) < 0) {
-    if (RESERVED_ROOTS[path]) {
-      return -1;
-    }
+  if (profileHandleForUrl(url) !== '') {
     return 4;
   }
   return -1;
@@ -184,25 +181,35 @@ export function profileHandleForUrl(url: string): string {
 export function isTabRootPath(path: string): boolean {
   return path === '/' || path === '/home' || path === '/explore' ||
     path === '/search' || path === '/notifications' || path === '/messages' ||
-    path === '/i/chat' || path === '/settings/profile';
+    path === '/i/chat';
+}
+
+// 与文档初始脚本共用路径规则，避免首帧和原生栏采用不同边界。
+export const SECONDARY_PATH_PATTERN: string = '^/(settings(?:/.*)?|i/bookmarks(?:/.*)?|i/lists(?:/.*)?|[a-z0-9_]{1,15}/lists(?:/.*)?)$';
+
+/** 二级业务页保留原生返回入口，不显示主标签栏。 */
+export function isSecondaryUrl(url: string): boolean {
+  return /^https:\/\/(www\.)?(x|twitter)\.com\//i.test(url) &&
+    new RegExp(SECONDARY_PATH_PATTERN).test(pathOf(url));
 }
 
 /** 只在已支持的业务页面提供原生导航，登录和未知页面保留网页界面。 */
 export function usesNativeNavigation(url: string): boolean {
   const path: string = pathOf(url);
-  return path !== '/' && path.indexOf('/settings') !== 0 &&
-    (routeIndexForUrl(url) >= 0 || isPostDetailUrl(url));
+  return path !== '/' &&
+    (routeIndexForUrl(url) >= 0 || isPostDetailUrl(url) || isSecondaryUrl(url));
 }
 
 /** 帖子详情使用返回栏和回复入口，不沿用来源标签页的菜单。 */
 export function isPostDetailUrl(url: string): boolean {
   return /^https:\/\/(www\.)?(x|twitter)\.com\//i.test(url) &&
-    /^\/[a-z0-9_]{1,15}\/status\/\d+$/.test(pathOf(url));
+    /^\/(?:[a-z0-9_]{1,15}|i\/web)\/status\/\d+$/.test(pathOf(url));
 }
 
 /** 搜索框和候选项由网页一起管理，避免原生输入与网页搜索状态分离。 */
 export function usesNativeHeader(url: string): boolean {
   const path: string = pathOf(url);
-  return isPostDetailUrl(url) || (usesNativeNavigation(url) && isTabRootPath(path) &&
+  return isPostDetailUrl(url) || isSecondaryUrl(url) || profileHandleForUrl(url) !== '' ||
+    (usesNativeNavigation(url) && isTabRootPath(path) &&
     path !== '/explore' && path !== '/search');
 }

@@ -1,5 +1,10 @@
 {
   "string": [
+    {"name":"incoming_failed","value":"تعذر فتح هذا المحتوى المشترك أو الرابط."},
+    {"name":"incoming_busy","value":"أغلق اللوحة الحالية ثم شارك المحتوى أو افتح الرابط مجددًا."},
+    {"name":"incoming_draft_title","value":"توجد مسودة"},
+    {"name":"incoming_draft_message","value":"هل تريد إضافة النص المشترك إلى المسودة؟"},
+    {"name":"incoming_append","value":"إضافة"},
     {"name":"appearance_title","value":"المظهر"},
     {"name":"settings_title","value":"الإعدادات"},
     {"name":"appearance_floating","value":"شريط تنقل عائم"},

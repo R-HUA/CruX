@@ -3,6 +3,7 @@ import mediaquery from '@ohos.mediaquery';
 import { MediaAddress, resolveMedia, MEDIA_CLICK_SCRIPT } from '../common/WebMedia';
 import { MediaFile, MediaFiles } from '../common/MediaFiles';
 import { WebImageDownloads } from '../common/WebImageDownloads';
+import { IncomingContent } from '../common/IncomingContent';
 import { NativeImageViewer } from './NativeImageViewer';
 import { NetworkSettingsSheet } from './NetworkSettingsSheet';
 import { NetworkConfig, NetworkSnapshot } from '../common/NetworkConfig';
@@ -26,7 +27,7 @@ import {
   TWITTER_DM_COMPOSE, TWITTER_NOTIF_SETTINGS, TWITTER_EDIT_PROFILE,
   TWITTER_SETTINGS, TWITTER_BOOKMARKS,
   profileUrl, listsUrl, pathOf, routeIndexForUrl, profileHandleForUrl,
-  isTabRootPath, isPostDetailUrl, usesNativeNavigation, usesNativeHeader, userAgentFor
+  isTabRootPath, isPostDetailUrl, isSecondaryUrl, usesNativeNavigation, usesNativeHeader, userAgentFor
 } from '../common/WebConfig';
 import {
   OWN_HANDLE_SCRIPT, chromeScript, chromeFlagScript, chromeInsetsScript, chromeDocumentStartScript, scrollToTopScript,
@@ -205,6 +206,11 @@ struct MainTabs {
   @State authenticationPage: boolean = false;
   @State fullScreen: boolean = false;
   @StorageLink('appBackground') @Watch('onBackgroundChanged') appBackground: boolean = false;
+  @StorageLink('incomingContent') @Watch('onIncomingContentChanged') incomingContent: IncomingContent =
+    { kind: '', value: '' };
+  @StorageLink('incomingError') @Watch('onIncomingErrorChanged') incomingError: number = 0;
+  private incomingControllerReady: boolean = false;
+  private incomingPageReady: boolean = false;
   private fullScreenHandler: FullScreenExitHandler | undefined = undefined;
   private fullScreenWindow: window.Window | undefined = undefined;
   private previousLayoutFullScreen: boolean = false;
@@ -308,6 +314,8 @@ struct MainTabs {
   }
 
   aboutToDisappear(): void {
+    this.incomingControllerReady = false;
+    this.incomingPageReady = false;
     this.avatarAlive = false;
     this.resetAvatar();
     this.closeRetiredAvatarFiles();
@@ -374,6 +382,38 @@ struct MainTabs {
   onPageShow(): void {
     this.refreshBadges();
     this.flushNetworkReload();
+    this.onIncomingErrorChanged();
+    this.onIncomingContentChanged();
+  }
+
+  /** 分享失败必须显式告知，不把不可解析的数据当成空草稿。 */
+  private onIncomingErrorChanged(): void {
+    if (this.incomingError === 0) { return; }
+    this.incomingError = 0;
+    this.toast($r('app.string.incoming_failed'));
+  }
+
+  /** 外部入口只在控制器就绪后消费，编辑或模态操作进行中不覆盖用户状态。 */
+  private onIncomingContentChanged(): void {
+    const content = this.incomingContent;
+    if (content.kind === '' || !this.incomingControllerReady ||
+      (content.kind === 'compose' && !this.incomingPageReady)) { return; }
+    this.incomingContent = { kind: '', value: '' };
+    if (this.modalBlocksNetworkReload() || this.fullScreen || this.openingCompose) {
+      this.toast($r('app.string.incoming_busy'));
+      return;
+    }
+    if (content.kind === 'compose') {
+      this.openCompose(content.value);
+      return;
+    }
+    try {
+      this.hasError = false;
+      this.controller.loadUrl(content.value);
+    } catch (err) {
+      hilog.error(DOMAIN, TAG, 'event=incoming_navigation_failed code=%{public}d', (err as BusinessError).code);
+      this.toast($r('app.string.incoming_failed'));
+    }
   }
 
   // A page that never finishes loading must not leave the first-load spinner up
@@ -952,7 +992,7 @@ struct MainTabs {
   }
 
   private bottomChromeHeight(): number {
-    return !this.showsNativeNavigation() || (this.isWide && !isPostDetailUrl(this.currentUrl)) ? 0 :
+    return !this.showsNativeNavigation() || isSecondaryUrl(this.currentUrl) || (this.isWide && !isPostDetailUrl(this.currentUrl)) ? 0 :
       (this.floatingBar ? FLOATING_BAR_HEIGHT : BAR_HEIGHT) + this.bottomInset;
   }
 
@@ -1698,12 +1738,12 @@ struct MainTabs {
   }
 
   /** 当前账号确认后才读取其草稿，旧草稿需要用户确认归属。 */
-  private async openCompose(): Promise<void> {
+  private async openCompose(sharedText: string = ''): Promise<void> {
     if (this.openingCompose || this.sheetOpen) { return; }
     this.openingCompose = true;
     this.composePreparing = true;
     this.composeOwner = '';
-    this.draft = '';
+    this.draft = sharedText;
     this.postUncertain = false;
     this.composeMessage = '';
     this.composeController = new web_webview.WebviewController();
@@ -1730,7 +1770,24 @@ struct MainTabs {
       this.draft = draft;
       this.postUncertain = uncertain;
       this.composeMessage = this.postUncertain ? $r('app.string.post_unknown') : '';
-      if (this.legacyDraft !== '' && this.draft === '') {
+      if (sharedText !== '') {
+        if (this.postUncertain) {
+          this.toast($r('app.string.incoming_busy'));
+        } else if (draft === '') {
+          this.draft = sharedText;
+          await this.persistDraft();
+        } else {
+          this.getUIContext().showAlertDialog({
+            title: $r('app.string.incoming_draft_title'),
+            message: $r('app.string.incoming_draft_message'),
+            primaryButton: { value: $r('app.string.compose_cancel'), action: () => {} },
+            secondaryButton: { value: $r('app.string.incoming_append'), action: () => {
+              this.draft = this.draft + '\n' + sharedText;
+              this.saveDraft();
+            } }
+          });
+        }
+      } else if (this.legacyDraft !== '' && this.draft === '') {
         this.getUIContext().showAlertDialog({
           title: $r('app.string.legacy_draft_title'),
           message: $r('app.string.legacy_draft_message'),
@@ -2029,7 +2086,7 @@ struct MainTabs {
   // Back only exists where there is history to walk and the page is not one of
   // the five tab roots.
   private showBack(): boolean {
-    return isPostDetailUrl(this.currentUrl) || (this.canGoBack && !this.isTabRoot());
+    return isPostDetailUrl(this.currentUrl) || isSecondaryUrl(this.currentUrl) || (this.canGoBack && !this.isTabRoot());
   }
 
   // A profile is a tab root too: /<handle> is what the Profile tab loads, so
@@ -2060,7 +2117,7 @@ struct MainTabs {
     .accessibilityText($r('app.string.back'))
     .accessibilityLevel('yes')
     .onClick(() => {
-      if (isPostDetailUrl(this.currentUrl) && !this.canGoBack) { this.loadWeb(TWITTER_ROUTES[0]); }
+      if (!this.canGoBack) { this.loadWeb(TWITTER_ROUTES[0]); }
       else { this.goBack(); }
     })
   }
@@ -2405,7 +2462,7 @@ struct MainTabs {
   /** 面板立即显示，网页回复上下文在面板内加载，不再等待详情页恢复原帖。 */
   private replyToPost(): void {
     if (this.openingCompose || this.sheetOpen) { return; }
-    const postId: string = this.currentPath.split('/')[3];
+    const postId: string = this.currentPath.substring(this.currentPath.lastIndexOf('/') + 1);
     this.composeOwner = '';
     this.composeController = new web_webview.WebviewController();
     this.composeUrl = TWITTER_BASE + '/intent/tweet?in_reply_to=' + postId;
@@ -2603,6 +2660,8 @@ struct MainTabs {
         } catch (err) {
           hilog.error(DOMAIN, TAG, 'event=download_delegate_failed code=%{public}d', (err as BusinessError).code);
         }
+        this.incomingControllerReady = true;
+        this.onIncomingContentChanged();
       })
       .onWindowNew((event: OnWindowNewEvent) => {
         event.handler.setWebController(null);
@@ -2656,6 +2715,7 @@ struct MainTabs {
         }
       })
       .onPageBegin(() => {
+        this.incomingPageReady = false;
         this.hasError = false;
       })
       .onPageEnd((event) => {
@@ -2672,6 +2732,11 @@ struct MainTabs {
         if (event && event.url) {
           this.syncFromUrl(event.url);
           this.applyPageChrome(event.url);
+        }
+        this.incomingPageReady = true;
+        if (this.incomingContent.kind !== '') {
+          this.onIncomingContentChanged();
+          return;
         }
         if (this.rawWeb) { return; }
         this.schedulePageStateRead();
@@ -2697,6 +2762,10 @@ struct MainTabs {
         this.progress = 100;
         this.refreshing = false;
         this.finishFirstLoad();
+        if (this.incomingContent.kind !== '') {
+          this.incomingContent = { kind: '', value: '' };
+          this.toast($r('app.string.incoming_failed'));
+        }
       })
       .onRenderExited((event) => {
         hilog.error(DOMAIN, TAG, 'event=render_exit detail=%{public}s', JSON.stringify(event));
@@ -2783,7 +2852,8 @@ struct MainTabs {
 
       // Native compose entry point, like the stock app: on the four content
       // tabs (never on Profile), and only once a page is on screen.
-      if (this.showsNativeNavigation() && !isPostDetailUrl(this.currentUrl) && this.currentIndex !== 4 && !this.hasError && this.firstLoadDone) {
+      if (this.showsNativeNavigation() && !isPostDetailUrl(this.currentUrl) && !isSecondaryUrl(this.currentUrl) &&
+        this.currentIndex !== 4 && !this.hasError && this.firstLoadDone) {
         this.composeFab()
       }
     }
@@ -3015,7 +3085,7 @@ struct MainTabs {
         .accessibilityLevel('no-hide-descendants')
 
         Row() {
-          if (this.isWide && this.showsNativeNavigation() && !isPostDetailUrl(this.currentUrl)) { this.navBar() }
+          if (this.isWide && this.showsNativeNavigation() && !isPostDetailUrl(this.currentUrl) && !isSecondaryUrl(this.currentUrl)) { this.navBar() }
           HdsTabs({ barPosition: BarPosition.End, controller: this.tabsController }) {
             // 五个入口均路由到同一网页会话，内容节点常驻，避免页签切换重建 Web。
             TabContent() {
@@ -3031,8 +3101,8 @@ struct MainTabs {
           }
           .scrollable(false)
           .barOverlap(true)
-          .barHeight(this.showsNativeNavigation() && (!this.isWide || isPostDetailUrl(this.currentUrl)) ? FLOATING_BAR_HEIGHT : 0)
-          .barFloatingStyle(this.showsNativeNavigation() && (!this.isWide || isPostDetailUrl(this.currentUrl)) && this.floatingBar ? {
+          .barHeight(this.bottomChromeHeight() > 0 ? (this.floatingBar ? FLOATING_BAR_HEIGHT : BAR_HEIGHT) : 0)
+          .barFloatingStyle(this.bottomChromeHeight() > 0 && this.floatingBar ? {
             barWidth: { smallWidth: '100%', mediumWidth: 380, largeWidth: 380 },
             barSideMargin: 20,
             // 手势区已提供与图库相同的底边距离，不再叠加额外悬浮间距。

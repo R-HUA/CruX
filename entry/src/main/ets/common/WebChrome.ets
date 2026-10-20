@@ -1,3 +1,5 @@
+import { RESERVED_ROOTS, SECONDARY_PATH_PATTERN } from './WebConfig';
+
 // OpenTwit-Web runs the real x.com web app inside a native HarmonyOS shell.
 // 原生只替代已支持业务页面的导航和编辑入口，其余页面保留网页界面。
 //
@@ -6,12 +8,9 @@
 // CSS injected once per page. Tab roots lose X's own navigation rows; the
 // floating compose button is always dropped because the shell provides a native
 // one (only rendered while signed in).
-// HarmonyOS Sans for every text node the web page draws. The shell is a
-// HarmonyOS app, so X's own webfont (Chirp) is not used: the page inherits the
-// platform family. Emoji, CJK and symbol fallbacks still resolve through the
-// system stack behind HarmonyOS Sans.
+// 正文继承系统字体，代码块和图标保留网页自身的字体声明。
 const FONT_CSS: string =
-  "*{font-family:'HarmonyOS Sans','HarmonyOS Sans SC','HarmonyOS Sans TC'," +
+  "body{font-family:'HarmonyOS Sans','HarmonyOS Sans SC','HarmonyOS Sans TC'," +
   "'HarmonyOS Sans Naskh Arabic UI',sans-serif!important}";
 
 // 业务标识和入口地址不随网页语言改变；aria-label 会被 X 翻译。
@@ -130,17 +129,27 @@ const PULL_CLIP_SCRIPT: string = `(function(enabled){
   return clips.length;
 })`;
 
-/** 仅提前安装首页裁剪；DOM 变更微任务在首帧前处理，不等待页面加载完成。 */
+/** 文档创建时先去重导航；原生确认后交给完整脚本维护。 */
 export function chromeDocumentStartScript(enabled: boolean): string {
   if (!enabled) { return ''; }
   return '(function(){if(window!==window.top)return;' +
     'var update=function(){if(!document.head)return;' +
-    'var home=location.pathname.replace(/\\/$/,"").toLowerCase()==="/home";' +
+    'var p=location.pathname.replace(/\\/$/,"").toLowerCase()||"/";' +
+    'var reserved=' + JSON.stringify(RESERVED_ROOTS) + ';' +
+    'var secondary=new RegExp(' + JSON.stringify(SECONDARY_PATH_PATTERN) + ').test(p);' +
+    'var profile=/^\\/[a-z0-9_]{1,15}$/.test(p)&&!reserved[p]&&' +
+    '["/home","/explore","/search","/notifications","/messages"].indexOf(p)<0;' +
+    'var detail=/^\\/(?:[a-z0-9_]{1,15}|i\\/web)\\/status\\/\\d+$/.test(p);' +
+    'var nav=secondary||profile||detail||p==="/home"||/^\\/(explore|search|notifications|messages|i\\/chat)(\\/|$)/.test(p);' +
+    'var header=secondary||profile||detail||["/home","/notifications","/messages","/i/chat"].indexOf(p)>=0;' +
+    'var auth=document.querySelector(\'input[autocomplete="username"],input[autocomplete="current-password"],input[autocomplete="one-time-code"]\');' +
     'var css=document.getElementById("ot-initial-chrome");' +
     'if(!css){css=document.createElement("style");css.id="ot-initial-chrome";document.head.appendChild(css);}' +
-    'var rules=' + JSON.stringify(PULL_CLIP_CSS) + ';' +
+    'var rules=nav&&!auth?' + JSON.stringify(CHROME_CSS) + ':"";' +
+    'if(nav&&header&&!auth)rules+=' + JSON.stringify(HEADER_CSS) + ';' +
+    'if(p==="/home"&&!auth)rules+=' + JSON.stringify(HOME_TABS_CSS + PULL_CLIP_CSS) + ';' +
     'if(css.textContent!==rules)css.textContent=rules;' +
-    PULL_CLIP_SCRIPT + '(home);};' +
+    PULL_CLIP_SCRIPT + '(p==="/home"&&!auth);};' +
     'var observer=new MutationObserver(function(){if(window.__otObs){observer.disconnect();return;}update();});' +
     'observer.observe(document,{childList:true,subtree:true});update();' +
     'window.addEventListener("pagehide",function(){observer.disconnect();},{once:true});})();';
@@ -161,6 +170,7 @@ export function chromeScript(nativeNavigation: boolean, nativeHeader: boolean, u
     'var css=document.getElementById(\'ot-hidenav\');' +
     'if(!css){css=document.createElement(\'style\');css.id=\'ot-hidenav\';' +
     'document.head.appendChild(css);}' +
+    'var initial=document.getElementById("ot-initial-chrome");if(initial&&initial!==css)initial.remove();' +
     'window.__otApplyTop=function(){' +
     'var p=location.pathname.replace(/\\/$/,"")||"/";' +
     'var auth=document.querySelector(\'input[autocomplete="username"],input[autocomplete="current-password"],input[autocomplete="one-time-code"]\');' +

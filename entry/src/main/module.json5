@@ -41,6 +41,33 @@
             "actions": [
               "action.system.home"
             ]
+          },
+          {
+            "actions": ["ohos.want.action.sendData"],
+            "uris": [
+              { "scheme": "file", "utd": "general.hyperlink", "maxFileSupported": 1 },
+              { "scheme": "file", "utd": "general.plain-text", "maxFileSupported": 1 },
+              { "scheme": "file", "utd": "general.text", "maxFileSupported": 1 }
+            ]
+          },
+          {
+            "actions": ["ohos.want.action.viewData"],
+            "entities": ["entity.system.browsable"],
+            "uris": [
+              { "scheme": "twitter" },
+              { "scheme": "crux" }
+            ]
+          },
+          {
+            "actions": ["ohos.want.action.viewData"],
+            "entities": ["entity.system.browsable"],
+            "domainVerify": false,
+            "uris": [
+              { "scheme": "https", "host": "x.com" },
+              { "scheme": "https", "host": "twitter.com" },
+              { "scheme": "https", "host": "www.x.com" },
+              { "scheme": "https", "host": "www.twitter.com" }
+            ]
           }
         ]
       }

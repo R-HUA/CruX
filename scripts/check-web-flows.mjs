@@ -7,7 +7,8 @@ function load(name, exports) {
   const path = new URL('../entry/src/main/ets/common/' + name + '.ets', import.meta.url);
   const source = readFileSync(path, 'utf8').replace(/^import .*;\r?\n/gm, '');
   const js = stripTypeScriptTypes(source).replace(/^export /gm, '');
-  return vm.runInNewContext(js + ';({' + exports.join(',') + '})');
+  const context = name === 'WebChrome' ? load('WebConfig', ['RESERVED_ROOTS','SECONDARY_PATH_PATTERN']) : {};
+  return vm.runInNewContext(js + ';({' + exports.join(',') + '})', context);
 }
 const routes = load('WebConfig', ['routeIndexForUrl', 'profileHandleForUrl','usesNativeNavigation','usesNativeHeader','isTabRootPath','isPostDetailUrl']);
 for (const [path, expected] of [['/home',0],['/search?q=a',1],['/notifications',2],['/messages/42',3],['/i/chat',3],['/someone',4],['/i/flow/login',-1],['/settings',-1],['/someone/status/123',-1]]) {
@@ -16,26 +17,48 @@ for (const [path, expected] of [['/home',0],['/search?q=a',1],['/notifications',
 assert.equal(routes.routeIndexForUrl('https://example.com/home'), -1);
 assert.equal(routes.profileHandleForUrl('https://x.com/settings'), '');
 assert.equal(routes.profileHandleForUrl('https://x.com.evil.test/alice'), '');
-for(const path of ['/home','/search?q=中文','/notifications','/messages/42','/i/chat','/alice','/alice/status/123']){
+for(const path of ['/home','/search?q=中文','/notifications','/messages/42','/i/chat','/alice','/alice/status/123','/settings','/settings/profile','/i/bookmarks','/alice/lists']){
   assert.equal(routes.usesNativeNavigation('https://x.com'+path),true,path);
 }
-for(const path of ['/','/i/flow/login','/login','/settings','/settings/profile','/unknown/path']){
+for(const path of ['/','/i/flow/login','/login','/unknown/path']){
   assert.equal(routes.usesNativeNavigation('https://x.com'+path),false,path);
 }
 assert.equal(routes.usesNativeNavigation('https://example.com/home'),false);
 assert.equal(routes.isTabRootPath('/search'),true);
-for(const path of ['/explore','/search?q=中文','/i/flow/login','/alice']){
+for(const path of ['/explore','/search?q=中文','/i/flow/login']){
   assert.equal(routes.usesNativeHeader('https://x.com'+path),false,path);
 }
 assert.equal(routes.usesNativeHeader('https://x.com/home'),true);
+assert.equal(routes.usesNativeHeader('https://x.com/alice'),true);
+assert.equal(routes.usesNativeHeader('https://x.com/i/bookmarks'),true);
+assert.equal(routes.isTabRootPath('/settings/profile'),false);
 assert.equal(routes.usesNativeHeader('https://x.com/alice/status/123'),true);
 assert.equal(routes.isPostDetailUrl('https://x.com/alice/status/123?ref=home'),true);
+assert.equal(routes.isPostDetailUrl('https://x.com/i/web/status/123'),true);
 for (const url of ['https://x.com/alice/status/123/photo/1','https://x.com/alice/status/123/mediaViewer','https://example.com/alice/status/123']) {
   assert.equal(routes.isPostDetailUrl(url),false,url);
 }
 const scripts = load('WebChrome', ['fillComposerScript','CLICK_POST_BUTTON_SCRIPT','POST_RESULT_SCRIPT','chromeScript','chromeFlagScript','chromeInsetsScript','chromeDocumentStartScript','OWN_HANDLE_SCRIPT','profileBootstrapScript','clickRouteScript','accountAvatarScript','accountAvatarDiagScript']);
 assert.equal(scripts.chromeDocumentStartScript(false),'');
 new vm.Script(scripts.chromeDocumentStartScript(true));
+// 文档开始阶段与原生路由一致；登录表单出现时不得隐藏其导航。
+for (const path of ['/home','/explore','/search','/notifications','/messages','/messages/42',
+  '/i/chat','/alice','/alice/status/123','/settings','/settings/profile','/i/bookmarks',
+  '/alice/lists','/i/web/status/123','/i/flow/login','/grok','/unknown/path','/home/unknown','/invalid-handle','/']) {
+  const style = {textContent:''};
+  let auth = false;
+  let update;
+  const context = {
+    window:{addEventListener(){}}, location:{pathname:path},
+    document:{head:{},getElementById:()=>style,querySelector:()=>auth?{}:null,querySelectorAll:()=>[]},
+    MutationObserver:class {constructor(callback){update=callback;}observe(){}disconnect(){}}
+  };
+  context.window.top=context.window;
+  vm.runInNewContext(scripts.chromeDocumentStartScript(true),context);
+  assert.equal(style.textContent.includes('FloatingActionButtons'),routes.usesNativeNavigation('https://x.com'+path),path);
+  assert.equal(style.textContent.includes('TopNavBar'),routes.usesNativeHeader('https://x.com'+path),path);
+  auth=true;update();assert.equal(style.textContent,'',path);
+}
 // 回复直接使用当前详情的帖子编号，原帖是否被虚拟列表回收不影响面板显示。
 const mainSource=readFileSync(new URL('../entry/src/main/ets/pages/MainTabs.ets',import.meta.url),'utf8');
 const insetBody=mainSource.match(/private overlayTopInset\(\): number \{([\s\S]*?)\n  \}/)[1];

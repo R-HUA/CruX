@@ -5,6 +5,8 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 import { display, window } from '@kit.ArkUI';
 import web_webview from '@ohos.web.webview';
 import { NetworkConfig } from '../common/NetworkConfig';
+import { systemShare } from '@kit.ShareKit';
+import { IncomingContent, incomingLink, incomingShare } from '../common/IncomingContent';
 
 const DOMAIN = 0x0000;
 // Same store the page uses for the account handle, avatar and composer draft.
@@ -14,6 +16,8 @@ const WINDOW_SIZED_KEY: string = 'pc_window_sized';
 const DESKTOP_MIN_WIDTH_VP: number = 1000;
 
 export default class EntryAbility extends UIAbility {
+  private receivingContent: boolean = false;
+
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onCreate');
     this.enableWebDevToolsForDebugBuilds();
@@ -21,6 +25,41 @@ export default class EntryAbility extends UIAbility {
     // exists. Initialize it here so DoH applies before the first page load.
     this.initializeWebEngine();
     NetworkConfig.getInstance().initialize(this.context);
+    this.handleIncomingWant(want);
+  }
+
+  onNewWant(want: Want, launchParam: AbilityConstant.LaunchParam): void {
+    this.handleIncomingWant(want);
+  }
+
+  /** 冷启动与再次唤起共用入口，页面就绪前保留内容，避免异步分享覆盖前一次请求。 */
+  private async handleIncomingWant(want: Want): Promise<void> {
+    if (want.action !== 'ohos.want.action.sendData' && want.uri === undefined) { return; }
+    const pending = AppStorage.get<IncomingContent>('incomingContent');
+    if (this.receivingContent || (pending !== undefined && pending.kind !== '')) {
+      hilog.warn(DOMAIN, 'IncomingContent', 'event=incoming_rejected reason=busy');
+      AppStorage.setOrCreate('incomingError', (AppStorage.get<number>('incomingError') || 0) + 1);
+      return;
+    }
+    this.receivingContent = true;
+    try {
+      let content: IncomingContent;
+      if (want.action === 'ohos.want.action.sendData') {
+        const data = await systemShare.getSharedData(want);
+        content = incomingShare(data.getRecords());
+      } else {
+        if (want.uri === undefined || want.uri.trim() === '') { throw new Error('missing_link'); }
+        content = incomingLink(want.uri);
+      }
+      AppStorage.setOrCreate('incomingContent', content);
+      hilog.info(DOMAIN, 'IncomingContent', 'event=incoming_received kind=%{public}s', content.kind);
+    } catch (err) {
+      const error = err as BusinessError;
+      hilog.error(DOMAIN, 'IncomingContent', 'event=incoming_failed code=%{public}d', error.code);
+      AppStorage.setOrCreate('incomingError', (AppStorage.get<number>('incomingError') || 0) + 1);
+    } finally {
+      this.receivingContent = false;
+    }
   }
 
   private initializeWebEngine(): void {
