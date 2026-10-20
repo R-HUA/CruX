@@ -92,7 +92,8 @@ let existingDraft='',uncertain=false,dialog,saved=[];
 const compose=vm.runInNewContext(stripTypeScriptTypes('(async function(sharedText){'+composeBody+'})'),{
   $r:key=>key,hilog:{error(){}},DOMAIN:0,TAG:'test',TWITTER_COMPOSE:'https://x.com/compose/post',
   PREFS_NAME:'test',COMPOSE_DRAFT_KEY:'draft',web_webview:{WebviewController:class{}},
-  preferences:{getPreferences:async()=>({get:async key=>key.startsWith('post_pending:')?uncertain:existingDraft})}
+  preferences:{getPreferences:async()=>({get:async key=>key.startsWith('post_pending:')?uncertain:
+    key.startsWith('compose_handoff:')?'':existingDraft})}
 });
 const composerState=()=>({openingCompose:false,sheetOpen:false,legacyDraft:'',confirmCurrentAccount:async()=>'alice',
   getUIContext:()=>({getHostContext:()=>({}),showAlertDialog:value=>{dialog=value;}}),

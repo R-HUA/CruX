@@ -13,7 +13,7 @@ import { NetworkConfig, NetworkSnapshot } from '../common/NetworkConfig';
 import { preferences } from '@kit.ArkData';
 import { isSiteUrl, isAuthUrl, mediaAcceptTypes, chooseMedia, installDownloads, sharePage, removeExpiredDownloads } from '../common/WebSystem';
 import { abilityAccessCtrl, common, PermissionRequestResult, Permissions } from '@kit.AbilityKit';
-import { BusinessError, deviceInfo } from '@kit.BasicServicesKit';
+import { BusinessError, deviceInfo, pasteboard } from '@kit.BasicServicesKit';
 import { notificationManager } from '@kit.NotificationKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { ColorMetrics, FrameCallback, LengthMetrics, SymbolGlyphModifier, window } from '@kit.ArkUI';
@@ -258,6 +258,7 @@ struct MainTabs {
   private webImages: WebImageDownloads | undefined = undefined;
   private composeDownloadDelegate: web_webview.WebDownloadDelegate | undefined = undefined;
   @State postUncertain: boolean = false;
+  private composeHandoff: boolean = false;
   @State composeMessage: ResourceStr = '';
   private composeOwner: string = '';
   private legacyDraft: string = '';
@@ -885,9 +886,7 @@ struct MainTabs {
       const result: string = MainTabs.unquote(await this.controller.runJavaScript(clickRouteScript(url)));
       if (result === 'clicked') { this.hasError = false; return; }
     } catch (err) {
-      hilog.error(DOMAIN, TAG, 'event=page_navigation_failed error=%{public}s', JSON.stringify(err));
-      this.toast($r('app.string.operation_failed'));
-      return;
+      hilog.warn(DOMAIN, TAG, 'event=page_route_script_failed error=%{public}s', JSON.stringify(err));
     }
     this.hasError = false;
     this.progress = 0;
@@ -899,7 +898,9 @@ struct MainTabs {
     try {
       this.controller.loadUrl(url);
     } catch (err) {
+      this.hasError = true;
       hilog.error(DOMAIN, TAG, 'loadUrl failed: %{public}s', JSON.stringify(err));
+      this.toast($r('app.string.operation_failed'));
     }
   }
 
@@ -1946,6 +1947,7 @@ struct MainTabs {
     this.composeOwner = '';
     this.draft = sharedText;
     this.postUncertain = false;
+    this.composeHandoff = false;
     this.composeMessage = '';
     this.composeController = new web_webview.WebviewController();
     this.composeUrl = TWITTER_COMPOSE;
@@ -1966,12 +1968,15 @@ struct MainTabs {
       const prefs = await preferences.getPreferences(ctx, PREFS_NAME);
       const draft = await prefs.get(COMPOSE_DRAFT_KEY + ':' + owner, '') as string;
       const uncertain = await prefs.get('post_pending:' + owner, false) as boolean;
+      const handoff = await prefs.get('compose_handoff:' + owner, '') as string;
       if (!this.sheetOpen) { return; }
       this.composeOwner = owner;
       this.acceptHandle(handle, false);
       this.draft = draft;
-      this.postUncertain = uncertain;
-      this.composeMessage = this.postUncertain ? $r('app.string.post_unknown') : '';
+      this.composeHandoff = handoff !== '';
+      this.postUncertain = uncertain || this.composeHandoff;
+      this.composeMessage = this.composeHandoff ? $r('app.string.compose_handoff') :
+        this.postUncertain ? $r('app.string.post_unknown') : '';
       if (sharedText !== '') {
         if (this.postUncertain) {
           this.toast($r('app.string.incoming_busy'));
@@ -2240,6 +2245,17 @@ struct MainTabs {
   }
 
   private async resolveUnknownPost(): Promise<void> {
+    if (this.composeHandoff) {
+      this.getUIContext().showAlertDialog({
+        title: $r('app.string.compose_handoff_title'), message: $r('app.string.compose_handoff_message'),
+        buttons: [
+          { value: $r('app.string.compose_cancel'), action: () => {} },
+          { value: $r('app.string.post_checked'), action: () => { this.clearPendingPost(); } },
+          { value: $r('app.string.compose_handoff_clear'), action: () => { this.clearHandoffDraft(); } }
+        ]
+      });
+      return;
+    }
     this.getUIContext().showAlertDialog({
       title: $r('app.string.post_unknown_title'),
       message: $r('app.string.post_check_message'),
@@ -2251,33 +2267,63 @@ struct MainTabs {
   private async clearPendingPost(): Promise<void> {
     try {
       await this.putPreference('post_pending:' + this.composeOwner, false);
+      await this.putPreference('compose_handoff:' + this.composeOwner, '');
+      this.composeHandoff = false;
       this.postUncertain = false;
       this.composeMessage = '';
       this.composeController.loadUrl(TWITTER_COMPOSE);
     } catch (err) { this.toast($r('app.string.operation_failed')); }
   }
 
+  /** 只有用户确认发布或放弃后删除移交快照，先删正文再解除发布限制。 */
+  private async clearHandoffDraft(): Promise<void> {
+    try {
+      await this.draftWrite;
+      await this.putPreference(COMPOSE_DRAFT_KEY + ':' + this.composeOwner, '');
+      await this.putPreference('post_pending:' + this.composeOwner, false);
+      await this.putPreference('compose_handoff:' + this.composeOwner, '');
+      this.draft = '';
+      this.composeHandoff = false;
+      this.postUncertain = false;
+      this.composeMessage = '';
+      this.composeController.loadUrl(TWITTER_COMPOSE);
+    } catch (error) { this.toast($r('app.string.draft_save_failed')); }
+  }
+
+  private async copyComposeDraft(): Promise<void> {
+    try {
+      await pasteboard.getSystemPasteboard().setData(pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, this.draft));
+      this.toast($r('app.string.media_copied'));
+    } catch (error) {
+      hilog.error(DOMAIN, TAG, 'event=draft_copy_failed error=%{public}s', JSON.stringify(error));
+      this.toast($r('app.string.operation_failed'));
+    }
+  }
+
   private async openWebComposer(): Promise<void> {
     if (this.posting || this.postUncertain) { return; }
     this.posting = true;
+    this.clearComposeSync();
+    if (this.draftSaveTimer !== -1) { clearTimeout(this.draftSaveTimer); this.draftSaveTimer = -1; }
     try {
       await this.persistDraft();
-      if (this.draft !== '') {
+      if (this.draft !== '' && this.composeOwner !== '') {
+        // 账号键关联正文，移交标识区分同一账号后续新建的草稿；恢复时必须由用户确认。
+        await this.putPreference('compose_handoff:' + this.composeOwner, Date.now().toString() + '-' + this.composeRevision);
+        this.composeHandoff = true;
+        this.postUncertain = true;
+        const account = await this.confirmCurrentAccount();
+        if (account.toLowerCase() !== this.composeOwner) { throw new Error('Compose account unconfirmed'); }
         const result = MainTabs.unquote(await this.composeController.runJavaScript(fillComposerScript(this.draft)));
-        if (result !== 'ok') { this.composeMessage = $r('app.string.compose_fill_failed'); return; }
+        if (result !== 'ok') { throw new Error('Compose text transfer failed'); }
       }
-      // 移交成功后只有网页拥有当前编辑内容，避免网页发布后再次恢复旧稿。
-      if (this.draftSaveTimer !== -1) { clearTimeout(this.draftSaveTimer); this.draftSaveTimer = -1; }
-      await this.draftWrite;
-      await this.putPreference(COMPOSE_DRAFT_KEY + ':' + this.composeOwner, '');
-      this.draft = '';
-      this.clearComposeSync();
-      this.webComposer = true;
     } catch (err) {
-      this.composeMessage = $r('app.string.operation_failed');
+      hilog.warn(DOMAIN, TAG, 'event=compose_handoff_failed error=%{public}s', JSON.stringify(err));
+      this.toast($r('app.string.compose_manual_transfer'));
     } finally {
+      // 自动填充失败仍允许用户进入真实网页；恢复副本不因显示网页而删除。
+      this.webComposer = true;
       this.posting = false;
-      if (!this.webComposer) { this.scheduleComposeSync(); }
     }
   }
 
@@ -3011,6 +3057,15 @@ struct MainTabs {
   @Builder
   composeSheet() {
     Column({ space: 0 }) {
+    if (this.webComposer) {
+      Row() {
+        Button($r('app.string.close_editor')).onClick(() => { this.closeCompose(); })
+        Blank()
+        if (this.draft !== '') {
+          Button($r('app.string.compose_copy_draft')).onClick(() => { this.copyComposeDraft(); })
+        }
+      }.width('100%').padding(S8)
+    }
     Stack({ alignContent: Alignment.TopStart }) {
       // x.com's own composer, kept invisible under the native panel. It exists
       // only so the native Post button submits through the real web session;

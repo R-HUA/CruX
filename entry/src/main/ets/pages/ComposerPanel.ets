@@ -42,7 +42,7 @@ export struct ComposerPanel {
         Blank()
         Button($r('app.string.compose_more'))
           .buttonStyle(ButtonStyleMode.TEXTUAL).fontFamily(FONT_FAMILY)
-          .enabled(!this.posting && !this.uncertain && !this.preparing && !this.loading && this.hasOwner)
+          .enabled(!this.posting && !this.uncertain && !this.preparing)
           .onClick(this.onMore)
       }
       .width('100%').padding({ left: S16, right: S8, top: S4, bottom: S4 })
