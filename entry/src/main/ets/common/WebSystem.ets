@@ -4,6 +4,7 @@ import { photoAccessHelper } from '@kit.MediaLibraryKit';
 import { systemShare } from '@kit.ShareKit';
 import webview from '@ohos.web.webview';
 import { hilog } from '@kit.PerformanceAnalysisKit';
+import { WebImageDownloads } from './WebImageDownloads';
 
 /** 只将站内业务留在当前页面，普通外链交给浏览器。 */
 export function isSiteUrl(value: string): boolean {
@@ -61,10 +62,11 @@ export async function sharePage(context: common.UIAbilityContext, link: string):
 
 /** 下载由 ArkWeb 保留会话，完成后由用户选择保存位置。 */
 export function installDownloads(controller: webview.WebviewController, context: common.UIAbilityContext,
-  report: (result: string) => void): webview.WebDownloadDelegate {
+  report: (result: string) => void, images?: WebImageDownloads): webview.WebDownloadDelegate {
   const delegate = new webview.WebDownloadDelegate();
   let sequence: number = 0;
   delegate.onBeforeDownload((item: webview.WebDownloadItem) => {
+    if (images && images.beforeDownload(item)) { return; }
     try {
       item.start(context.cacheDir + '/web-download-' + Date.now() + '-' + (++sequence));
     } catch (err) {
@@ -72,11 +74,16 @@ export function installDownloads(controller: webview.WebviewController, context:
       report('failed');
     }
   });
+  delegate.onDownloadUpdated((item: webview.WebDownloadItem) => {
+    if (images) { images.downloadUpdated(item); }
+  });
   delegate.onDownloadFailed((item: webview.WebDownloadItem) => {
+    if (images && images.downloadFailed(item)) { return; }
     hilog.error(0x0A11, 'OpenTwit', 'event=download_failed code=%{public}d', item.getLastErrorCode());
     report('failed');
   });
   delegate.onDownloadFinish(async (item: webview.WebDownloadItem) => {
+    if (images && images.downloadFinish(item)) { return; }
     const path: string = item.getFullPath();
     let result: string = 'cancelled';
     try {

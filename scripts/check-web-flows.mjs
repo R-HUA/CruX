@@ -33,9 +33,21 @@ assert.equal(routes.isPostDetailUrl('https://x.com/alice/status/123?ref=home'),t
 for (const url of ['https://x.com/alice/status/123/photo/1','https://x.com/alice/status/123/mediaViewer','https://example.com/alice/status/123']) {
   assert.equal(routes.isPostDetailUrl(url),false,url);
 }
-const scripts = load('WebChrome', ['fillComposerScript','CLICK_POST_BUTTON_SCRIPT','POST_RESULT_SCRIPT','chromeScript','chromeFlagScript','chromeInsetsScript','OWN_HANDLE_SCRIPT','profileBootstrapScript','clickRouteScript']);
+const scripts = load('WebChrome', ['fillComposerScript','CLICK_POST_BUTTON_SCRIPT','POST_RESULT_SCRIPT','chromeScript','chromeFlagScript','chromeInsetsScript','chromeDocumentStartScript','OWN_HANDLE_SCRIPT','profileBootstrapScript','clickRouteScript','accountAvatarScript','accountAvatarDiagScript']);
+assert.equal(scripts.chromeDocumentStartScript(false),'');
+new vm.Script(scripts.chromeDocumentStartScript(true));
 // 回复直接使用当前详情的帖子编号，原帖是否被虚拟列表回收不影响面板显示。
 const mainSource=readFileSync(new URL('../entry/src/main/ets/pages/MainTabs.ets',import.meta.url),'utf8');
+const insetBody=mainSource.match(/private overlayTopInset\(\): number \{([\s\S]*?)\n  \}/)[1];
+const topInset=vm.runInNewContext(stripTypeScriptTypes('(function(){'+insetBody+'})'),{
+  HEADER_HEIGHT:56,HEADER_CONTENT_LIFT:4
+});
+const insetState={topInset:39,homeTabsHeight:28,overlaysWeb:()=>true,topChromeHeight:()=>56,isHomeRoot:()=>true};
+assert.equal(topInset.call(insetState),77,'Home inset ends at the measured underline, not the full title bar');
+insetState.homeTabsHeight=40;assert.equal(topInset.call(insetState),83,'Large text changes the measured boundary');
+insetState.isHomeRoot=()=>false;assert.equal(topInset.call(insetState),95);
+insetState.topChromeHeight=()=>0;assert.equal(topInset.call(insetState),0);
+insetState.overlaysWeb=()=>false;assert.equal(topInset.call(insetState),0);
 const replyMethod=mainSource.match(/private replyToPost\(\): void \{([\s\S]*?)\n  \}/)[1];
 const reply=vm.runInNewContext(stripTypeScriptTypes('(function(){'+replyMethod+'})'),{
   TWITTER_BASE:'https://x.com',web_webview:{WebviewController:class{}}
@@ -102,12 +114,13 @@ assert.equal(routeClicks,1);
 let cssWrites=0, cssText='', authVisible=false;
 const style={get textContent(){return cssText;},set textContent(value){cssText=value;cssWrites++;}};
 const location={pathname:'/home',href:'https://x.com/home'};
-const chromeContext={window:{location,addEventListener(){},otNative:{onUrlChange(){}}},location,
+let chromeNotifications=0,observedOptions;
+const chromeContext={window:{location,addEventListener(){},otNative:{onUrlChange(){chromeNotifications++;}}},location,
   history:{pushState(){},replaceState(){}},
   document:{documentElement:{},getElementById:()=>style,
     querySelector:()=>authVisible?{}:null,
     querySelectorAll:()=>[]},
-  MutationObserver:class{observe(){}disconnect(){}},setTimeout(){},clearTimeout(){}};
+  MutationObserver:class{observe(_root,options){observedOptions=options;}disconnect(){}},setTimeout(){},clearTimeout(){}};
 vm.runInNewContext(scripts.chromeScript(true,true,location.href),chromeContext);
 assert.match(cssText,/TopNavBar/);assert.match(cssText,/FloatingActionButtons_Tweet_Button/);
 const initialWrites=cssWrites;
@@ -124,6 +137,11 @@ assert.doesNotMatch(cssText,/display:none/);
 vm.runInNewContext(scripts.chromeFlagScript(true,false,location.href),chromeContext);
 assert.doesNotMatch(cssText,/TopNavBar|role='banner'/);
 assert.match(cssText,/FloatingActionButtons_Tweet_Button/);
+// 新页已确认后，迟到的旧页回调不能覆盖已确认的导航和标题状态。
+vm.runInNewContext(scripts.chromeScript(true,true,'https://x.com/home'),chromeContext);
+vm.runInNewContext(scripts.chromeFlagScript(true,true,'https://x.com/home'),chromeContext);
+assert.match(cssText,/FloatingActionButtons_Tweet_Button/);
+assert.doesNotMatch(cssText,/TopNavBar|role='banner'/);
 // 搜索页必须保留网页输入框及候选列表，仍只去重底部导航和发帖入口。
 authVisible=false;location.pathname='/search';location.href='https://x.com/search?q=中文';
 vm.runInNewContext(scripts.chromeScript(true,false,location.href),chromeContext);
@@ -153,6 +171,20 @@ vm.runInNewContext(scripts.chromeInsetsScript(48,70,400),chromeContext);
 assert.ok(Math.abs(parseFloat(insets.get('--ot-top-inset'))-117.6)<0.001);
 assert.equal(parseFloat(insets.get('--ot-bottom-inset')),171.5);
 assert.match(cssText,/main\[role="main"\]/);
+// URL 编码、追踪参数、hash、站点别名及尾斜杠不应释放同一路径的去重与裁剪规则。
+for(const url of ['https://x.com/home?lang=zh#timeline','https://x.com/home/',
+  'https://www.twitter.com/home?ref=app']) {
+  vm.runInNewContext(scripts.chromeFlagScript(true,true,url),chromeContext);
+  assert.match(cssText,/BottomBar/);
+  assert.match(cssText,/data-ot-pull-clip/);
+  assert.match(cssText,/overflow:clip/);
+}
+location.pathname='/search';location.href='https://x.com/search?q=%E4%B8%AD%E6%96%87';
+vm.runInNewContext(scripts.chromeScript(true,false,'https://x.com/search?q=中文'),chromeContext);
+assert.match(cssText,/BottomBar/);
+assert.doesNotMatch(cssText,/TopNavBar/);
+location.pathname='/home';location.href='https://x.com/home';
+vm.runInNewContext(scripts.chromeScript(true,true,location.href),chromeContext);
 chromeContext.window.innerWidth=400;chromeContext.window.__otUpdateInsets();
 assert.equal(insets.get('--ot-top-inset'),'48px');
 vm.runInNewContext(scripts.chromeInsetsScript(0,0,400),chromeContext);
@@ -161,6 +193,190 @@ vm.runInNewContext(scripts.chromeInsetsScript(48,70,400),chromeContext);
 authVisible=true;chromeContext.window.__otApplyTop();assert.equal(cssText,'');
 authVisible=false;location.pathname='/unknown/path';location.href='https://x.com/unknown/path';
 chromeContext.history.pushState();assert.doesNotMatch(cssText,/--ot-top-inset|--ot-bottom-inset/);
+
+// 头像只能来自账号控件或确认本人的资料头像，不读取大尺寸的时间线或他人头像。
+const ownAvatar='https://pbs.twimg.com/profile_images/123/own_normal.jpg';
+const otherAvatar='https://pbs.twimg.com/profile_images/456/other.jpg';
+const image=src=>({currentSrc:src,getAttribute:()=>src,matches:()=>true});
+const avatarRoot=src=>({querySelectorAll:()=>[image(src)],matches:()=>false,closest:()=>null});
+const avatarContext={location:{pathname:'/home'},document:{querySelectorAll:selector=>
+  selector.startsWith('[data-testid="DashButton_ProfileIcon_Link"]')?[avatarRoot(ownAvatar)]:[]}};
+assert.equal(vm.runInNewContext(scripts.accountAvatarScript(''),avatarContext),ownAvatar);
+for(const [kind,node] of [
+  ['background',{style:{backgroundImage:'url("'+ownAvatar+'")'},getAttribute:()=>''}],
+  ['svg-image',{getAttribute:name=>name==='href'?ownAvatar:''}]
+]){
+  avatarContext.document.querySelectorAll=selector=>selector.startsWith('[data-testid="DashButton_ProfileIcon_Link"]')?
+    [{...avatarRoot(''),querySelectorAll:()=>[node]}]:[];
+  assert.equal(vm.runInNewContext(scripts.accountAvatarScript(''),avatarContext),ownAvatar,kind);
+}
+avatarContext.document.querySelectorAll=()=>[];
+assert.equal(vm.runInNewContext(scripts.accountAvatarScript('alice'),avatarContext),'');
+
+// 首屏 DOM 与图片 src 延后就绪时通知原生重新读取；相同头像不会触发回调循环。
+const beforeAvatar=chromeNotifications;
+chromeContext.document.querySelectorAll=selector=>selector.startsWith('[data-testid="DashButton_ProfileIcon_Link"]')?[avatarRoot(ownAvatar)]:[];
+chromeContext.window.__otPass();assert.equal(chromeNotifications,beforeAvatar+1);
+chromeContext.window.__otPass();assert.equal(chromeNotifications,beforeAvatar+1);
+chromeContext.document.querySelectorAll=()=>[];
+assert.equal(observedOptions.attributes,true);
+assert.deepEqual(Array.from(observedOptions.attributeFilter),['src','srcset','style','href']);
+avatarContext.location.pathname='/alice';
+avatarContext.document.querySelectorAll=selector=>selector==='a[href]'?
+  [{getAttribute:()=>'/alice/photo',...avatarRoot(ownAvatar)},
+    {getAttribute:()=>'/bob/photo',...avatarRoot(otherAvatar)}]:[];
+assert.equal(vm.runInNewContext(scripts.accountAvatarScript('Alice'),avatarContext),ownAvatar);
+avatarContext.location.pathname='/bob';
+assert.equal(vm.runInNewContext(scripts.accountAvatarScript('alice'),avatarContext),'');
+
+// 根节点图片、大小写账号匹配，以及顶栏候选均受内容区域排除规则约束。
+avatarContext.location.pathname='/home';
+const rootImage={...image(ownAvatar),querySelectorAll:()=>[],closest:()=>null};
+avatarContext.document.querySelectorAll=selector=>selector.startsWith('[data-testid="DashButton_ProfileIcon_Link"]')?[rootImage]:[];
+assert.equal(vm.runInNewContext(scripts.accountAvatarScript(''),avatarContext),ownAvatar);
+const candidate={...avatarRoot(ownAvatar),getAttribute:name=>name==='data-testid'?'UserAvatar-Container-ALIce':'',
+  closest:selector=>selector.startsWith('header')?{}:null};
+avatarContext.document.querySelectorAll=selector=>selector.includes('UserAvatar-Container-')?[candidate]:[];
+assert.equal(vm.runInNewContext(scripts.accountAvatarScript('alice'),avatarContext),ownAvatar);
+assert.equal(vm.runInNewContext(scripts.accountAvatarScript(''),avatarContext),ownAvatar);
+candidate.closest=()=>null;
+assert.equal(vm.runInNewContext(scripts.accountAvatarScript(''),avatarContext),'','Unknown account outside header is ignored');
+candidate.closest=selector=>selector.startsWith('article')?{}:null;
+assert.equal(vm.runInNewContext(scripts.accountAvatarScript('alice'),avatarContext),'','Known account in timeline is ignored');
+avatarContext.document.querySelectorAll=()=>[{...avatarRoot(otherAvatar),closest:()=>({})}];
+assert.equal(vm.runInNewContext(scripts.accountAvatarScript(''),avatarContext),'','Controls in timeline are ignored');
+const diagnosticImage={...image(ownAvatar),tagName:'IMG',parentElement:{tagName:'DIV',getAttribute:()=> 'UserAvatar-Container-private_user'}};
+const diagnosticRoot={...avatarRoot(''),tagName:'BUTTON',querySelectorAll:selector=>selector.startsWith('img')?[diagnosticImage]:[]};
+const diagnostic=vm.runInNewContext(scripts.accountAvatarDiagScript(),{
+  document:{querySelectorAll:()=>[diagnosticRoot]},getComputedStyle:()=>({display:'none',visibility:'visible'})});
+assert.match(diagnostic,/pbs.twimg.com/);assert.match(diagnostic,/UserAvatar-Container-\*/);
+assert.ok(!diagnostic.includes('private_user'));assert.ok(!diagnostic.includes(ownAvatar));
+
+// 执行生产方法，方向抖动、网页偏移调整和惯性结束均不能重复触发动画。
+const scrollMethods=['handleWebTouch','handleWebScroll','resetChromeScroll','setBarsCollapsed','onBarsCollapsedChanged'].map(name=>
+  mainSource.match(new RegExp('^  private '+name+'\\([\\s\\S]*?^  \\}', 'm'))[0]).join('\n');
+const TouchType={Down:0,Up:1,Move:2,Cancel:3};
+let scrollTime=1000;
+const animations=[];
+const ScrollPage=vm.runInNewContext(stripTypeScriptTypes('class ScrollPage{'+scrollMethods+'};ScrollPage'),{
+  TouchType,isPostDetailUrl:routes.isPostDetailUrl,Date:{now:()=>scrollTime},HdsAnimationMode:{SCROLL_ANIMATION:0}});
+const scroll=new ScrollPage();
+Object.assign(scroll,{overlaysWeb:()=>true,syncHeaderBlur(){},resetHeaderBlur(){},autoHideBar:true,isWide:false,
+  currentUrl:'https://x.com/home',tabsController:{applyHideAnimation:()=>animations.push('hide'),
+    applyShowAnimation:()=>animations.push('show')}});
+let collapsed=false;
+Object.defineProperty(scroll,'barsCollapsed',{get:()=>collapsed,set(value){collapsed=value;scroll.onBarsCollapsedChanged();}});
+const touch=(type,y=0,x=0)=>scroll.handleWebTouch({type,touches:type===TouchType.Up||type===TouchType.Cancel?[]:[{x,y}]});
+const sample=(y,gap=16)=>{scrollTime+=gap;scroll.handleWebScroll(y);};
+const start=(hidden=true)=>{scroll.resetChromeScroll();scroll.lastScrollY=500;scroll.setBarsCollapsed(hidden);animations.length=0;};
+const startCollapsed=()=>start();
+startCollapsed();
+for(let i=0;i<8;i++){touch(TouchType.Down);touch(TouchType.Move,8);sample(scroll.lastScrollY-8);touch(TouchType.Up);}
+assert.equal(scroll.barsCollapsed,true,'Separate short gestures cannot accumulate');
+touch(TouchType.Down);touch(TouchType.Move,54);sample(scroll.lastScrollY-54);
+assert.equal(scroll.barsCollapsed,true);touch(TouchType.Move,56);sample(scroll.lastScrollY-2);
+assert.equal(scroll.barsCollapsed,false,'56 vp within one downward gesture expands');
+assert.deepEqual(animations,['show']);
+startCollapsed();touch(TouchType.Down);touch(TouchType.Move,7);sample(490);
+assert.equal(scroll.webTouchDirection,0,'Initial intent requires 8 vp');
+touch(TouchType.Move,8);sample(489);
+for(let i=1;i<=55;i++){touch(TouchType.Move,i+8);sample(489-i);}
+assert.equal(scroll.barsCollapsed,false,'Slow one-vp samples must preserve deliberate scrolling distance');
+assert.deepEqual(animations,['show']);
+
+startCollapsed();touch(TouchType.Down);touch(TouchType.Move,60);sample(440);
+touch(TouchType.Move,100);sample(486);
+assert.equal(scroll.barsCollapsed,false,'A content offset increase cannot hide while the finger still drags downward');
+touch(TouchType.Move,98);sample(484);
+assert.equal(scroll.webTouchDirection,1,'A 2 vp jitter must not reverse intent');
+touch(TouchType.Move,101);sample(420);
+touch(TouchType.Move,94);sample(470);
+assert.equal(scroll.webTouchDirection,1,'Reversal requires 8 vp measured from the latest finger extremum');
+assert.deepEqual(animations,['show'],'Continued downward browsing sends no extra animation commands');
+touch(TouchType.Move,93);sample(514);
+assert.equal(scroll.webTouchDirection,-1);assert.equal(scroll.barsCollapsed,false,'44 vp alone does not exceed the collapse threshold');
+sample(515);sample(600);
+assert.deepEqual(animations,['show','hide'],'A deliberate reversal collapses once');
+touch(TouchType.Move,101);sample(544);sample(500);
+assert.deepEqual(animations,['show','hide','show'],'A second deliberate reversal expands once');
+
+startCollapsed();touch(TouchType.Down);touch(TouchType.Move,30);sample(470);
+touch(TouchType.Move,28);sample(480);touch(TouchType.Move,60);sample(454);
+assert.equal(scroll.barsCollapsed,false,'Opposite page adjustment and finger jitter do not discard valid expansion distance');
+startCollapsed();touch(TouchType.Down);touch(TouchType.Move,20);sample(480);touch(TouchType.Up);sample(400);
+assert.equal(scroll.barsCollapsed,true,'Reverse inertia cannot expand');
+startCollapsed();touch(TouchType.Down);touch(TouchType.Up);sample(400);
+assert.equal(scroll.barsCollapsed,true,'A tap cannot enable programmatic scroll');
+startCollapsed();touch(TouchType.Down);touch(TouchType.Move,5,80);sample(400);
+assert.equal(scroll.barsCollapsed,true,'Horizontal movement cannot expand');
+startCollapsed();touch(TouchType.Down);touch(TouchType.Move,-10);sample(400);
+assert.equal(scroll.barsCollapsed,true,'Upward finger movement cannot expand');
+touch(TouchType.Cancel);sample(300);assert.equal(scroll.barsCollapsed,true);
+start(false);touch(TouchType.Down);touch(TouchType.Move,-20);sample(520);touch(TouchType.Up);
+sample(545,200);sample(600);
+assert.equal(scroll.barsCollapsed,true,'Upward drag inertia may finish collapsing, including a 200 ms interval');
+assert.deepEqual(animations,['hide']);
+for(const stop of ['idle','reverse','newTouch','cancel','multitouch','releaseAfterIdle']){
+  start(false);touch(TouchType.Down);touch(TouchType.Move,-20);sample(520);
+  if(stop==='releaseAfterIdle')scrollTime+=201;
+  touch(TouchType.Up);
+  if(stop==='idle')sample(521,201);
+  if(stop==='reverse')sample(519);
+  if(stop==='newTouch')touch(TouchType.Down);
+  if(stop==='cancel')touch(TouchType.Cancel);
+  if(stop==='multitouch')scroll.handleWebTouch({type:TouchType.Move,touches:[{x:0,y:0},{x:10,y:10}]});
+  sample(600);
+  assert.equal(scroll.barsCollapsed,false,'Inertia qualification ends: '+stop);
+  assert.deepEqual(animations,[],stop);
+}
+startCollapsed();touch(TouchType.Down);touch(TouchType.Move,30);sample(470,300);
+touch(TouchType.Move,60);sample(440,300);
+assert.equal(scroll.barsCollapsed,false,'A slow active drag does not expire like inertia');
+startCollapsed();sample(47);sample(46);
+assert.equal(scroll.barsCollapsed,false,'Top region always shows navigation');
+assert.deepEqual(animations,['show'],'Top-region callbacks must not restart the show animation');
+for(const excluded of [{isWide:true},{autoHideBar:false},{currentUrl:'https://x.com/alice/status/123'}]){
+  startCollapsed();Object.assign(scroll,excluded);sample(500);sample(600);assert.equal(scroll.barsCollapsed,false);
+  assert.deepEqual(animations,['show']);
+  Object.assign(scroll,{isWide:false,autoHideBar:true,currentUrl:'https://x.com/home'});
+}
+startCollapsed();scroll.overlaysWeb=()=>false;sample(500);assert.equal(scroll.barsCollapsed,false);
+startCollapsed();scroll.resetChromeScroll();scroll.resetChromeScroll();
+assert.deepEqual(animations,['show'],'Page and appearance resets show the bar only once');
+avatarContext.location.pathname='/alice';
+avatarContext.document.querySelectorAll=selector=>selector==='a[href]'?
+  [{getAttribute:()=>'/alice/photo',...avatarRoot('https://pbs.twimg.com.evil.test/profile_images/a.jpg')}]:[];
+assert.equal(vm.runInNewContext(scripts.accountAvatarScript('alice'),avatarContext),'');
+
+// 执行实际胶囊显示方法，账号信息等正常网页不再出现额外设置入口。
+const pillBody=mainSource.match(/private settingsPillVisible\(\): boolean \{([\s\S]*?)\n  \}/)[1];
+const pill=vm.runInNewContext(stripTypeScriptTypes('(function(){'+pillBody+'})'),{
+  isSiteUrl:url=>/^https:\/\/x\.com\//.test(url)
+});
+const pillState={firstLoadDone:true,hasError:false,authenticationPage:false,
+  currentUrl:'https://x.com/alice/about',currentPath:'/alice/about',
+  showsNativeNavigation:()=>false,isMediaViewer:()=>false};
+for(const path of ['/alice/about','/settings','/settings/your_twitter_data/account','/unknown/path']){
+  pillState.currentPath=path;pillState.currentUrl='https://x.com'+path;
+  assert.equal(pill.call(pillState),false,path);
+}
+pillState.authenticationPage=true;
+assert.equal(pill.call(pillState),false,'A stale auth read cannot expose the pill on a normal page');
+pillState.authenticationPage=false;
+for(const path of ['/','/login','/signup','/i/flow/login','/i/flow/signup']){
+  pillState.currentPath=path;pillState.currentUrl='https://x.com'+path;
+  assert.equal(pill.call(pillState),true,path);
+}
+pillState.currentPath='/unknown/path';pillState.currentUrl='https://x.com/unknown/path';
+pillState.firstLoadDone=false;assert.equal(pill.call(pillState),true);
+pillState.firstLoadDone=true;pillState.hasError=true;assert.equal(pill.call(pillState),true);
+pillState.showsNativeNavigation=()=>true;assert.equal(pill.call(pillState),false);
+pillState.showsNativeNavigation=()=>false;
+for(const state of ['fullScreen','imageViewerOpen','sheetOpen','networkOpen','appearanceOpen','discovering','rawWeb']) {
+  pillState[state]=true;assert.equal(pill.call(pillState),false,state);pillState[state]=false;
+}
+
+// 头像下载、缓存和异步状态测试见 check-avatar-loading.mjs，使用生产下载器覆盖平台 I/O 边界。
 
 function posting({ disabled=false, missing=false, throws=false }={}) {
   let clicks=0; let observe; let timeout; let toasts=[];

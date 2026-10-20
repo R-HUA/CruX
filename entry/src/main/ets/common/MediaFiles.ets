@@ -8,6 +8,7 @@ import { BusinessError } from '@kit.BasicServicesKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { MediaAddress } from './WebMedia';
 import { DohPolicy, NetworkConfig } from './NetworkConfig';
+import { WebImageDownloadError, WebImageDownloads, WebImageRequest } from './WebImageDownloads';
 
 export interface MediaFile {
   path: string;
@@ -39,6 +40,12 @@ export class MediaFiles {
   private operations: Promise<void>[] = [];
   private stamp: string = Date.now().toString();
   private cleanup: Promise<void> | undefined = undefined;
+  private webImages: WebImageDownloads | undefined;
+  private webRequests: WebImageRequest[] = [];
+
+  constructor(webImages?: WebImageDownloads) {
+    this.webImages = webImages;
+  }
 
   load(address: MediaAddress, context: common.UIAbilityContext): Promise<MediaFile> {
     const existing = this.downloads.get(address.id);
@@ -52,16 +59,25 @@ export class MediaFiles {
     if (!this.cleanup) { this.cleanup = this.removeExpired(directory); }
     await this.cleanup;
     const policy: DohPolicy = NetworkConfig.getInstance().getDohPolicy();
+    const useWeb: boolean = this.webImages !== undefined && NetworkConfig.getInstance().snapshot().syncImageDownloader;
     for (const candidate of address.candidates) {
       if (this.closed) { throw new Error('Media session closed'); }
-      const response = await this.requestImage(candidate, policy);
-      if (this.closed) { throw new Error('Media session closed'); }
-      // 只对资源不存在继续候选链；鉴权、限流及服务错误直接向用户暴露。
-      if (response.responseCode === 404) { continue; }
-      if (response.responseCode !== 200 || !(response.result instanceof ArrayBuffer)) {
-        throw new Error('Image HTTP status ' + response.responseCode);
+      let buffer: ArrayBuffer;
+      if (useWeb) {
+        try { buffer = await this.requestWebImage(candidate); } catch (error) {
+          if (error instanceof WebImageDownloadError && error.canTryNextCandidate()) { continue; }
+          throw error as Error;
+        }
+      } else {
+        const response = await this.requestImage(candidate, policy);
+        // 只对资源不存在继续候选链；鉴权、限流及服务错误直接向用户暴露。
+        if (response.responseCode === 404) { continue; }
+        if (response.responseCode !== 200 || !(response.result instanceof ArrayBuffer)) {
+          throw new Error('Image HTTP status ' + response.responseCode);
+        }
+        buffer = response.result as ArrayBuffer;
       }
-      const buffer = response.result as ArrayBuffer;
+      if (this.closed) { throw new Error('Media session closed'); }
       const extension = imageExtension(buffer);
       const path = directory + '/x-image-' + this.stamp + '-' + address.id + '.' + extension;
       const file = await fileIo.open(path, fileIo.OpenMode.CREATE | fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.TRUNC);
@@ -83,6 +99,18 @@ export class MediaFiles {
       } finally { await source.release(); }
     }
     throw new Error('Image resource unavailable');
+  }
+
+  /** 同步打开时只使用页面下载通道，失败不跨到另一个 DNS/网络上下文。 */
+  private async requestWebImage(url: string): Promise<ArrayBuffer> {
+    const service = this.webImages;
+    if (!service) { throw new Error('Web image service unavailable'); }
+    const request = service.request(url);
+    this.webRequests.push(request);
+    try { return await request.result; } finally {
+      const index = this.webRequests.indexOf(request);
+      if (index >= 0) { this.webRequests.splice(index, 1); }
+    }
   }
 
   /** Network Kit 的 DoH 不会自动回退；只有 AUTO 模式允许同一候选改走系统 DNS。 */
@@ -124,7 +152,8 @@ export class MediaFiles {
   private async removeExpired(directory: string): Promise<void> {
     const names = await fileIo.listFile(directory);
     for (const name of names) {
-      if (!/^x-image-\d+-[A-Za-z0-9_-]+\.(jpg|png|webp)$/.test(name)) { continue; }
+      if (!/^x-image-\d+-[A-Za-z0-9_-]+\.(jpg|png|webp)$/.test(name) &&
+        !/^x-web-image-\d+-\d+-\d+\.tmp$/.test(name)) { continue; }
       const path = directory + '/' + name;
       const stat = await fileIo.stat(path);
       if (Date.now() / 1000 - stat.mtime > 86400) { await fileIo.unlink(path); }
@@ -160,6 +189,7 @@ export class MediaFiles {
 
   async close(): Promise<void> {
     this.closed = true;
+    for (const request of this.webRequests.slice()) { request.cancel(); }
     const active = this.requests.slice();
     this.requests = [];
     for (const request of active) { request.destroy(); }
