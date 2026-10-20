@@ -14,10 +14,18 @@ const FONT_CSS: string =
   "*{font-family:'HarmonyOS Sans','HarmonyOS Sans SC','HarmonyOS Sans TC'," +
   "'HarmonyOS Sans Naskh Arabic UI',sans-serif!important}";
 
+// 业务标识和入口地址不随网页语言改变；aria-label 会被 X 翻译。
+const PRIMARY_NAV_SELECTOR: string =
+  "nav:has([data-testid='AppTabBar_Home_Link'])," +
+  "[role='navigation']:has([data-testid='AppTabBar_Home_Link'])," +
+  "nav:has(a[href='/home']):has(a[href='/notifications'])";
+const BOTTOM_NAV_SELECTOR: string =
+  "[data-testid='BottomBar']:has([data-testid='AppTabBar_Home_Link'])," +
+  "[data-testid='BottomBar']:has(a[href='/home']):has(a[href='/notifications'])";
 const CHROME_CSS: string =
-  "nav[aria-label='Primary']{display:none!important}" +
+  PRIMARY_NAV_SELECTOR + '{display:none!important}' +
   // 导航子项隐藏后，外壳仍有手势区 padding 和边框，必须一并移除。
-  "[data-testid='BottomBar']:has(nav[aria-label='Primary']){display:none!important}" +
+  BOTTOM_NAV_SELECTOR + '{display:none!important}' +
   "[data-testid='FloatingActionButtons_Tweet_Button']{display:none!important}" +
   // Wide layouts: x.com renders its desktop side navigation, whose account
   // button sits in the corner the shell's own rail occupies.
@@ -30,19 +38,19 @@ const HEADER_CSS: string =
 const HOME_TABS_CSS: string =
   // 多图轮播也使用 tablist，只隐藏含真实 tab 的导航，排除帖子内容。
   "nav[role='navigation'] [data-testid='ScrollSnap-SwipeableList']:has([role='tablist'] [role='tab']):not(article *){display:none!important}";
+const PULL_CLIP_CSS: string = '[data-ot-pull-clip]{overflow:clip!important;}';
 
 // 底部背景不避让，控件只保留一次手势区和小间距；共用规则不依赖某条媒体地址。
 const WEB_SAFE_AREA_CSS: string =
   "[data-testid^='immersive-tweet-ui-content-container-']{bottom:0!important;" +
   "padding-bottom:env(safe-area-inset-bottom)!important}" +
-  "[data-testid^='immersive-tweet-ui-content-container-']>:last-child{margin-bottom:4px!important}";
+  "[data-testid^='immersive-tweet-ui-content-container-']>:last-child{margin-bottom:4px!important}" +
+  PULL_CLIP_CSS;
 
 // 留白属于滚动内容，滑动后网页才能经过原生栏背面；登录和未知路由不应用。
 const OVERLAY_CSS: string =
   'main[role="main"]{padding-top:var(--ot-top-inset,0px)!important;' +
   'padding-bottom:var(--ot-bottom-inset,0px)!important;}' +
-  // 在不随下拉位移的列表容器裁剪，箭头随网页原有 transform 拉入后仍可见。
-  'main[role="main"] div:has(>div>div>svg[aria-label="Pull to refresh"]){overflow:clip!important;}' +
   'html{scroll-padding-top:var(--ot-top-inset,0px);scroll-padding-bottom:var(--ot-bottom-inset,0px);}';
 
 /** 根据 Web 实际视口换算 CSS 像素，避免桌面站点缩放后留白不足。 */
@@ -91,25 +99,86 @@ export const OWN_HANDLE_SCRIPT: string = `(function(){
 // layout, so an unpaced observer is a lot of work for nothing.
 const CHROME_OBSERVER_MS: number = 250;
 
+// 第 12 节确认的结构：负 top 的绝对定位指示器 → 位移层 → 不移动的列表外层。
+// 从定位层识别边界，不依赖刷新图标的语言，也不要求 svg 紧贴固定层级。
+const PULL_CLIP_SCRIPT: string = `(function(enabled){
+  var clips=[];
+  var icons=enabled?document.querySelectorAll('main[role="main"] svg[aria-label]'):[];
+  for(var i=0;i<icons.length;i++){
+    if(icons[i].closest('article,header,nav,[role="dialog"]'))continue;
+    var main=icons[i].closest('main[role="main"]');
+    for(var node=icons[i].parentElement;node&&node!==main;node=node.parentElement){
+      var style=getComputedStyle(node);
+      if(style.position!=='absolute'||!(parseFloat(style.top)<0))continue;
+      for(var moving=node.parentElement;moving&&moving!==main;moving=moving.parentElement){
+        if(!moving.querySelector('article,[data-testid="cellInnerDiv"]')&&moving.children.length<2)continue;
+        var clip=moving.parentElement;
+        if(clip&&clip!==main&&main.contains(clip)&&clips.indexOf(clip)<0)clips.push(clip);
+        break;
+      }
+      break;
+    }
+  }
+  var previous=window.__otPullClips||[];
+  for(var j=0;j<previous.length;j++){
+    if(clips.indexOf(previous[j])<0)previous[j].removeAttribute('data-ot-pull-clip');
+  }
+  for(var k=0;k<clips.length;k++){
+    if(!clips[k].hasAttribute('data-ot-pull-clip'))clips[k].setAttribute('data-ot-pull-clip','');
+  }
+  window.__otPullClips=clips;
+  return clips.length;
+})`;
+
+/** 仅提前安装首页裁剪；DOM 变更微任务在首帧前处理，不等待页面加载完成。 */
+export function chromeDocumentStartScript(enabled: boolean): string {
+  if (!enabled) { return ''; }
+  return '(function(){if(window!==window.top)return;' +
+    'var update=function(){if(!document.head)return;' +
+    'var home=location.pathname.replace(/\\/$/,"").toLowerCase()==="/home";' +
+    'var css=document.getElementById("ot-initial-chrome");' +
+    'if(!css){css=document.createElement("style");css.id="ot-initial-chrome";document.head.appendChild(css);}' +
+    'var rules=' + JSON.stringify(PULL_CLIP_CSS) + ';' +
+    'if(css.textContent!==rules)css.textContent=rules;' +
+    PULL_CLIP_SCRIPT + '(home);};' +
+    'var observer=new MutationObserver(function(){if(window.__otObs){observer.disconnect();return;}update();});' +
+    'observer.observe(document,{childList:true,subtree:true});update();' +
+    'window.addEventListener("pagehide",function(){observer.disconnect();},{once:true});})();';
+}
+
+// 查询参数、片段及站点别名不改变外壳归属；不同路径仍须等待原生确认。
+const CHROME_ROUTE_KEY: string = 'function(value){return String(value)' +
+  '.replace(/^https:\\/\\/(?:www\\.)?(?:x|twitter)\\.com(?=[/?#]|$)/i,"")' +
+  '.split(/[?#]/)[0].replace(/\\/$/,"").toLowerCase()||"/";}';
+
 /** 原生控件和网页去重共用路由判定，不以账号元素是否存在决定界面。 */
 export function chromeScript(nativeNavigation: boolean, nativeHeader: boolean, url: string): string {
   return '(function(nav,header,url){try{' +
-    'window.__otNativeNavigation=nav;window.__otNativeHeader=header;window.__otChromeUrl=url;' +
+    'var routeKey=' + CHROME_ROUTE_KEY + ';' +
+    'var clipPull=' + PULL_CLIP_SCRIPT + ';' +
+    'if(routeKey(url)===routeKey(location.href)){' +
+    'window.__otNativeNavigation=nav;window.__otNativeHeader=header;window.__otChromeUrl=url;}' +
     'var css=document.getElementById(\'ot-hidenav\');' +
     'if(!css){css=document.createElement(\'style\');css.id=\'ot-hidenav\';' +
     'document.head.appendChild(css);}' +
     'window.__otApplyTop=function(){' +
     'var p=location.pathname.replace(/\\/$/,"")||"/";' +
     'var auth=document.querySelector(\'input[autocomplete="username"],input[autocomplete="current-password"],input[autocomplete="one-time-code"]\');' +
+    'var active=window.__otNativeNavigation&&!auth&&routeKey(window.__otChromeUrl)===routeKey(location.href);' +
+    'window.__otPullMatches=clipPull(active&&(window.__otInsetTop>0||p==="/home"));' +
     'var rules=auth?"":' + JSON.stringify(WEB_SAFE_AREA_CSS) + ';' +
-    'if(window.__otNativeNavigation&&!auth&&window.__otChromeUrl===String(location.href)){rules+=' + JSON.stringify(CHROME_CSS) + ';' +
+    'if(active){rules+=' + JSON.stringify(CHROME_CSS) + ';' +
     'if(window.__otInsetTop>0||window.__otInsetBottom>0)rules+=' + JSON.stringify(OVERLAY_CSS) + ';' +
     'if(window.__otNativeHeader){rules+=' + JSON.stringify(HEADER_CSS) + ';' +
     'if(p==="/home")rules+=' + JSON.stringify(HOME_TABS_CSS) + ';}}' +
     'if(css.textContent!==rules)css.textContent=rules;' +
     'if(window.__otAuth!==Boolean(auth)){' +
     'window.__otAuth=Boolean(auth);' +
-    'if(window.otNative)window.otNative.onUrlChange("main",String(location.href));}};' +
+    'if(window.otNative)window.otNative.onUrlChange("main",String(location.href));}' +
+    // 首屏图片可能晚于页面完成才挂载，头像变化时复用页面状态读取通道。
+    'var avatar=auth?"":' + accountAvatarScript('') + ';' +
+    'if(avatar!==window.__otAccountAvatar){window.__otAccountAvatar=avatar;' +
+    'if(avatar&&window.otNative)window.otNative.onUrlChange("main",String(location.href));}};' +
     'window.__otOwn=function(){return ' + OWN_HANDLE_SCRIPT + ';};' +
     // x.com navigates like an app (history.pushState), which does not reload
     // the page and therefore never reaches the shell through the Web component
@@ -144,19 +213,31 @@ export function chromeScript(nativeNavigation: boolean, nativeHeader: boolean, u
     'window.__otApplyTop&&window.__otApplyTop();' +
     '}catch(e){}};' +
     'window.__otObs=new MutationObserver(function(){' +
+    // 进入首页或替换加载占位时，裁剪先于下一帧；其余修饰仍合并到节流回调。
+    'if(location.pathname.replace(/\\/$/,"").toLowerCase()==="/home"&&!document.querySelector(' +
+    '\'input[autocomplete="username"],input[autocomplete="current-password"],input[autocomplete="one-time-code"]\')){' +
+    'window.__otPullMatches=clipPull(true);}' +
     'if(window.__otPend){return;}window.__otPend=1;' +
     'window.__otTimer=setTimeout(window.__otPass,' + CHROME_OBSERVER_MS + ');});' +
-    'try{window.__otObs.observe(document.documentElement,{childList:true,subtree:true});}catch(e){}' +
+    'try{window.__otObs.observe(document.documentElement,{childList:true,subtree:true,' +
+    'attributes:true,attributeFilter:["src","srcset"]});}catch(e){}' +
     'window.addEventListener("pagehide",function(e){if(!e.persisted){window.__otObs.disconnect();clearTimeout(window.__otTimer);}}, {once:true});}' +
-    'window.__otApplyTop();' +
-    '}catch(e){}})(' + nativeNavigation + ',' + nativeHeader + ',' + JSON.stringify(url) + ');';
+    'window.__otChromeReport=function(){return JSON.stringify({' +
+    'navigation:Boolean(window.__otNativeNavigation&&!window.__otAuth&&routeKey(window.__otChromeUrl)===routeKey(location.href)),' +
+    'header:Boolean(window.__otNativeHeader),navMatches:document.querySelectorAll(' + JSON.stringify(PRIMARY_NAV_SELECTOR) + ').length,' +
+    'pullMatches:window.__otPullMatches||0,avatarFound:Boolean(window.__otAccountAvatar)});};' +
+    'window.__otApplyTop();return window.__otChromeReport();' +
+    '}catch(e){return JSON.stringify({error:String(e)});}})(' + nativeNavigation + ',' + nativeHeader + ',' + JSON.stringify(url) + ');';
 }
 
 // Cheap follow-up used on in-page (SPA) navigations, which do not always fire
 // onPageEnd: flips the tab-root flag and re-runs the removal pass.
 export function chromeFlagScript(nativeNavigation: boolean, nativeHeader: boolean, url: string): string {
-  return '(function(nav,header,url){try{window.__otNativeNavigation=nav;window.__otNativeHeader=header;window.__otChromeUrl=url;' +
-    'window.__otApplyTop&&window.__otApplyTop();}catch(e){}})(' +
+  return '(function(nav,header,url){try{var routeKey=' + CHROME_ROUTE_KEY + ';' +
+    'if(routeKey(url)!==routeKey(location.href))return;' +
+    'window.__otNativeNavigation=nav;window.__otNativeHeader=header;window.__otChromeUrl=url;' +
+    'window.__otApplyTop&&window.__otApplyTop();return window.__otChromeReport&&window.__otChromeReport();' +
+    '}catch(e){return JSON.stringify({error:String(e)});}})(' +
     nativeNavigation + ',' + nativeHeader + ',' + JSON.stringify(url) + ');';
 }
 
@@ -205,15 +286,36 @@ export const HOME_TAB_SCRIPT: string =
   'for(var i=0;i<t.length;i++){if(t[i].getAttribute(\'aria-selected\')===\'true\')return i;}' +
   'return -1;}catch(e){return -1;}})()';
 
-// Signed-in avatar, read off the account's own profile page. Timeline avatars
-// are much smaller, so the size test keeps those out.
-export const AVATAR_SCRIPT: string =
-  '(function(){try{' +
-  'var im=document.querySelectorAll(\'img[src*="profile_images"]\');' +
-  'for(var i=0;i<im.length;i++){' +
-  'var r=im[i].getBoundingClientRect();' +
-  'if(r.width>=60){return String(im[i].getAttribute("src")||"");}}' +
-  'return "";}catch(e){return "";}})()';
+/** 优先读取明确的当前账号控件，不从时间线或他人资料中按图片尺寸猜头像。 */
+export function accountAvatarScript(handle: string): string {
+  return `(function(handle){
+    function avatar(root){
+      if(!root)return '';
+      var images=root.querySelectorAll('img,image,[style*="background-image"]');
+      for(var i=0;i<images.length;i++){
+        var background=images[i].style&&images[i].style.backgroundImage||'';
+        var match=/^url\\(["']?(.*?)["']?\\)$/.exec(background);
+        var src=String(images[i].currentSrc||images[i].getAttribute('src')||images[i].getAttribute('href')||
+          (match?match[1]:''));
+        if(/^https:\\/\\/(pbs|abs)\\.twimg\\.com\\/(profile_images|sticky\\/default_profile_images)\\//i.test(src))return src;
+      }
+      return '';
+    }
+    var controls=document.querySelectorAll('[data-testid="DashButton_ProfileIcon_Link"],'+
+      '[data-testid="SideNav_AccountSwitcher_Button"],[data-testid="AppTabBar_Profile_Link"]');
+    for(var i=0;i<controls.length;i++){var src=avatar(controls[i]);if(src)return src;}
+    var path=location.pathname.replace(/\\/$/,'').toLowerCase();
+    if(handle&&path==='/'+handle.toLowerCase()){
+      var links=document.querySelectorAll('a[href]');
+      for(var j=0;j<links.length;j++){
+        if((links[j].getAttribute('href')||'').toLowerCase()===path+'/photo'){
+          var own=avatar(links[j]);if(own)return own;
+        }
+      }
+    }
+    return '';
+  })(` + JSON.stringify(handle) + ')';
+}
 
 // Unread counters for the shell's own tab bar and for the launcher badge.
 //

@@ -1,6 +1,8 @@
 import web_webview from '@ohos.web.webview';
 import mediaquery from '@ohos.mediaquery';
 import { MediaAddress, resolveMedia, MEDIA_CLICK_SCRIPT } from '../common/WebMedia';
+import { MediaFile, MediaFiles } from '../common/MediaFiles';
+import { WebImageDownloads } from '../common/WebImageDownloads';
 import { NativeImageViewer } from './NativeImageViewer';
 import { NetworkSettingsSheet } from './NetworkSettingsSheet';
 import { NetworkConfig, NetworkSnapshot } from '../common/NetworkConfig';
@@ -10,7 +12,7 @@ import { abilityAccessCtrl, common, PermissionRequestResult, Permissions } from 
 import { BusinessError, deviceInfo } from '@kit.BasicServicesKit';
 import { notificationManager } from '@kit.NotificationKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
-import { ColorMetrics, LengthMetrics, SymbolGlyphModifier, window } from '@kit.ArkUI';
+import { ColorMetrics, FrameCallback, LengthMetrics, SymbolGlyphModifier, window } from '@kit.ArkUI';
 import { HdsNavigation, HdsNavigationTitleMode, HdsTabs, hdsMaterial,
   HdsTabsController, HdsAnimationMode, BlurStrategy, ScrollEffectType } from '@kit.UIDesignKit';
 import { KeyCode } from '@kit.InputKit';
@@ -27,9 +29,9 @@ import {
   isTabRootPath, isPostDetailUrl, usesNativeNavigation, usesNativeHeader, userAgentFor
 } from '../common/WebConfig';
 import {
-  OWN_HANDLE_SCRIPT, chromeScript, chromeFlagScript, chromeInsetsScript, scrollToTopScript,
+  OWN_HANDLE_SCRIPT, chromeScript, chromeFlagScript, chromeInsetsScript, chromeDocumentStartScript, scrollToTopScript,
   CLICK_POST_BUTTON_SCRIPT, POST_RESULT_SCRIPT, profileBootstrapScript, clickRouteScript, fillComposerScript,
-  HOME_TAB_SCRIPT, selectHomeTabScript, AVATAR_SCRIPT, UNREAD_COUNTS_SCRIPT
+  HOME_TAB_SCRIPT, selectHomeTabScript, accountAvatarScript, UNREAD_COUNTS_SCRIPT
 } from '../common/WebChrome';
 
 // 原生层提供导航、纯文字编辑与系统交互，网页保留搜索及业务页面。
@@ -103,6 +105,28 @@ interface ImagePayload {
   index: number;
 }
 
+interface ChromeDiagnostics {
+  navigation: boolean;
+  header: boolean;
+  navMatches: number;
+  pullMatches: number;
+  avatarFound: boolean;
+  error?: string;
+}
+
+class AvatarCleanupFrame extends FrameCallback {
+  private cleanup: () => void;
+
+  constructor(cleanup: () => void) {
+    super();
+    this.cleanup = cleanup;
+  }
+
+  onIdle(_timeLeftInNano: number): void {
+    this.cleanup();
+  }
+}
+
 @Entry
 @Component
 struct MainTabs {
@@ -113,12 +137,20 @@ struct MainTabs {
   @State progress: number = 0;
   @State hasError: boolean = false;
   @State ownHandle: string = '';
-  // Signed-in avatar, read off the account's own profile page and cached, so
-  // the Home header can show the real account picture like the stock app.
+  // 从当前账号控件读取真实头像，缓存按已确认的账号隔离。
   @State avatarUrl: string = '';
+  @State avatarPath: string = '';
+  @State avatarFailedUrl: string = '';
+  private avatarFiles: MediaFiles | undefined = undefined;
+  private avatarGeneration: number = 0;
+  private avatarReadRequest: number = 0;
+  private avatarAlive: boolean = false;
+  private retiredAvatarFiles: MediaFiles[] = [];
+  private avatarCleanupScheduled: boolean = false;
   // Which Home timeline the native switcher has selected: 0 = For you,
   // 1 = Following. Mirrors x.com's own tab row.
   @State homeTabIndex: number = 0;
+  @State homeTabsHeight: number = 32;
   @State viewingHandle: string = '';
   @State currentPath: string = '';
   @State currentUrl: string = '';
@@ -164,6 +196,7 @@ struct MainTabs {
   private fullScreenWindow: window.Window | undefined = undefined;
   private previousLayoutFullScreen: boolean = false;
   private downloadDelegate: web_webview.WebDownloadDelegate | undefined = undefined;
+  private webImages: WebImageDownloads | undefined = undefined;
   private composeDownloadDelegate: web_webview.WebDownloadDelegate | undefined = undefined;
   @State postUncertain: boolean = false;
   @State composeMessage: ResourceStr = '';
@@ -213,6 +246,7 @@ struct MainTabs {
   }
 
   async aboutToAppear(): Promise<void> {
+    this.avatarAlive = true;
     this.immersiveMaterial = hdsMaterial.getSystemMaterialTypes().includes(hdsMaterial.MaterialType.IMMERSIVE);
     hilog.info(DOMAIN, TAG, 'event=material_support immersive=%{public}s', String(this.immersiveMaterial));
     const shellContext = this.getUIContext().getHostContext() as common.UIAbilityContext;
@@ -258,6 +292,12 @@ struct MainTabs {
   }
 
   aboutToDisappear(): void {
+    this.avatarAlive = false;
+    this.resetAvatar();
+    this.closeRetiredAvatarFiles();
+    this.webImages?.close().catch((err: Error) => {
+      hilog.warn(DOMAIN, TAG, 'event=web_image_close_failed code=%{public}d', (err as BusinessError).code);
+    });
     this.shellWindow?.off('avoidAreaChange', this.avoidChanged);
     if (this.networkUnsubscribe !== undefined) {
       this.networkUnsubscribe();
@@ -432,18 +472,116 @@ struct MainTabs {
     }
   }
 
-  private async saveAvatar(url: string): Promise<void> {
+  private async saveAvatar(handle: string, url: string): Promise<void> {
+    const generation: number = this.avatarGeneration;
     try {
       const ctx: common.Context | undefined = this.getUIContext().getHostContext();
       if (ctx === undefined) {
         return;
       }
       const prefs: preferences.Preferences = await preferences.getPreferences(ctx, PREFS_NAME);
-      await prefs.put(AVATAR_KEY, url);
+      if (!this.avatarAlive || generation !== this.avatarGeneration || this.avatarUrl !== url ||
+        this.ownHandle.toLowerCase() !== handle.toLowerCase()) { return; }
+      await prefs.put(AVATAR_KEY + ':' + handle.toLowerCase(), url);
       await prefs.flush();
     } catch (err) {
-      hilog.warn(DOMAIN, TAG, 'avatar not persisted: %{public}s', JSON.stringify(err));
+      hilog.warn(DOMAIN, TAG, 'event=avatar_cache_write_failed code=%{public}d', (err as BusinessError).code);
     }
+  }
+
+  private async restoreAvatar(handle: string): Promise<void> {
+    const generation: number = this.avatarGeneration;
+    try {
+      const ctx: common.Context | undefined = this.getUIContext().getHostContext();
+      if (ctx === undefined) { return; }
+      const prefs: preferences.Preferences = await preferences.getPreferences(ctx, PREFS_NAME);
+      const url = await prefs.get(AVATAR_KEY + ':' + handle.toLowerCase(), '') as string;
+      if (this.avatarAlive && generation === this.avatarGeneration && !this.authenticationPage &&
+        this.ownHandle.toLowerCase() === handle.toLowerCase() && this.avatarUrl === '' &&
+        /^https:\/\/(pbs|abs)\.twimg\.com\//i.test(url)) {
+        this.loadAvatar(url);
+      }
+    } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'event=avatar_cache_read_failed code=%{public}d', (err as BusinessError).code);
+    }
+  }
+
+  /** 每个地址独占下载会话，复用真实图片下载器的 DoH 与回退策略。 */
+  private async loadAvatar(url: string, retry: boolean = false): Promise<void> {
+    if (!this.avatarAlive || this.rawWeb || this.authenticationPage || (!retry && this.avatarUrl === url)) { return; }
+    const generation: number = ++this.avatarGeneration;
+    const handle: string = this.ownHandle.toLowerCase();
+    const previous: MediaFiles | undefined = this.avatarFiles;
+    const wasDisplayed: boolean = this.avatarPath !== '';
+    const files: MediaFiles = new MediaFiles(this.webImages);
+    this.avatarFiles = files;
+    this.avatarUrl = url;
+    this.avatarPath = '';
+    this.avatarFailedUrl = '';
+    this.retireAvatarFiles(previous, wasDisplayed);
+    try {
+      const address: MediaAddress = { id: 'avatar_' + generation.toString(), source: url, candidates: [url] };
+      const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      const file: MediaFile = await files.load(address, context);
+      if (!this.avatarAlive || generation !== this.avatarGeneration || this.ownHandle.toLowerCase() !== handle ||
+        this.authenticationPage) { return; }
+      this.avatarPath = 'file://' + file.path;
+      hilog.debug(DOMAIN, TAG, 'event=avatar_loaded');
+    } catch (err) {
+      if (!this.avatarAlive || generation !== this.avatarGeneration) { return; }
+      this.avatarFailedUrl = url;
+      this.avatarFiles = undefined;
+      this.retireAvatarFiles(files, false);
+      hilog.warn(DOMAIN, TAG, 'event=avatar_download_failed code=%{public}d', (err as BusinessError).code);
+    }
+  }
+
+  private resetAvatar(): void {
+    this.avatarGeneration++;
+    this.avatarReadRequest++;
+    const files: MediaFiles | undefined = this.avatarFiles;
+    const wasDisplayed: boolean = this.avatarPath !== '';
+    this.avatarFiles = undefined;
+    this.avatarUrl = '';
+    this.avatarPath = '';
+    this.avatarFailedUrl = '';
+    this.retireAvatarFiles(files, wasDisplayed);
+  }
+
+  private avatarImageFailed(path: string): void {
+    if (!this.avatarAlive || path === '' || path !== this.avatarPath) { return; }
+    this.avatarFailedUrl = this.avatarUrl;
+    this.avatarPath = '';
+    const files: MediaFiles | undefined = this.avatarFiles;
+    this.avatarFiles = undefined;
+    this.retireAvatarFiles(files, true);
+    hilog.warn(DOMAIN, TAG, 'event=avatar_image_load_failed');
+  }
+
+  private closeAvatarFiles(files: MediaFiles): void {
+    files.close().catch((err: Error) => {
+      hilog.warn(DOMAIN, TAG, 'event=avatar_cleanup_failed code=%{public}d', (err as BusinessError).code);
+    });
+  }
+
+  private closeRetiredAvatarFiles(): void {
+    const retired: MediaFiles[] = this.retiredAvatarFiles;
+    this.retiredAvatarFiles = [];
+    this.avatarCleanupScheduled = false;
+    for (const files of retired) { this.closeAvatarFiles(files); }
+  }
+
+  /** 先撤下旧 Image，再在帧渲染结束后删除文件，避免异步解码仍读取旧路径。 */
+  private retireAvatarFiles(files: MediaFiles | undefined, wasDisplayed: boolean): void {
+    if (files === undefined) { return; }
+    if (!wasDisplayed || !this.avatarAlive) {
+      this.closeAvatarFiles(files);
+      return;
+    }
+    this.retiredAvatarFiles.push(files);
+    if (this.avatarCleanupScheduled) { return; }
+    this.avatarCleanupScheduled = true;
+    this.getUIContext().postFrameCallback(new AvatarCleanupFrame(() => this.closeRetiredAvatarFiles()));
   }
 
   // WebviewController.runJavaScript answers with the evaluated result
@@ -562,9 +700,14 @@ struct MainTabs {
   }
 
   private acceptHandle(handle: string, navigate: boolean): void {
-    if (this.ownHandle !== handle) { this.avatarUrl = ''; }
+    const changed: boolean = this.ownHandle.toLowerCase() !== handle.toLowerCase();
+    if (changed) {
+      this.resetAvatar();
+    }
     this.ownHandle = handle;
     this.saveOwnHandle(handle);
+    if (changed) { this.restoreAvatar(handle); }
+    this.readAvatar();
     this.finishDiscover(navigate);
   }
 
@@ -759,6 +902,8 @@ struct MainTabs {
   private reloadCurrent(): void {
     // A retry replaces the error surface with the normal progress UI.
     this.hasError = false;
+    this.avatarReadRequest++;
+    if (this.avatarFailedUrl !== '' && this.avatarUrl !== '') { this.loadAvatar(this.avatarUrl, true); }
     this.progress = 0;
     this.refreshing = true;
     try {
@@ -867,12 +1012,21 @@ struct MainTabs {
   private syncChromeInsets(): void {
     if (this.rawWeb || !isSiteUrl(this.currentUrl) || this.webWidth <= 0) { return; }
     this.controller.runJavaScript(chromeInsetsScript(
-      this.overlaysWeb() && this.topChromeHeight() > 0 ? this.topInset + this.topChromeHeight() : 0,
+      this.overlayTopInset(),
       this.overlaysWeb() ? this.bottomChromeHeight() : 0, this.webWidth
     )).catch((error: Error) => {
       hilog.error(DOMAIN, TAG, 'event=chrome_insets_failed error=%{public}s', error.message);
       this.toast($r('app.string.operation_failed'));
     });
+  }
+
+  private overlayTopInset(): number {
+    if (!this.overlaysWeb() || this.topChromeHeight() === 0) { return 0; }
+    // 首页滚动内容紧接下划线底缘，保留帖子自身的内边距，不累计标题栏的空白下半区。
+    const height: number = this.isHomeRoot()
+      ? Math.min(HEADER_HEIGHT, (HEADER_HEIGHT + this.homeTabsHeight) / 2 - HEADER_CONTENT_LIFT)
+      : this.topChromeHeight();
+    return this.topInset + height;
   }
 
   private async setAppearance(key: string, value: boolean): Promise<void> {
@@ -906,8 +1060,10 @@ struct MainTabs {
     if (!this.firstLoadDone || this.hasError) {
       return true;
     }
-    // X 自己的设置页不再叠加原生入口。
-    return !(isSiteUrl(this.currentUrl) && this.currentPath.startsWith('/settings'));
+    // 已加载的普通网页（含账号信息页）保留网页自己的入口。
+    return isSiteUrl(this.currentUrl) &&
+      (this.currentPath === '/' || this.currentPath === '/login' || this.currentPath === '/signup' ||
+        this.currentPath === '/i/flow/login' || this.currentPath === '/i/flow/signup');
   }
 
   private openNetworkSettings(): void {
@@ -982,9 +1138,16 @@ struct MainTabs {
     if (this.rawWeb || !/^https:\/\/(www\.)?(x|twitter)\.com(\/|$)/.test(url)) { return; }
     const navigation: boolean = usesNativeNavigation(url);
     try {
-      this.controller.runJavaScript(chromeScript(navigation, usesNativeHeader(url), url));
+      this.controller.runJavaScript(chromeScript(navigation, usesNativeHeader(url), url))
+        .then((raw: string) => this.logChromeResult('apply', raw))
+        .catch((err: Error) => {
+          hilog.warn(DOMAIN, TAG, 'event=chrome_injection_failed source=apply code=%{public}d',
+            (err as BusinessError).code);
+        });
       this.syncChromeInsets();
     } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'event=chrome_injection_failed source=apply code=%{public}d',
+        (err as BusinessError).code);
     }
   }
 
@@ -992,9 +1155,36 @@ struct MainTabs {
     if (this.rawWeb) { return; }
     try {
       const navigation: boolean = usesNativeNavigation(url);
-      this.controller.runJavaScript(chromeFlagScript(navigation, usesNativeHeader(url), url));
+      this.controller.runJavaScript(chromeFlagScript(navigation, usesNativeHeader(url), url))
+        .then((raw: string) => this.logChromeResult('flag', raw))
+        .catch((err: Error) => {
+          hilog.warn(DOMAIN, TAG, 'event=chrome_injection_failed source=flag code=%{public}d',
+            (err as BusinessError).code);
+        });
       this.syncChromeInsets();
     } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'event=chrome_injection_failed source=flag code=%{public}d',
+        (err as BusinessError).code);
+    }
+  }
+
+  private logChromeResult(source: string, raw: string): void {
+    const result: string = MainTabs.unquote(raw);
+    if (result === '') { return; }
+    try {
+      const report: ChromeDiagnostics = JSON.parse(result) as ChromeDiagnostics;
+      if (typeof report.error === 'string') {
+        // 只记录标准错误类型，避免网页异常消息带出账号、地址或正文。
+        const kind: string = report.error.split(':')[0];
+        hilog.warn(DOMAIN, TAG, 'event=chrome_script_failed source=%{public}s type=%{public}s', source,
+          /^(Error|TypeError|ReferenceError|SyntaxError|RangeError|URIError|EvalError)$/.test(kind) ? kind : 'Error');
+        return;
+      }
+      hilog.debug(DOMAIN, TAG, 'event=chrome_applied source=%{public}s result=%{public}s', source,
+        JSON.stringify({ navigation: report.navigation, header: report.header, navMatches: report.navMatches,
+          pullMatches: report.pullMatches, avatarFound: report.avatarFound }));
+    } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'event=chrome_report_failed source=%{public}s', source);
     }
   }
 
@@ -1193,7 +1383,7 @@ struct MainTabs {
           this.authenticationPage = raw === 'true';
           if (this.authenticationPage) {
             this.ownHandle = '';
-            this.avatarUrl = '';
+            this.resetAvatar();
             this.unreadNotifications = 0;
             this.unreadMessages = 0;
           } else { this.discoverOwnProfile(false); }
@@ -1229,25 +1419,26 @@ struct MainTabs {
     }
   }
 
-  // Only the account's own profile page carries the signed-in avatar, and it is
-  // worth a native fetch: the shell shows it in the Home header.
+  // 首页即可读取账号控件；资料页仅使用已确认本人的头像链接作为补充。
   private readAvatar(): void {
-    if (this.ownHandle === '' || this.avatarUrl !== '') {
-      return;
-    }
-    const handle: string = this.ownHandle.toLowerCase();
-    if (this.currentPath !== '/' + handle) {
-      return;
-    }
+    if (!this.avatarAlive || this.rawWeb || this.authenticationPage) { return; }
+    const handle: string = this.ownHandle;
+    const pageUrl: string = this.currentUrl;
+    const request: number = ++this.avatarReadRequest;
     try {
-      this.controller.runJavaScript(AVATAR_SCRIPT).then((raw: string) => {
+      this.controller.runJavaScript(accountAvatarScript(handle)).then((raw: string) => {
+        if (!this.avatarAlive || request !== this.avatarReadRequest || this.authenticationPage ||
+          this.currentUrl !== pageUrl || this.ownHandle !== handle) { return; }
         const url: string = MainTabs.unquote(raw);
-        if (url.indexOf('http') === 0) {
-          this.avatarUrl = url;
-          this.saveAvatar(url);
+        if (/^https:\/\/(pbs|abs)\.twimg\.com\//i.test(url) && url !== this.avatarUrl) {
+          this.loadAvatar(url);
+          if (handle !== '') { this.saveAvatar(handle, url); }
         }
+      }).catch((err: Error) => {
+        hilog.debug(DOMAIN, TAG, 'event=avatar_read_failed code=%{public}d', (err as BusinessError).code);
       });
     } catch (err) {
+      hilog.debug(DOMAIN, TAG, 'event=avatar_read_failed code=%{public}d', (err as BusinessError).code);
     }
   }
 
@@ -1419,7 +1610,7 @@ struct MainTabs {
       const uncertain = await prefs.get('post_pending:' + owner, false) as boolean;
       if (!this.sheetOpen) { return; }
       this.composeOwner = owner;
-      this.ownHandle = handle;
+      this.acceptHandle(handle, false);
       this.draft = draft;
       this.postUncertain = uncertain;
       this.composeMessage = this.postUncertain ? $r('app.string.post_unknown') : '';
@@ -1716,6 +1907,7 @@ struct MainTabs {
     .width('100%')
     .height(HEADER_HEIGHT)
     .translate({ y: -HEADER_CONTENT_LIFT })
+    .hitTestBehavior(HitTestMode.Transparent)
   }
 
   // Back only exists where there is history to walk and the page is not one of
@@ -1757,23 +1949,26 @@ struct MainTabs {
     })
   }
 
-  // Account picture, as the stock app has it: top-left on Home, and the entry
-  // point to the account's own pages. Until the profile page has been visited
-  // once there is no picture to read, so the HarmonyOS account glyph stands in.
+  @Builder
+  accountPicture(path: string) {
+    Stack() {
+      SymbolGlyph($r('sys.symbol.person_crop_circle_fill'))
+        .fontSize(32)
+        .fontColor([$r('sys.color.ohos_id_color_text_secondary')])
+      if (path !== '') {
+        Image(path)
+          .width(32).height(32).borderRadius(16).objectFit(ImageFit.Cover)
+          .onError(() => this.avatarImageFailed(path))
+      }
+    }
+    .width(32).height(32)
+  }
+
+  // 首页与回复栏共用头像占位，网络图片未就绪或失败时圆框仍可见。
   @Builder
   accountAvatar() {
     Row() {
-      if (this.avatarUrl !== '') {
-        Image(this.avatarUrl)
-          .width(32)
-          .height(32)
-          .borderRadius(16)
-          .objectFit(ImageFit.Cover)
-      } else {
-        SymbolGlyph($r('sys.symbol.person_crop_circle_fill'))
-          .fontSize(32)
-          .fontColor([$r('sys.color.ohos_id_color_text_secondary')])
-      }
+      this.accountPicture(this.avatarPath)
     }
     .width(TOUCH_TARGET)
     .height(32)
@@ -1841,6 +2036,13 @@ struct MainTabs {
       this.homeTimelineTab($r('app.string.home_following'), 1)
     }
     .id('home_tabs')
+    .onAreaChange((_old: Area, area: Area) => {
+      const height: number = Number(area.height);
+      if (height > 0 && height !== this.homeTabsHeight) {
+        this.homeTabsHeight = height;
+        this.syncChromeInsets();
+      }
+    })
     .justifyContent(FlexAlign.Center)
     // RelativeContainer names the horizontal-centre rule "middle" and the
     // vertical-centre rule "center".
@@ -2100,12 +2302,7 @@ struct MainTabs {
   @Builder
   replyBar() {
     Row({ space: S12 }) {
-      if (this.avatarUrl !== '') {
-        Image(this.avatarUrl).width(32).height(32).borderRadius(16).objectFit(ImageFit.Cover)
-      } else {
-        SymbolGlyph($r('sys.symbol.person_crop_circle_fill')).fontSize(32)
-          .fontColor([$r('sys.color.ohos_id_color_text_secondary')])
-      }
+      this.accountPicture(this.avatarPath)
       Text($r('app.string.reply_prompt'))
         .fontSize(16).fontFamily(FONT_FAMILY).layoutWeight(1)
         .fontColor($r('sys.color.ohos_id_color_text_secondary'))
@@ -2240,14 +2437,7 @@ struct MainTabs {
         .fontFamily(FONT_FAMILY)
         .backgroundColor($r('sys.color.ohos_id_color_emphasize'))
         .margin({ top: S8 })
-        .onClick(() => {
-          this.hasError = false;
-          this.progress = 0;
-          try {
-            this.controller.refresh();
-          } catch (err) {
-          }
-        })
+        .onClick(() => this.reloadCurrent())
       Button($r('app.string.network_open_settings'))
         .type(ButtonType.Capsule)
         .fontFamily(FONT_FAMILY)
@@ -2284,11 +2474,16 @@ struct MainTabs {
         // supported way and can only run once the controller is bound.
         try {
           this.controller.setCustomUserAgent(this.rawWeb ? web_webview.WebviewController.getDefaultUserAgent() : this.userAgent());
-          this.downloadDelegate = installDownloads(this.controller,
-            this.getUIContext().getHostContext() as common.UIAbilityContext,
-            (result: string) => { this.reportDownload(result); });
         } catch (err) {
           hilog.warn(DOMAIN, TAG, 'custom UA rejected: %{public}s', JSON.stringify(err));
+        }
+        const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
+        if (!this.webImages) { this.webImages = new WebImageDownloads(this.controller, context.cacheDir); }
+        try {
+          this.downloadDelegate = installDownloads(this.controller, context,
+            (result: string) => { this.reportDownload(result); }, this.webImages);
+        } catch (err) {
+          hilog.error(DOMAIN, TAG, 'event=download_delegate_failed code=%{public}d', (err as BusinessError).code);
         }
       })
       .onWindowNew((event: OnWindowNewEvent) => {
@@ -2314,6 +2509,8 @@ struct MainTabs {
         return true;
       })
       .javaScriptAccess(true)
+      .javaScriptOnDocumentStart([{ script: chromeDocumentStartScript(!this.rawWeb),
+        scriptRules: ['https://x.com', 'https://www.x.com', 'https://twitter.com', 'https://www.twitter.com'] }])
       .domStorageAccess(true)
       // x.com's chat client keeps its session state in browser storage; ArkWeb
       // gates the database APIs behind this flag and defaults them off.
@@ -2670,7 +2867,7 @@ struct MainTabs {
   @Builder
   imageViewer() {
     NativeImageViewer({ items: this.imageItems, initialIndex: this.imageIndex,
-      onClose: () => { this.imageViewerOpen = false; } })
+      webImages: this.webImages, onClose: () => { this.imageViewerOpen = false; } })
   }
 
   build() {

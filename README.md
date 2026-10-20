@@ -54,6 +54,7 @@ entry/src/main/
     WebSystem.ets                      外链、文件选择、分享、下载
     WebMedia.ets                       图片地址解析与点击拦截脚本
     MediaFiles.ets                     原图下载、格式嗅探与缓存
+    WebImageDownloads.ets              头像与原图的 ArkWeb 下载、取消及临时文件管理
     NetworkConfig.ets                  DoH 配置、应用与持久化
     DohProbe.ets                       DoH 节点测速
     Theme.ets                          尺寸与字体令牌
@@ -97,7 +98,7 @@ hvigorw --no-daemon assembleHap --mode module -p product=default -p buildMode=de
 - **如何生效**：通过 ArkWeb 的 `WebviewController.setHttpDns` 设置加密 DNS 模式，并用 `setHostIP` / `clearHostIP` 为节点主机名钉住引导 IP（有效期 3600 秒）。必须在 `initializeWebEngine()` 之后、`loadContent` 之前应用，因此 `EntryAbility` 在 `onCreate` 里初始化引擎和网络配置，在 `onWindowStageCreate` 里再补一次 `ensureApplied()`。
 - **节点测速**：`DohProbe` 直接构造 DNS A 记录的 wire 格式查询（base64url、`Accept: application/dns-message`）并解析 rcode，结果分为可用（显示毫秒延迟）、不可达、响应无效、解析失败。
 - **VPN 感知**：监听网络变化（400ms 防抖），检测到 `BEARER_VPN` 时暂停 DoH，避免与 fake-IP 方案冲突；该自动旁路可在面板中关闭。
-- **原图下载复用 DoH**：原生查看器下载 `pbs.twimg.com` 原图时按当前 DoH 策略发请求（"同步加速原图下载"开关），自动回退模式下 DoH 失败会改用系统 DNS 重试一次。
+- **头像与原图下载**：“同步加速原图下载”开启时，头像和原生查看器共享网页的 ArkWeb 下载通道，沿用当前 DoH、引导 IP 和网络环境；图片保存在应用缓存中，不弹出文件保存窗口。关闭同步后沿用独立 HTTP 下载策略。同步下载失败时不会另外切换到独立 HTTP；系统 DNS 回退遵循网页本身的 DoH 模式。
 - 配置写在 preferences 的 `opentwit_network`；改动后当前页面会自动重载，让新设置立刻生效。
 
 需要说明的是，DoH 只加密 DNS 查询本身：它不隐藏 TLS SNI、不改变 IP 路由，也不能绕过基于 IP/SNI 的封锁。

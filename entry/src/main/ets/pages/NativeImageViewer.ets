@@ -5,6 +5,7 @@ import { KeyCode } from '@kit.InputKit';
 import { curves, window } from '@kit.ArkUI';
 import { MediaAddress } from '../common/WebMedia';
 import { MediaFile, MediaFiles } from '../common/MediaFiles';
+import { WebImageDownloads } from '../common/WebImageDownloads';
 import { FONT_FAMILY, S8, S12, S16, TOUCH_TARGET } from '../common/Theme';
 
 /** 全窗口画布保留底层网页，只有悬浮操作栏避让系统区域。 */
@@ -12,6 +13,7 @@ import { FONT_FAMILY, S8, S12, S16, TOUCH_TARGET } from '../common/Theme';
 export struct NativeImageViewer {
   items: MediaAddress[] = [];
   initialIndex: number = 0;
+  webImages: WebImageDownloads | undefined = undefined;
   onClose: () => void = () => {};
   @State index: number = 0;
   @State loadedFiles: (MediaFile | undefined)[] = [];
@@ -37,6 +39,7 @@ export struct NativeImageViewer {
   private chromeHideTimer: number = -1;
 
   aboutToAppear(): void {
+    this.files = new MediaFiles(this.webImages);
     this.windowReady = this.prepareWindow();
     this.index = this.initialIndex;
     this.loadIndex(this.index);

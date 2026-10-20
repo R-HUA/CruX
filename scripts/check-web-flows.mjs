@@ -33,9 +33,21 @@ assert.equal(routes.isPostDetailUrl('https://x.com/alice/status/123?ref=home'),t
 for (const url of ['https://x.com/alice/status/123/photo/1','https://x.com/alice/status/123/mediaViewer','https://example.com/alice/status/123']) {
   assert.equal(routes.isPostDetailUrl(url),false,url);
 }
-const scripts = load('WebChrome', ['fillComposerScript','CLICK_POST_BUTTON_SCRIPT','POST_RESULT_SCRIPT','chromeScript','chromeFlagScript','chromeInsetsScript','OWN_HANDLE_SCRIPT','profileBootstrapScript','clickRouteScript']);
+const scripts = load('WebChrome', ['fillComposerScript','CLICK_POST_BUTTON_SCRIPT','POST_RESULT_SCRIPT','chromeScript','chromeFlagScript','chromeInsetsScript','chromeDocumentStartScript','OWN_HANDLE_SCRIPT','profileBootstrapScript','clickRouteScript','accountAvatarScript']);
+assert.equal(scripts.chromeDocumentStartScript(false),'');
+new vm.Script(scripts.chromeDocumentStartScript(true));
 // 回复直接使用当前详情的帖子编号，原帖是否被虚拟列表回收不影响面板显示。
 const mainSource=readFileSync(new URL('../entry/src/main/ets/pages/MainTabs.ets',import.meta.url),'utf8');
+const insetBody=mainSource.match(/private overlayTopInset\(\): number \{([\s\S]*?)\n  \}/)[1];
+const topInset=vm.runInNewContext(stripTypeScriptTypes('(function(){'+insetBody+'})'),{
+  HEADER_HEIGHT:56,HEADER_CONTENT_LIFT:4
+});
+const insetState={topInset:39,homeTabsHeight:28,overlaysWeb:()=>true,topChromeHeight:()=>56,isHomeRoot:()=>true};
+assert.equal(topInset.call(insetState),77,'Home inset ends at the measured underline, not the full title bar');
+insetState.homeTabsHeight=40;assert.equal(topInset.call(insetState),83,'Large text changes the measured boundary');
+insetState.isHomeRoot=()=>false;assert.equal(topInset.call(insetState),95);
+insetState.topChromeHeight=()=>0;assert.equal(topInset.call(insetState),0);
+insetState.overlaysWeb=()=>false;assert.equal(topInset.call(insetState),0);
 const replyMethod=mainSource.match(/private replyToPost\(\): void \{([\s\S]*?)\n  \}/)[1];
 const reply=vm.runInNewContext(stripTypeScriptTypes('(function(){'+replyMethod+'})'),{
   TWITTER_BASE:'https://x.com',web_webview:{WebviewController:class{}}
@@ -102,12 +114,13 @@ assert.equal(routeClicks,1);
 let cssWrites=0, cssText='', authVisible=false;
 const style={get textContent(){return cssText;},set textContent(value){cssText=value;cssWrites++;}};
 const location={pathname:'/home',href:'https://x.com/home'};
-const chromeContext={window:{location,addEventListener(){},otNative:{onUrlChange(){}}},location,
+let chromeNotifications=0,observedOptions;
+const chromeContext={window:{location,addEventListener(){},otNative:{onUrlChange(){chromeNotifications++;}}},location,
   history:{pushState(){},replaceState(){}},
   document:{documentElement:{},getElementById:()=>style,
     querySelector:()=>authVisible?{}:null,
     querySelectorAll:()=>[]},
-  MutationObserver:class{observe(){}disconnect(){}},setTimeout(){},clearTimeout(){}};
+  MutationObserver:class{observe(_root,options){observedOptions=options;}disconnect(){}},setTimeout(){},clearTimeout(){}};
 vm.runInNewContext(scripts.chromeScript(true,true,location.href),chromeContext);
 assert.match(cssText,/TopNavBar/);assert.match(cssText,/FloatingActionButtons_Tweet_Button/);
 const initialWrites=cssWrites;
@@ -124,6 +137,11 @@ assert.doesNotMatch(cssText,/display:none/);
 vm.runInNewContext(scripts.chromeFlagScript(true,false,location.href),chromeContext);
 assert.doesNotMatch(cssText,/TopNavBar|role='banner'/);
 assert.match(cssText,/FloatingActionButtons_Tweet_Button/);
+// 新页已确认后，迟到的旧页回调不能覆盖已确认的导航和标题状态。
+vm.runInNewContext(scripts.chromeScript(true,true,'https://x.com/home'),chromeContext);
+vm.runInNewContext(scripts.chromeFlagScript(true,true,'https://x.com/home'),chromeContext);
+assert.match(cssText,/FloatingActionButtons_Tweet_Button/);
+assert.doesNotMatch(cssText,/TopNavBar|role='banner'/);
 // 搜索页必须保留网页输入框及候选列表，仍只去重底部导航和发帖入口。
 authVisible=false;location.pathname='/search';location.href='https://x.com/search?q=中文';
 vm.runInNewContext(scripts.chromeScript(true,false,location.href),chromeContext);
@@ -153,6 +171,20 @@ vm.runInNewContext(scripts.chromeInsetsScript(48,70,400),chromeContext);
 assert.ok(Math.abs(parseFloat(insets.get('--ot-top-inset'))-117.6)<0.001);
 assert.equal(parseFloat(insets.get('--ot-bottom-inset')),171.5);
 assert.match(cssText,/main\[role="main"\]/);
+// URL 编码、追踪参数、hash、站点别名及尾斜杠不应释放同一路径的去重与裁剪规则。
+for(const url of ['https://x.com/home?lang=zh#timeline','https://x.com/home/',
+  'https://www.twitter.com/home?ref=app']) {
+  vm.runInNewContext(scripts.chromeFlagScript(true,true,url),chromeContext);
+  assert.match(cssText,/BottomBar/);
+  assert.match(cssText,/data-ot-pull-clip/);
+  assert.match(cssText,/overflow:clip/);
+}
+location.pathname='/search';location.href='https://x.com/search?q=%E4%B8%AD%E6%96%87';
+vm.runInNewContext(scripts.chromeScript(true,false,'https://x.com/search?q=中文'),chromeContext);
+assert.match(cssText,/BottomBar/);
+assert.doesNotMatch(cssText,/TopNavBar/);
+location.pathname='/home';location.href='https://x.com/home';
+vm.runInNewContext(scripts.chromeScript(true,true,location.href),chromeContext);
 chromeContext.window.innerWidth=400;chromeContext.window.__otUpdateInsets();
 assert.equal(insets.get('--ot-top-inset'),'48px');
 vm.runInNewContext(scripts.chromeInsetsScript(0,0,400),chromeContext);
@@ -161,6 +193,74 @@ vm.runInNewContext(scripts.chromeInsetsScript(48,70,400),chromeContext);
 authVisible=true;chromeContext.window.__otApplyTop();assert.equal(cssText,'');
 authVisible=false;location.pathname='/unknown/path';location.href='https://x.com/unknown/path';
 chromeContext.history.pushState();assert.doesNotMatch(cssText,/--ot-top-inset|--ot-bottom-inset/);
+
+// 头像只能来自账号控件或确认本人的资料头像，不读取大尺寸的时间线或他人头像。
+const ownAvatar='https://pbs.twimg.com/profile_images/123/own_normal.jpg';
+const otherAvatar='https://pbs.twimg.com/profile_images/456/other.jpg';
+const image=src=>({currentSrc:src,getAttribute:()=>src});
+const avatarRoot=src=>({querySelectorAll:()=>[image(src)]});
+const avatarContext={location:{pathname:'/home'},document:{querySelectorAll:selector=>
+  selector==='a[href]'?[]:[avatarRoot(ownAvatar)]}};
+assert.equal(vm.runInNewContext(scripts.accountAvatarScript(''),avatarContext),ownAvatar);
+for(const [kind,node] of [
+  ['background',{style:{backgroundImage:'url("'+ownAvatar+'")'},getAttribute:()=>''}],
+  ['svg-image',{getAttribute:name=>name==='href'?ownAvatar:''}]
+]){
+  avatarContext.document.querySelectorAll=()=>[{querySelectorAll:()=>[node]}];
+  assert.equal(vm.runInNewContext(scripts.accountAvatarScript(''),avatarContext),ownAvatar,kind);
+}
+avatarContext.document.querySelectorAll=()=>[];
+assert.equal(vm.runInNewContext(scripts.accountAvatarScript('alice'),avatarContext),'');
+
+// 首屏 DOM 与图片 src 延后就绪时通知原生重新读取；相同头像不会触发回调循环。
+const beforeAvatar=chromeNotifications;
+chromeContext.document.querySelectorAll=selector=>selector.startsWith('[data-testid="DashButton_ProfileIcon_Link"]')?[avatarRoot(ownAvatar)]:[];
+chromeContext.window.__otPass();assert.equal(chromeNotifications,beforeAvatar+1);
+chromeContext.window.__otPass();assert.equal(chromeNotifications,beforeAvatar+1);
+chromeContext.document.querySelectorAll=()=>[];
+assert.equal(observedOptions.attributes,true);
+assert.deepEqual(Array.from(observedOptions.attributeFilter),['src','srcset']);
+avatarContext.location.pathname='/alice';
+avatarContext.document.querySelectorAll=selector=>selector==='a[href]'?
+  [{getAttribute:()=>'/alice/photo',...avatarRoot(ownAvatar)},
+    {getAttribute:()=>'/bob/photo',...avatarRoot(otherAvatar)}]:[];
+assert.equal(vm.runInNewContext(scripts.accountAvatarScript('Alice'),avatarContext),ownAvatar);
+avatarContext.location.pathname='/bob';
+assert.equal(vm.runInNewContext(scripts.accountAvatarScript('alice'),avatarContext),'');
+avatarContext.location.pathname='/alice';
+avatarContext.document.querySelectorAll=selector=>selector==='a[href]'?
+  [{getAttribute:()=>'/alice/photo',...avatarRoot('https://pbs.twimg.com.evil.test/profile_images/a.jpg')}]:[];
+assert.equal(vm.runInNewContext(scripts.accountAvatarScript('alice'),avatarContext),'');
+
+// 执行实际胶囊显示方法，账号信息等正常网页不再出现额外设置入口。
+const pillBody=mainSource.match(/private settingsPillVisible\(\): boolean \{([\s\S]*?)\n  \}/)[1];
+const pill=vm.runInNewContext(stripTypeScriptTypes('(function(){'+pillBody+'})'),{
+  isSiteUrl:url=>/^https:\/\/x\.com\//.test(url)
+});
+const pillState={firstLoadDone:true,hasError:false,authenticationPage:false,
+  currentUrl:'https://x.com/alice/about',currentPath:'/alice/about',
+  showsNativeNavigation:()=>false,isMediaViewer:()=>false};
+for(const path of ['/alice/about','/settings','/settings/your_twitter_data/account','/unknown/path']){
+  pillState.currentPath=path;pillState.currentUrl='https://x.com'+path;
+  assert.equal(pill.call(pillState),false,path);
+}
+pillState.authenticationPage=true;
+assert.equal(pill.call(pillState),false,'A stale auth read cannot expose the pill on a normal page');
+pillState.authenticationPage=false;
+for(const path of ['/','/login','/signup','/i/flow/login','/i/flow/signup']){
+  pillState.currentPath=path;pillState.currentUrl='https://x.com'+path;
+  assert.equal(pill.call(pillState),true,path);
+}
+pillState.currentPath='/unknown/path';pillState.currentUrl='https://x.com/unknown/path';
+pillState.firstLoadDone=false;assert.equal(pill.call(pillState),true);
+pillState.firstLoadDone=true;pillState.hasError=true;assert.equal(pill.call(pillState),true);
+pillState.showsNativeNavigation=()=>true;assert.equal(pill.call(pillState),false);
+pillState.showsNativeNavigation=()=>false;
+for(const state of ['fullScreen','imageViewerOpen','sheetOpen','networkOpen','appearanceOpen','discovering','rawWeb']) {
+  pillState[state]=true;assert.equal(pill.call(pillState),false,state);pillState[state]=false;
+}
+
+// 头像下载、缓存和异步状态测试见 check-avatar-loading.mjs，使用生产下载器覆盖平台 I/O 边界。
 
 function posting({ disabled=false, missing=false, throws=false }={}) {
   let clicks=0; let observe; let timeout; let toasts=[];

@@ -35,9 +35,10 @@ delete context.window.otNative; handler(event); assert.equal(prevented,1);
 const png = Uint8Array.from([137,80,78,71,13,10,26,10,1,2,3,4]).buffer;
 let responses=[],requests=0,writes=[],removed=[],failWrite=false;
 let dohPolicy={mode:'off',url:undefined};
+let syncImageDownloader=true;
 let requestOptions=[];
 const runtime={ArrayBuffer,Uint8Array,Map,Promise,Date,canIUse:()=>true,
-  NetworkConfig:{getInstance:()=>({getDohPolicy:()=>dohPolicy})},
+  NetworkConfig:{getInstance:()=>({getDohPolicy:()=>dohPolicy,snapshot:()=>({syncImageDownloader})})},
   http:{RequestMethod:{GET:0},HttpDataType:{ARRAY_BUFFER:0},createHttp:()=>({
     request:async(_url,options)=>{requests++; requestOptions.push(options); const response=responses.shift(); if(response instanceof Error)throw response; return response;},destroy(){}})},
   fileIo:{OpenMode:{CREATE:1,READ_WRITE:2,TRUNC:4},listFile:async()=>[],open:async()=>({fd:1}),
@@ -70,6 +71,12 @@ runtime.fileIo.stat=async p=>({mtime:p.includes('-old.')?0:Date.now()/1000});
 responses=[{responseCode:200,result:png}];session=new MediaFiles();
 await session.load(address,{cacheDir:'/cache'});
 assert.deepEqual(removed,['/cache/x-image-1-old.jpg']);await session.close();
+removed=[];
+runtime.fileIo.listFile=async()=>['x-web-image-1-2-3.tmp','x-web-image-1-2-4.tmp','x-web-image-unrelated.tmp'];
+runtime.fileIo.stat=async p=>({mtime:p.endsWith('-3.tmp')?0:Date.now()/1000});
+responses=[{responseCode:200,result:png}];session=new MediaFiles();
+await session.load(address,{cacheDir:'/cache'});
+assert.deepEqual(removed,['/cache/x-web-image-1-2-3.tmp']);await session.close();
 
 // DoH policy: OFF sends no dnsOverHttps, AUTO retries once without it,
 // SECURE_ONLY must not fall back to system DNS.
