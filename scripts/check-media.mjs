@@ -34,14 +34,17 @@ delete context.window.otNative; handler(event); assert.equal(prevented,1);
 
 const png = Uint8Array.from([137,80,78,71,13,10,26,10,1,2,3,4]).buffer;
 let responses=[],requests=0,writes=[],removed=[],failWrite=false;
+let dohPolicy={mode:'off',url:undefined};
+let requestOptions=[];
 const runtime={ArrayBuffer,Uint8Array,Map,Promise,Date,canIUse:()=>true,
+  NetworkConfig:{getInstance:()=>({getDohPolicy:()=>dohPolicy})},
   http:{RequestMethod:{GET:0},HttpDataType:{ARRAY_BUFFER:0},createHttp:()=>({
-    request:async()=>{requests++; const response=responses.shift(); if(response instanceof Error)throw response; return response;},destroy(){}})},
+    request:async(_url,options)=>{requests++; requestOptions.push(options); const response=responses.shift(); if(response instanceof Error)throw response; return response;},destroy(){}})},
   fileIo:{OpenMode:{CREATE:1,READ_WRITE:2,TRUNC:4},listFile:async()=>[],open:async()=>({fd:1}),
     write:async(_fd,b)=>{if(failWrite)throw Error('Disk full'); const n=Math.min(5,b.byteLength);writes.push(...new Uint8Array(b).slice(0,n));return n;},
     close:async()=>{},unlink:async p=>removed.push(p)},
   image:{createImageSource:()=>({getImageInfo:async()=>({size:{width:20,height:10}}),release:async()=>{}})},
-  hilog:{info(){}}};
+  hilog:{info(){},warn(){}}};
 const {MediaFiles,imageExtension}=vm.runInNewContext(source('MediaFiles')+';({MediaFiles,imageExtension})',runtime);
 assert.equal(imageExtension(png),'png'); assert.throws(()=>imageExtension(new ArrayBuffer(12)));
 responses=[{responseCode:404},{responseCode:200,result:png}];
@@ -67,4 +70,25 @@ runtime.fileIo.stat=async p=>({mtime:p.includes('-old.')?0:Date.now()/1000});
 responses=[{responseCode:200,result:png}];session=new MediaFiles();
 await session.load(address,{cacheDir:'/cache'});
 assert.deepEqual(removed,['/cache/x-image-1-old.jpg']);await session.close();
-console.log('Media address, click ownership, byte preservation, cache and error boundary checks passed.');
+
+// DoH policy: OFF sends no dnsOverHttps, AUTO retries once without it,
+// SECURE_ONLY must not fall back to system DNS.
+dohPolicy={mode:'off',url:undefined};
+responses=[{responseCode:200,result:png}];requests=0;requestOptions=[];
+session=new MediaFiles();await session.load(address,{cacheDir:'/cache'});
+assert.equal(requests,1);assert.equal(requestOptions[0].dnsOverHttps,undefined);await session.close();
+dohPolicy={mode:'auto',url:'https://dns.example/dns-query'};
+responses=[Error('DoH failed'),{responseCode:200,result:png}];requests=0;requestOptions=[];
+session=new MediaFiles();file=await session.load(address,{cacheDir:'/cache'});
+assert.equal(requests,2);
+assert.equal(requestOptions[0].dnsOverHttps,'https://dns.example/dns-query');
+assert.equal(requestOptions[1].dnsOverHttps,undefined);
+await session.close();
+dohPolicy={mode:'secure_only',url:'https://dns.example/dns-query'};
+responses=[Error('DoH failed')];requests=0;requestOptions=[];
+session=new MediaFiles();
+await assert.rejects(session.load(address,{cacheDir:'/cache'}));
+assert.equal(requests,1);
+assert.equal(requestOptions[0].dnsOverHttps,'https://dns.example/dns-query');
+await session.close();
+console.log('Media address, click ownership, byte preservation, cache, DoH and error boundary checks passed.');

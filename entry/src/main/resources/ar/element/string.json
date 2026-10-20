@@ -271,6 +271,278 @@
     {
       "name": "file_cleanup_failed",
       "value": "تعذر حذف الملف المؤقت. تحقق من الملف المحفوظ"
+    },
+    {
+      "name": "network_title",
+      "value": "الشبكة والأمان"
+    },
+    {
+      "name": "network_status_title",
+      "value": "الحالة"
+    },
+    {
+      "name": "network_status_mode",
+      "value": "تشفير DNS"
+    },
+    {
+      "name": "network_status_node",
+      "value": "العقدة النشطة"
+    },
+    {
+      "name": "network_status_vpn",
+      "value": "VPN"
+    },
+    {
+      "name": "network_status_mode_off",
+      "value": "DNS النظام"
+    },
+    {
+      "name": "network_status_mode_auto",
+      "value": "تلقائي (مع الرجوع الاحتياطي)"
+    },
+    {
+      "name": "network_status_mode_secure",
+      "value": "DNS آمن فقط"
+    },
+    {
+      "name": "network_status_paused",
+      "value": "متوقف مؤقتًا أثناء اتصال VPN"
+    },
+    {
+      "name": "network_status_apply_failed",
+      "value": "تعذّر تطبيق إعدادات DoH. سيستخدم X خدمة DNS الخاصة بالنظام."
+    },
+    {
+      "name": "network_retry",
+      "value": "إعادة المحاولة"
+    },
+    {
+      "name": "network_mode_title",
+      "value": "وضع تشفير DNS"
+    },
+    {
+      "name": "network_mode_off",
+      "value": "إيقاف"
+    },
+    {
+      "name": "network_mode_auto",
+      "value": "تلقائي"
+    },
+    {
+      "name": "network_mode_secure",
+      "value": "آمن فقط"
+    },
+    {
+      "name": "network_mode_off_desc",
+      "value": "استخدام محلّل DNS الخاص بالنظام."
+    },
+    {
+      "name": "network_mode_auto_desc",
+      "value": "تفضيل DoH والرجوع إلى DNS النظام عند الفشل. موصى به."
+    },
+    {
+      "name": "network_mode_secure_desc",
+      "value": "عدم الرجوع مطلقًا. إذا تعذّر الوصول إلى العقدة فلن يتم تحميل X."
+    },
+    {
+      "name": "network_mode_secure_confirm_title",
+      "value": "استخدام DNS الآمن فقط؟"
+    },
+    {
+      "name": "network_mode_secure_confirm_message",
+      "value": "لن يتم استخدام DNS النظام. إذا تعذّر الوصول إلى العقدة المحددة فستفشل صفحات الويب والصور في التحميل."
+    },
+    {
+      "name": "network_mode_confirm",
+      "value": "استخدام DNS الآمن"
+    },
+    {
+      "name": "network_mode_vpn_note",
+      "value": "يتم إيقاف DoH مؤقتًا أثناء اتصال VPN."
+    },
+    {
+      "name": "network_behavior_title",
+      "value": "السلوك"
+    },
+    {
+      "name": "network_sync_images",
+      "value": "مزامنة تنزيل الصور الأصلية"
+    },
+    {
+      "name": "network_sync_images_desc",
+      "value": "استخدام عقدة DoH الحالية لتنزيل صور pbs.twimg.com."
+    },
+    {
+      "name": "network_vpn_bypass",
+      "value": "تجاوز VPN التلقائي"
+    },
+    {
+      "name": "network_vpn_bypass_desc",
+      "value": "إيقاف DoH مؤقتًا عند اتصال VPN بالنظام لتجنّب التعارض مع fake-IP."
+    },
+    {
+      "name": "network_nodes_title",
+      "value": "خوادم DoH"
+    },
+    {
+      "name": "network_nodes_test_all",
+      "value": "اختبار الكل"
+    },
+    {
+      "name": "network_nodes_testing_all",
+      "value": "جارٍ الاختبار…"
+    },
+    {
+      "name": "network_nodes_add",
+      "value": "إضافة"
+    },
+    {
+      "name": "network_node_test",
+      "value": "اختبار"
+    },
+    {
+      "name": "network_node_testing",
+      "value": "جارٍ الاختبار…"
+    },
+    {
+      "name": "network_node_untested",
+      "value": "لم يُختبر"
+    },
+    {
+      "name": "network_node_unreachable",
+      "value": "غير قابل للوصول"
+    },
+    {
+      "name": "network_node_bad_response",
+      "value": "استجابة غير صالحة"
+    },
+    {
+      "name": "network_node_rcode",
+      "value": "خطأ DNS"
+    },
+    {
+      "name": "network_node_ms",
+      "value": "%d ms"
+    },
+    {
+      "name": "network_node_custom",
+      "value": "مخصص"
+    },
+    {
+      "name": "network_node_delete",
+      "value": "حذف"
+    },
+    {
+      "name": "network_custom_title",
+      "value": "عقد مخصصة"
+    },
+    {
+      "name": "network_custom_name",
+      "value": "الاسم"
+    },
+    {
+      "name": "network_custom_url",
+      "value": "عنوان DoH ‏(https)"
+    },
+    {
+      "name": "network_custom_bootstrap",
+      "value": "عنوان IP للتمهيد (اختياري)"
+    },
+    {
+      "name": "network_custom_save",
+      "value": "حفظ واستخدام"
+    },
+    {
+      "name": "network_custom_cancel",
+      "value": "إلغاء"
+    },
+    {
+      "name": "network_custom_empty",
+      "value": "لا توجد عقد مخصصة بعد."
+    },
+    {
+      "name": "network_custom_error_name",
+      "value": "أدخل اسمًا."
+    },
+    {
+      "name": "network_custom_error_url",
+      "value": "أدخل عنوان DoH ‏HTTPS صالحًا مع مسار."
+    },
+    {
+      "name": "network_custom_error_ip",
+      "value": "أدخل عنوان IPv4 أو IPv6 صالحًا."
+    },
+    {
+      "name": "network_custom_error_duplicate",
+      "value": "عنوان DoH هذا موجود في القائمة."
+    },
+    {
+      "name": "network_custom_error_limit",
+      "value": "يمكنك إضافة %d عقد مخصصة كحد أقصى."
+    },
+    {
+      "name": "network_custom_error_save",
+      "value": "تعذّر حفظ الإعداد."
+    },
+    {
+      "name": "network_vpn_active",
+      "value": "متصل"
+    },
+    {
+      "name": "network_vpn_inactive",
+      "value": "غير متصل"
+    },
+    {
+      "name": "network_vpn_unknown",
+      "value": "غير معروف"
+    },
+    {
+      "name": "network_note_title",
+      "value": "حول DoH"
+    },
+    {
+      "name": "network_note_sni",
+      "value": "يشفّر DoH استعلامات DNS فقط. لا يخفي TLS SNI ولا يغيّر توجيه IP ولا يتجاوز حجب IP/SNI."
+    },
+    {
+      "name": "network_note_provider",
+      "value": "يمكن لمزوّد DoH المحدد رؤية استعلامات DNS الخاصة بك. اختر مزوّدًا تثق به."
+    },
+    {
+      "name": "network_note_secure",
+      "value": "لا يرجع DNS الآمن فقط إلى DNS النظام أبدًا. إذا فشلت العقدة فلن يتم تحميل الصفحات والصور."
+    },
+    {
+      "name": "network_note_vpn",
+      "value": "عند اتصال VPN يتم إيقاف DoH مؤقتًا وتتولى VPN معالجة DNS."
+    },
+    {
+      "name": "network_note_images",
+      "value": "تستخدم تنزيلات الصور الأصلية DoH عند تفعيل المزامنة. يعيد الوضع التلقائي المحاولة باستخدام DNS النظام عند فشل DoH."
+    },
+    {
+      "name": "network_note_domestic",
+      "value": "تطبّق عقد DoH المحلية سياسة التحليل الخاصة بها أيضًا."
+    },
+    {
+      "name": "network_open_settings",
+      "value": "إعدادات الشبكة"
+    },
+    {
+      "name": "network_reload_note",
+      "value": "تُطبّق التغييرات على الطلبات الجديدة. أعد تحميل الصفحة إذا لم يستجب X."
+    },
+    {
+      "name": "network_saved",
+      "value": "تم حفظ إعدادات الشبكة."
+    },
+    {
+      "name": "network_save_failed",
+      "value": "تم تطبيق الإعدادات لكن تعذّر حفظها."
+    },
+    {
+      "name": "network_info_reason",
+      "value": "التحقق مما إذا كان VPN نشطًا حتى يتوقف التطبيق عن DoH مؤقتًا ويتجنّب تعارض DNS."
     }
   ]
 }

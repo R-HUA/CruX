@@ -4,6 +4,7 @@ import { preferences } from '@kit.ArkData';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { display, window } from '@kit.ArkUI';
 import web_webview from '@ohos.web.webview';
+import { NetworkConfig } from '../common/NetworkConfig';
 
 const DOMAIN = 0x0000;
 // Same store the page uses for the account handle, avatar and composer draft.
@@ -16,6 +17,21 @@ export default class EntryAbility extends UIAbility {
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onCreate');
     this.enableWebDevToolsForDebugBuilds();
+    // setHttpDns is a no-op ("web engine is nullptr") until the ArkWeb engine
+    // exists. Initialize it here so DoH applies before the first page load.
+    this.initializeWebEngine();
+    NetworkConfig.getInstance().initialize(this.context);
+  }
+
+  private initializeWebEngine(): void {
+    try {
+      web_webview.WebviewController.initializeWebEngine();
+      hilog.info(DOMAIN, 'testTag', '%{public}s', 'ArkWeb engine initialized');
+    } catch (err) {
+      const error = err as BusinessError;
+      hilog.warn(DOMAIN, 'testTag', 'initializeWebEngine failed: %{public}d %{public}s',
+        error.code, error.message);
+    }
   }
 
   // ArkWeb's DevTools bridge is what `hdc fport` + CDP attach to. It is a
@@ -36,6 +52,9 @@ export default class EntryAbility extends UIAbility {
 
   onWindowStageCreate(windowStage: window.WindowStage): void {
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onWindowStageCreate');
+    // Repeated before loadContent so setHostIP pins are in place even if the
+    // first call ran before the ArkWeb engine was ready.
+    NetworkConfig.getInstance().ensureApplied();
     windowStage.loadContent('pages/MainTabs', (err) => {
       if (err.code) {
         hilog.error(DOMAIN, 'testTag', 'Failed to load the content. Cause: %{public}s', JSON.stringify(err));
@@ -99,6 +118,7 @@ export default class EntryAbility extends UIAbility {
 
   onForeground(): void {
     AppStorage.setOrCreate('appBackground', false);
+    NetworkConfig.getInstance().refresh();
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onForeground');
   }
 
@@ -108,6 +128,7 @@ export default class EntryAbility extends UIAbility {
   }
 
   onDestroy(): void {
+    NetworkConfig.getInstance().dispose();
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onDestroy');
   }
 }

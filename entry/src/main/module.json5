@@ -51,6 +51,10 @@
         "reason": "$string:internet_reason"
       },
       {
+        "name": "ohos.permission.GET_NETWORK_INFO",
+        "reason": "$string:network_info_reason"
+      },
+      {
         "name": "ohos.permission.VIBRATE",
         "reason": "$string:vibrate_reason"
       },
