@@ -5,6 +5,7 @@
     "description": "CruX entry module",
     "mainElement": "EntryAbility",
     "deviceTypes": [
+      "phone",
       "default",
       "tablet",
       "2in1"
