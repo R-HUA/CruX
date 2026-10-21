@@ -34,7 +34,7 @@ export default class EntryAbility extends UIAbility {
 
   /** 冷启动与再次唤起共用入口，页面就绪前保留内容，避免异步分享覆盖前一次请求。 */
   private async handleIncomingWant(want: Want): Promise<void> {
-    if (want.action !== 'ohos.want.action.sendData' && want.uri === undefined) { return; }
+    if (want.action !== 'ohos.want.action.sendData' && (want.uri === undefined || want.uri.trim() === '')) { return; }
     const pending = AppStorage.get<IncomingContent>('incomingContent');
     if (this.receivingContent || (pending !== undefined && pending.kind !== '')) {
       hilog.warn(DOMAIN, 'IncomingContent', 'event=incoming_rejected reason=busy');

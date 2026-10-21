@@ -150,31 +150,20 @@ export function routeIndexForUrl(url: string): number {
   return -1;
 }
 
-// Handle segment for profile pages (/someuser), else ''.
+// 主页标签共用账号与导航边界，不把帖子详情、关注列表或未知子页当作主页。
+export const PROFILE_PATH_PATTERN: string = '^/([a-z0-9_]{1,15})(?:/(with_replies|reposts|highlights|articles|media|likes))?$';
+
+/** 主页及其内容标签所属的账号，其他页面返回空字符串。 */
 export function profileHandleForUrl(url: string): string {
   if (!/^https:\/\/(www\.)?(x|twitter)\.com([/?#]|$)/i.test(url)) {
     return '';
   }
   const path: string = pathOf(url);
-  if (path.indexOf('/', 1) >= 0 || path.length < 2 || path.length > 16) {
-    return '';
-  }
-  if (path === '/home' || path === '/explore' || path === '/notifications' ||
-    path === '/messages' || path === '/search' || path === '/settings' || path === '/i') {
-    return '';
-  }
-  if (RESERVED_ROOTS[path]) {
-    return '';
-  }
-  const seg: string = path.substring(1);
-  for (let i: number = 0; i < seg.length; i++) {
-    const ch: string = seg.charAt(i);
-    const ok: boolean = (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch === '_';
-    if (!ok) {
-      return '';
-    }
-  }
-  return seg;
+  const match = new RegExp(PROFILE_PATH_PATTERN).exec(path);
+  if (match === null) { return ''; }
+  const root = '/' + match[1];
+  if (RESERVED_ROOTS[root] || ['/home', '/explore', '/notifications', '/messages', '/search'].includes(root)) { return ''; }
+  return match[1];
 }
 
 // 标签根页面用于返回顺序判定，搜索页仍保留网页搜索交互。

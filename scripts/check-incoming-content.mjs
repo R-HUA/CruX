@@ -49,6 +49,10 @@ const ability = vm.runInNewContext(stripTypeScriptTypes(abilitySource)+';new Ent
   NetworkConfig:{getInstance:()=>({initialize(){}})},
   systemShare:{getSharedData:()=>new Promise(resolve=>{resolveShare=resolve;})}
 });
+for (const want of [{}, {uri:''}, {uri:' \n '}, {action:'ohos.want.action.home',uri:''}]) {
+  await ability.handleIncomingWant(want);
+  assert.equal(storage.size,0,'普通启动不产生分享内容或错误');
+}
 ability.onCreate({action:'ohos.want.action.viewData',uri:'twitter://status?id=42'},{});
 assert.equal(initializeCount,1);
 assert.equal(storage.get('incomingContent').value,'https://x.com/i/web/status/42');

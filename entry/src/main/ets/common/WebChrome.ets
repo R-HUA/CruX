@@ -1,4 +1,4 @@
-import { RESERVED_ROOTS, SECONDARY_PATH_PATTERN } from './WebConfig';
+import { RESERVED_ROOTS, SECONDARY_PATH_PATTERN, PROFILE_PATH_PATTERN } from './WebConfig';
 
 // OpenTwit-Web runs the real x.com web app inside a native HarmonyOS shell.
 // 原生只替代已支持业务页面的导航和编辑入口，其余页面保留网页界面。
@@ -109,6 +109,29 @@ export const OWN_HANDLE_SCRIPT: string = `(function(){
 // layout, so an unpaced observer is a lot of work for nothing.
 const CHROME_OBSERVER_MS: number = 250;
 
+// 文档首帧、SPA 切页和资料测量必须使用同一组主页标签路径。
+const PROFILE_HANDLE_SCRIPT: string = 'function(p){var match=new RegExp(' + JSON.stringify(PROFILE_PATH_PATTERN) + ').exec(p.toLowerCase());' +
+  'if(!match)return "";var root="/"+match[1];return ' + JSON.stringify(RESERVED_ROOTS) + '[root]||' +
+  '["/home","/explore","/search","/notifications","/messages"].indexOf(root)>=0?"":match[1];}';
+
+/** 每次进入媒体页只选择一次照片，之后保留用户手动选择的视频分类。 */
+export const PROFILE_MEDIA_SCRIPT: string = `(function(){
+  var path=location.pathname.replace(/\\/$/,'').toLowerCase();
+  var handle=(${PROFILE_HANDLE_SCRIPT})(path);
+  if(!handle||path!=='/'+handle+'/media'){window.__otPhotoEntry='';return;}
+  if(window.__otPhotoEntry===path)return;
+  var choices=document.querySelectorAll('main [role="tab"],main [role="button"],main button');
+  for(var i=0;i<choices.length;i++){
+    var choice=choices[i];
+    if(choice.closest('article,[data-testid="cellInnerDiv"],[role="dialog"]'))continue;
+    var label=(choice.getAttribute('aria-label')||choice.innerText||choice.textContent||'').trim();
+    if(!/^(Photos|照片|相片|الصور)(?:\\s*\\1)?$/i.test(label))continue;
+    window.__otPhotoEntry=path;
+    if(choice.getAttribute('aria-selected')!=='true'&&choice.getAttribute('aria-pressed')!=='true')choice.click();
+    return;
+  }
+})()`;
+
 // 第 12 节确认的结构：负 top 的绝对定位指示器 → 位移层 → 不移动的列表外层。
 // 从定位层识别边界，不依赖刷新图标的语言，也不要求 svg 紧贴固定层级。
 const PULL_CLIP_SCRIPT: string = `(function(enabled){
@@ -146,10 +169,8 @@ export function chromeDocumentStartScript(enabled: boolean): string {
   return '(function(){if(window!==window.top)return;' +
     'var update=function(){if(window.__otChromePaused||!document.head)return;' +
     'var p=location.pathname.replace(/\\/$/,"").toLowerCase()||"/";' +
-    'var reserved=' + JSON.stringify(RESERVED_ROOTS) + ';' +
     'var secondary=new RegExp(' + JSON.stringify(SECONDARY_PATH_PATTERN) + ').test(p);' +
-    'var profile=/^\\/[a-z0-9_]{1,15}$/.test(p)&&!reserved[p]&&' +
-    '["/home","/explore","/search","/notifications","/messages"].indexOf(p)<0;' +
+    'var profile=Boolean((' + PROFILE_HANDLE_SCRIPT + ')(p));' +
     'var detail=/^\\/(?:[a-z0-9_]{1,15}|i\\/web)\\/status\\/\\d+$/.test(p);' +
     'var nav=secondary||profile||detail||p==="/home"||/^\\/(explore|search|notifications|messages|i\\/chat)(\\/|$)/.test(p);' +
     'var header=secondary||profile||detail||["/home","/notifications"].indexOf(p)>=0;' +
@@ -161,7 +182,7 @@ export function chromeDocumentStartScript(enabled: boolean): string {
     'if(p==="/home"&&!auth)rules+=' + JSON.stringify(HOME_TABS_CSS + PULL_CLIP_CSS) + ';' +
     'if(detail&&!auth)rules+=' + JSON.stringify(REPLY_CSS) + ';' +
     'if(css.textContent!==rules)css.textContent=rules;' +
-    PULL_CLIP_SCRIPT + '(p==="/home"&&!auth);' + REPORT_THEME_SCRIPT + '};' +
+    PULL_CLIP_SCRIPT + '(p==="/home"&&!auth);if(!auth){' + PROFILE_MEDIA_SCRIPT + ';}' + REPORT_THEME_SCRIPT + '};' +
     'var observer=new MutationObserver(function(){if(window.__otObs){observer.disconnect();return;}update();});' +
     'window.__otInitialObserver=observer;window.__otInitialUpdate=update;' +
     'observer.observe(document,{childList:true,subtree:true});update();' +
@@ -177,8 +198,9 @@ const CHROME_ROUTE_KEY: string = 'function(value){return String(value)' +
 export const PROFILE_LAYOUT_SCRIPT: string = `(function(active){
   if(!window.otNative||!window.otNative.onProfileLayout)return;
   var path=location.pathname.replace(/\\/$/,'').toLowerCase();
-  if(!active||!/^\\/[a-z0-9_]{1,15}$/.test(path)||${JSON.stringify(RESERVED_ROOTS)}[path]||
-    ['/home','/explore','/search','/notifications','/messages'].indexOf(path)>=0)return;
+  var account=(${PROFILE_HANDLE_SCRIPT})(path);
+  if(!active||!account)return;
+  path='/'+account;
   var y=window.scrollY;
   var result={url:String(location.href),width:window.innerWidth,viewWidth:window.__otViewportWidth||0,
     scrollY:y,ready:false,hasBanner:false,bannerBottom:0,identityBottom:0,name:'',handle:''};
@@ -228,12 +250,12 @@ export function chromeScript(nativeNavigation: boolean, nativeHeader: boolean, u
     'window.__otPullMatches=clipPull(active&&(window.__otInsetTop>0||p==="/home"));' +
     'var rules=auth?"":' + JSON.stringify(WEB_SAFE_AREA_CSS) + ';' +
     'if(active){rules+=' + JSON.stringify(CHROME_CSS) + ';' +
-    'if(window.__otInsetTop>0||window.__otInsetBottom>0||(/^\\/[a-z0-9_]{1,15}$/i.test(p)&&!' +
-    JSON.stringify(RESERVED_ROOTS) + '[p.toLowerCase()]&&["/home","/explore","/search","/notifications","/messages"].indexOf(p.toLowerCase())<0))rules+=' + JSON.stringify(OVERLAY_CSS) + ';' +
+    'if(window.__otInsetTop>0||window.__otInsetBottom>0||(' + PROFILE_HANDLE_SCRIPT + ')(p))rules+=' + JSON.stringify(OVERLAY_CSS) + ';' +
     'if(window.__otNativeHeader){rules+=' + JSON.stringify(HEADER_CSS) + ';' +
     'if(/^\\/(?:[a-z0-9_]{1,15}|i\\/web)\\/status\\/\\d+$/i.test(p))rules+=' + JSON.stringify(REPLY_CSS) + ';' +
     'if(p==="/home")rules+=' + JSON.stringify(HOME_TABS_CSS) + ';}}' +
     'if(css.textContent!==rules)css.textContent=rules;' +
+    'if(!auth){' + PROFILE_MEDIA_SCRIPT + ';}' +
     'if(window.__otAuth!==Boolean(auth)){' +
     'window.__otAuth=Boolean(auth);' +
     'if(window.otNative)window.otNative.onUrlChange("main",String(location.href));}' +

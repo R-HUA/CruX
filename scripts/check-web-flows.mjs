@@ -7,7 +7,7 @@ function load(name, exports) {
   const path = new URL('../entry/src/main/ets/common/' + name + '.ets', import.meta.url);
   const source = readFileSync(path, 'utf8').replace(/^import .*;\r?\n/gm, '');
   const js = stripTypeScriptTypes(source).replace(/^export /gm, '');
-  const context = name === 'WebChrome' ? load('WebConfig', ['RESERVED_ROOTS','SECONDARY_PATH_PATTERN']) : {};
+  const context = name === 'WebChrome' ? load('WebConfig', ['RESERVED_ROOTS','SECONDARY_PATH_PATTERN','PROFILE_PATH_PATTERN']) : {};
   return vm.runInNewContext(js + ';({' + exports.join(',') + '})', context);
 }
 const routes = load('WebConfig', ['routeIndexForUrl', 'profileHandleForUrl','usesNativeNavigation','usesNativeHeader','isTabRootPath','isPostDetailUrl']);
@@ -17,6 +17,16 @@ for (const [path, expected] of [['/home',0],['/search?q=a',1],['/notifications',
 assert.equal(routes.routeIndexForUrl('https://example.com/home'), -1);
 assert.equal(routes.profileHandleForUrl('https://x.com/settings'), '');
 assert.equal(routes.profileHandleForUrl('https://x.com.evil.test/alice'), '');
+for(const tab of ['with_replies','reposts','highlights','articles','media','likes']){
+  const url='https://x.com/Alice/'+tab;
+  assert.equal(routes.profileHandleForUrl(url),'alice');
+  assert.equal(routes.routeIndexForUrl(url),4);
+  assert.equal(routes.usesNativeNavigation(url),true);
+  assert.equal(routes.usesNativeHeader(url),true);
+}
+for(const path of ['/home/media','/i/media','/alice/media/unknown','/alice/followers','/alice/status/1']){
+  assert.equal(routes.profileHandleForUrl('https://x.com'+path),'',path);
+}
 for(const path of ['/home','/search?q=中文','/notifications','/messages/42','/i/chat','/alice','/alice/status/123','/settings','/settings/profile','/i/bookmarks','/alice/lists']){
   assert.equal(routes.usesNativeNavigation('https://x.com'+path),true,path);
 }
@@ -39,13 +49,27 @@ assert.equal(routes.isPostDetailUrl('https://x.com/i/web/status/123'),true);
 for (const url of ['https://x.com/alice/status/123/photo/1','https://x.com/alice/status/123/mediaViewer','https://example.com/alice/status/123']) {
   assert.equal(routes.isPostDetailUrl(url),false,url);
 }
-const scripts = load('WebChrome', ['fillComposerScript','CLICK_POST_BUTTON_SCRIPT','POST_RESULT_SCRIPT','chromeScript','chromeFlagScript','chromeInsetsScript','chromeDocumentStartScript','chromeActiveScript','COMPOSER_READY_SCRIPT','ACCOUNT_SWITCH_SCRIPT','OWN_HANDLE_SCRIPT','profileBootstrapScript','clickRouteScript','accountAvatarScript','accountAvatarDiagScript','PROFILE_LAYOUT_SCRIPT']);
+const scripts = load('WebChrome', ['fillComposerScript','CLICK_POST_BUTTON_SCRIPT','POST_RESULT_SCRIPT','chromeScript','chromeFlagScript','chromeInsetsScript','chromeDocumentStartScript','chromeActiveScript','COMPOSER_READY_SCRIPT','ACCOUNT_SWITCH_SCRIPT','OWN_HANDLE_SCRIPT','profileBootstrapScript','clickRouteScript','accountAvatarScript','accountAvatarDiagScript','PROFILE_LAYOUT_SCRIPT','PROFILE_MEDIA_SCRIPT']);
 assert.equal(scripts.chromeDocumentStartScript(false),'');
+let photoClicks=0, photoReady=false;
+const photoChoice={textContent:'照片',closest:()=>null,getAttribute:()=>null,click(){photoClicks++;}};
+const mediaContext={window:{},location:{pathname:'/alice/media'},document:{querySelectorAll:()=>photoReady?[photoChoice]:[]}};
+const selectPhotos=()=>vm.runInNewContext(scripts.PROFILE_MEDIA_SCRIPT,mediaContext);
+selectPhotos();assert.equal(photoClicks,0);
+photoReady=true;selectPhotos();assert.equal(photoClicks,1,'等待照片控件出现后选择');
+selectPhotos();assert.equal(photoClicks,1,'用户随后切回视频时不再强制跳回照片');
+mediaContext.location.pathname='/alice';selectPhotos();
+mediaContext.location.pathname='/alice/media';selectPhotos();assert.equal(photoClicks,2,'再次进入媒体页重新默认照片');
+mediaContext.location.pathname='/bob/media';photoChoice.textContent='PhotosPhotos';selectPhotos();assert.equal(photoClicks,3);
+photoChoice.closest=()=>({});mediaContext.location.pathname='/carol/media';selectPhotos();
+assert.equal(photoClicks,3,'不点击帖子或对话框中的同名内容');
+mediaContext.location.pathname='/i/media';photoChoice.closest=()=>null;selectPhotos();assert.equal(photoClicks,3);
 new vm.Script(scripts.chromeDocumentStartScript(true));
 // 文档开始阶段与原生路由一致；登录表单出现时不得隐藏其导航。
 for (const path of ['/home','/explore','/search','/notifications','/messages','/messages/42',
   '/i/chat','/i/chat/conversations/42','/alice','/alice/status/123','/settings','/settings/profile','/i/bookmarks',
-  '/alice/lists','/i/web/status/123','/i/flow/login','/grok','/unknown/path','/home/unknown','/invalid-handle','/']) {
+  '/alice/lists','/alice/with_replies','/alice/reposts','/alice/highlights','/alice/articles','/alice/media','/alice/likes',
+  '/i/web/status/123','/i/flow/login','/grok','/unknown/path','/home/unknown','/invalid-handle','/']) {
   const style = {textContent:''};
   let auth = false;
   let update;
@@ -118,12 +142,31 @@ const profileContext={window:{innerWidth:440,__otViewportWidth:440,get scrollY()
   document:{querySelectorAll:()=>[nameNode],querySelector:()=>hasBanner?{getBoundingClientRect:()=>({bottom:200-profileY})}:null}};
 const measure=()=>vm.runInNewContext(scripts.PROFILE_LAYOUT_SCRIPT+'(true)',profileContext);
 measure();assert.equal(profileReports.at(-1).bannerBottom,200);assert.equal(profileReports.at(-1).identityBottom,320);
-profileY=100;measure();assert.equal(profileReports.length,1,'Scrolling does not repeatedly send unchanged document geometry');
+for(const tab of ['with_replies','media','articles']){
+  profileContext.location={pathname:'/alice/'+tab,href:'https://x.com/alice/'+tab};measure();
+  assert.equal(profileReports.at(-1).ready,true,'子标签沿用同一资料区测量');
+}
+profileContext.location={pathname:'/alice',href:'https://x.com/alice'};measure();
+const reportsBeforeScroll=profileReports.length;
+profileY=100;measure();assert.equal(profileReports.length,reportsBeforeScroll,'Scrolling does not repeatedly send unchanged document geometry');
 hasBanner=false;measure();assert.equal(profileReports.at(-1).bannerBottom,520);assert.equal(profileReports.at(-1).hasBanner,false);
 profileContext.location={pathname:'/bob',href:'https://x.com/bob'};measure();assert.equal(profileReports.at(-1).ready,false);
 domHandle='bob';measure();assert.equal(profileReports.at(-1).ready,true);assert.equal(profileReports.at(-1).scrollY,100);
 identityHeight=0;measure();assert.equal(profileReports.at(-1).ready,false,'Loading placeholders cannot reveal the title');
-assert.match(mainSource,/onPageBegin\(\(\) => \{\s*if \(!this.webNetworkReady\) \{ return; \}\s*this.resetProfileLayout\(\)/);
+const pageBegin=mainSource.match(/\.onPageBegin\(\(\) => \{([\s\S]*?)\n      \}\)/)[1];
+const begin=vm.runInNewContext('(function(){'+pageBegin+'})');
+const loadingState={webNetworkReady:true,documentLoading:false,incomingPageReady:true,hasError:true,resetProfileLayout(){this.reset=true;},armFirstLoadTimeout(){}};
+begin.call(loadingState);
+assert.equal(loadingState.reset,true);assert.equal(loadingState.documentLoading,true);assert.equal(loadingState.hasError,false);
+loadingState.documentLoading=false;loadingState.webNetworkReady=false;begin.call(loadingState);
+assert.equal(loadingState.documentLoading,false,'网络策略阻断时不启动加载遮罩');
+let loadTimeout;
+const loadingMethods=['armFirstLoadTimeout','finishFirstLoad'].map(name=>mainSource.match(new RegExp('^  private '+name+'\\([\\s\\S]*?^  \\}','m'))[0]).join('\n');
+const LoadingPage=vm.runInNewContext(stripTypeScriptTypes('class LoadingPage{'+loadingMethods+'};LoadingPage'),{
+  FIRST_LOAD_TIMEOUT_MS:12000,setTimeout:fn=>{loadTimeout=fn;return 1;},clearTimeout(){}});
+const loadingPage=new LoadingPage();loadingPage.firstLoadTimer=-1;loadingPage.documentLoading=true;
+loadingPage.armFirstLoadTimeout();loadTimeout();assert.equal(loadingPage.documentLoading,false,'加载遮罩超时后可退出');
+loadingPage.documentLoading=true;loadingPage.finishFirstLoad();assert.equal(loadingPage.documentLoading,false);
 assert.match(mainSource,/onAreaChange\([\s\S]*?this.webWidth !== Number\(area.width\)[\s\S]*?this.resetProfileLayout\(\)/);
 const replyMethod=mainSource.match(/private replyToPost\(\): void \{([\s\S]*?)\n  \}/)[1];
 const reply=vm.runInNewContext(stripTypeScriptTypes('(function(){'+replyMethod+'})'),{

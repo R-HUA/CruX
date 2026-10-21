@@ -42,6 +42,8 @@ const prefs = {
   flush: async () => {}
 };
 const runtime = {
+  ...vm.runInNewContext(stripTypeScriptTypes(readFileSync(new URL('../entry/src/main/ets/common/WebMedia.ets',import.meta.url),'utf8'))
+    .replace(/^export /gm,'')+';({resolveMedia})'),
   ArrayBuffer, Uint8Array, Map, Promise, Date, FrameCallback: class {},
   DOMAIN: 0x0A11, TAG: 'OpenTwit', PREFS_NAME: 'opentwit_web', AVATAR_KEY: 'own_avatar',
   setTimeout: callback => { const id = ++timerId; timers.set(id, callback); return id; },
@@ -111,6 +113,7 @@ responses.push(Error('DoH failed'), ok());
 await read(page, urlA);
 assert.match(page.avatarPath, /^file:\/\/\/cache\/x-image-\d+-avatar_\d+\.png$/);
 assert.equal(requests.length, 2);
+assert.equal(requests[0].url,'https://pbs.twimg.com/profile_images/1/first.jpg','账号头像优先请求原尺寸');
 assert.equal(requests[0].options.dnsOverHttps, policy.url);
 assert.equal(requests[1].options.dnsOverHttps, undefined);
 const firstPath = page.avatarPath;
@@ -132,6 +135,14 @@ assert.equal(page.refreshes, 1); assert.notEqual(page.avatarPath, secondPath);
 await flushFrames(); assert.ok(removed.includes(secondPath.slice(7)));
 page.aboutToDisappear(); await settle();
 assert.equal(page.avatarPath, ''); assert.equal(page.avatarFiles, undefined);
+
+// 原尺寸不存在时先尝试高清方图，最后才使用网页的小图。
+page=makePage();policy={mode:'off'};
+responses.push({responseCode:404},ok());
+const qualityStart=requests.length;await read(page,urlA);
+assert.deepEqual(requests.slice(qualityStart).map(item=>item.url),[
+  'https://pbs.twimg.com/profile_images/1/first.jpg','https://pbs.twimg.com/profile_images/1/first_400x400.jpg']);
+assert.notEqual(page.avatarPath,'');page.aboutToDisappear();await settle();
 
 // A rejected download must be retried with a new session and the current DNS policy.
 page = makePage(); policy = { mode: 'secure_only', url: 'https://dns.example/secure' };

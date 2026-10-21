@@ -223,6 +223,7 @@ struct MainTabs {
   private lastTouchX: number = 0;
   private lastTouchY: number = 0;
   @State firstLoadDone: boolean = false;
+  @State documentLoading: boolean = false;
   @State sheetOpen: boolean = false;
   // Native composer state. "webComposer" is the escape hatch: when the page's
   // own composer cannot be driven (or the post needs media/GIF/poll), the sheet
@@ -547,13 +548,17 @@ struct MainTabs {
   // A page that never finishes loading must not leave the first-load spinner up
   // forever.
   private armFirstLoadTimeout(): void {
+    if (this.firstLoadTimer !== -1) { clearTimeout(this.firstLoadTimer); }
     this.firstLoadTimer = setTimeout(() => {
       this.firstLoadDone = true;
+      this.documentLoading = false;
+      this.firstLoadTimer = -1;
     }, FIRST_LOAD_TIMEOUT_MS);
   }
 
   private finishFirstLoad(): void {
     this.firstLoadDone = true;
+    this.documentLoading = false;
     if (this.firstLoadTimer !== -1) {
       clearTimeout(this.firstLoadTimer);
       this.firstLoadTimer = -1;
@@ -707,7 +712,9 @@ struct MainTabs {
     this.avatarFailedUrl = '';
     this.retireAvatarFiles(previous, wasDisplayed);
     try {
-      const address: MediaAddress = { id: 'avatar_' + generation.toString(), source: url, candidates: [url] };
+      const resolved = resolveMedia(url);
+      const address: MediaAddress = { id: 'avatar_' + generation.toString(), source: url,
+        candidates: resolved !== undefined ? resolved.candidates : [url] };
       const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
       const file: MediaFile = await files.load(address, context);
       if (!this.avatarAlive || generation !== this.avatarGeneration || this.ownHandle.toLowerCase() !== handle ||
@@ -892,11 +899,6 @@ struct MainTabs {
     if (generation !== this.navigationGeneration || !this.webNetworkReady) { return; }
     this.hasError = false;
     this.progress = 0;
-    try {
-      this.controller.setCustomUserAgent(this.rawWeb ? web_webview.WebviewController.getDefaultUserAgent() : this.userAgent());
-    } catch (err) {
-      hilog.warn(DOMAIN, TAG, 'UA switch failed: %{public}s', JSON.stringify(err));
-    }
     try {
       this.controller.loadUrl(url);
     } catch (err) {
@@ -2926,6 +2928,8 @@ struct MainTabs {
       })
       .onPageBegin(() => {
         if (!this.webNetworkReady) { return; }
+        this.documentLoading = true;
+        this.armFirstLoadTimeout();
         this.resetProfileLayout();
         this.incomingPageReady = false;
         this.hasError = false;
@@ -2933,6 +2937,7 @@ struct MainTabs {
       .onPageEnd((event) => {
         if (!this.webNetworkReady) { return; }
         if (event && this.controller.getUrl() !== event.url) { return; }
+        this.documentLoading = false;
         if (!this.rawWeb && event && isSiteUrl(event.url)) {
           this.controller.runJavaScript(MEDIA_CLICK_SCRIPT).catch((error: Error) => {
             hilog.error(DOMAIN, TAG, 'event=image_bridge_failed error=%{public}s', error.message);
@@ -3044,7 +3049,7 @@ struct MainTabs {
 
       if (this.hasError) { this.errorState() }
 
-      if (!this.firstLoadDone) {
+      if ((!this.firstLoadDone || this.documentLoading) && !this.hasError) {
         Column() {
           LoadingProgress()
             .width(48)
@@ -3055,7 +3060,7 @@ struct MainTabs {
         .height('100%')
         .justifyContent(FlexAlign.Center)
         .alignItems(HorizontalAlign.Center)
-        .backgroundColor($r('sys.color.ohos_id_color_background'))
+        .backgroundColor(this.pageBackground || $r('sys.color.ohos_id_color_background'))
       }
 
       // Reading the signed-in handle briefly opens the page's account menu.

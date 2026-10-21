@@ -15,8 +15,12 @@ export function resolveMedia(source: string): MediaAddress | undefined {
   const avatar = /^https:\/\/pbs\.twimg\.com\/profile_images\/([0-9]+)\/([A-Za-z0-9_-]+)\.(jpg|jpeg|png|webp|gif)$/i.exec(source);
   if (avatar) {
     const original = source.replace(/_(normal|bigger|400x400)(?=\.[a-z]+$)/i, '');
+    const large = original.replace(/(\.[a-z]+)$/i, '_400x400$1');
+    const candidates = original === source ? [source] : [original];
+    if (large !== source && original !== source) { candidates.push(large); }
+    if (original !== source) { candidates.push(source); }
     return { id: 'avatar-' + avatar[1] + '-' + avatar[2], source: source,
-      candidates: original === source ? [source] : [original, source] };
+      candidates: candidates };
   }
   if (/\s|\\|\/\.\.?(\/|\?|$)/.test(source)) { return undefined; }
   const card = /^https:\/\/pbs\.twimg\.com\/(card_img|amplify_video_thumb|ext_tw_video_thumb)\/([A-Za-z0-9_/-]+)(?:\.(jpg|jpeg|png|webp))?(?:\?[^#]*)?$/i.exec(source);
