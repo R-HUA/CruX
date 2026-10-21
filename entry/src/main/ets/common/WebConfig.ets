@@ -10,7 +10,7 @@ export const TWITTER_NOTIFICATIONS: string = 'https://x.com/notifications';
 export const TWITTER_MESSAGES: string = 'https://x.com/i/chat';
 export const TWITTER_SETTINGS: string = 'https://x.com/settings';
 // 当前网页的历史页默认显示书签，沿用其导航入口以保留页内路由。
-export const TWITTER_BOOKMARKS: string = 'https://x.com/i/history';
+export const TWITTER_BOOKMARKS: string = 'https://x.com/i/bookmarks';
 export const TWITTER_COMPOSE: string = 'https://x.com/compose/post';
 export const TWITTER_LOGIN: string = 'https://x.com/i/flow/login';
 export const TWITTER_SIGNUP: string = 'https://x.com/i/flow/signup';
@@ -140,14 +140,7 @@ export function routeIndexForUrl(url: string): number {
     path === '/i/chat' || path.indexOf('/i/chat/') === 0) {
     return 3;
   }
-  // Only the profile editor belongs to the Profile tab; other /settings and /i
-  // pages (login flow, tweet detail, lists, …) must not steal the highlight.
-  if (path === '/settings/profile') {
-    return 4;
-  }
-  if (profileHandleForUrl(url) !== '') {
-    return 4;
-  }
+  if (path === '/i/grok' || path.indexOf('/i/grok/') === 0 || path === '/grok') { return 5; }
   return -1;
 }
 
@@ -187,7 +180,7 @@ export function isSecondaryUrl(url: string): boolean {
 export function usesNativeNavigation(url: string): boolean {
   const path: string = pathOf(url);
   return path !== '/' &&
-    (routeIndexForUrl(url) >= 0 || isPostDetailUrl(url) || isSecondaryUrl(url));
+    (routeIndexForUrl(url) >= 0 || profileHandleForUrl(url) !== '' || isPostDetailUrl(url) || isSecondaryUrl(url));
 }
 
 /** 帖子详情使用返回栏和回复入口，不沿用来源标签页的菜单。 */

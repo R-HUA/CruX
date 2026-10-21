@@ -53,6 +53,7 @@ const runtime = {
   NetworkConfig: { getInstance: () => ({ getDohPolicy: () => policy }) },
   accountAvatarScript: () => 'avatar', accountAvatarDiagScript: () => 'diag',
   chromeScript: () => 'apply', chromeFlagScript: () => 'flag',
+  appearanceScript: () => 'appearance',
   usesNativeNavigation: () => true, usesNativeHeader: () => true,
   http: { RequestMethod: { GET: 0 }, HttpDataType: { ARRAY_BUFFER: 0 }, createHttp: () => {
     let record;
@@ -88,6 +89,7 @@ const makePage = () => {
   page.controller = {
     runJavaScript(script) {
       if (script === 'diag') { return Promise.resolve('"[]"'); }
+      if (script === 'appearance') { return Promise.resolve(''); }
       assert.ok(jsResults.length, 'Unexpected JavaScript request');
       const result = jsResults.shift();
       if (result instanceof Error) { return Promise.reject(result); }

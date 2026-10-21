@@ -11,7 +11,7 @@ function load(name, exports) {
   return vm.runInNewContext(js + ';({' + exports.join(',') + '})', context);
 }
 const routes = load('WebConfig', ['routeIndexForUrl', 'profileHandleForUrl','usesNativeNavigation','usesNativeHeader','isTabRootPath','isPostDetailUrl']);
-for (const [path, expected] of [['/home',0],['/search?q=a',1],['/notifications',2],['/messages/42',3],['/i/chat',3],['/someone',4],['/i/flow/login',-1],['/settings',-1],['/someone/status/123',-1]]) {
+for (const [path, expected] of [['/home',0],['/search?q=a',1],['/notifications',2],['/messages/42',3],['/i/chat',3],['/someone',-1],['/i/grok',5],['/grok',5],['/i/flow/login',-1],['/settings',-1],['/someone/status/123',-1]]) {
   assert.equal(routes.routeIndexForUrl('https://x.com' + path), expected, path);
 }
 assert.equal(routes.routeIndexForUrl('https://example.com/home'), -1);
@@ -20,7 +20,7 @@ assert.equal(routes.profileHandleForUrl('https://x.com.evil.test/alice'), '');
 for(const tab of ['with_replies','reposts','highlights','articles','media','likes']){
   const url='https://x.com/Alice/'+tab;
   assert.equal(routes.profileHandleForUrl(url),'alice');
-  assert.equal(routes.routeIndexForUrl(url),4);
+  assert.equal(routes.routeIndexForUrl(url),-1);
   assert.equal(routes.usesNativeNavigation(url),true);
   assert.equal(routes.usesNativeHeader(url),true);
 }
@@ -583,7 +583,7 @@ pillState.firstLoadDone=false;assert.equal(pill.call(pillState),true);
 pillState.firstLoadDone=true;pillState.hasError=true;assert.equal(pill.call(pillState),true);
 pillState.showsNativeNavigation=()=>true;assert.equal(pill.call(pillState),false);
 pillState.showsNativeNavigation=()=>false;
-for(const state of ['fullScreen','imageViewerOpen','sheetOpen','networkOpen','appearanceOpen','discovering']) {
+for(const state of ['fullScreen','imageViewerOpen','sheetOpen','networkOpen','settingsOpen','discovering']) {
   pillState[state]=true;assert.equal(pill.call(pillState),false,state);pillState[state]=false;
 }
 pillState.rawWeb=true;assert.equal(pill.call(pillState),true,'Original web mode keeps its return entry');
@@ -674,3 +674,39 @@ await syncTask();assert.equal(composing.composeReady,true);
 composing.appBackground=true;syncTask=undefined;syncCompose.call(composing);
 assert.equal(syncTask,undefined);assert.equal(composing.composeReady,false);
 console.log('PASS: webpage search/chat headers, home-only compose, webpage validation, stale draft results, theme and background observers');
+
+// 使用生产导航和持久化方法验证设置来源、动态底栏及主页选中态。
+const clientMethods=['setTabEnabled','syncFromUrl','openSettings','leaveSettings','openSettingsRoute'].map(name=>
+  mainSource.match(new RegExp('^  private (?:async )?'+name+'\\([\\s\\S]*?^  \\}','m'))[0]).join('\n');
+const ClientPage=vm.runInNewContext(stripTypeScriptTypes('class ClientPage{'+clientMethods+'};ClientPage'),{
+  TWITTER_ROUTES:['https://x.com/home'],TWITTER_BASE:'https://x.com',routeIndexForUrl:routes.routeIndexForUrl,
+  profileHandleForUrl:routes.profileHandleForUrl,pathOf:url=>new URL(url).pathname,$r:value=>value,
+  hilog:{error(){}},DOMAIN:0,TAG:'test'
+});
+const client=new ClientPage();const saved=[];let failedSave=false;let notices=0;
+Object.assign(client,{enabledTabs:[0,1,2,3,4],currentIndex:0,currentUrl:'https://x.com/home',settingsReadGeneration:0,
+  accountName:'Alice',incomingPageReady:true,resetChromeScroll(){},resetProfileLayout(){},
+  putPreference:async(key,value)=>{if(failedSave)throw Error('disk');saved.push([key,value]);},toast(){notices++;},loadWeb(url){this.loaded=url;}});
+client.openSettings();assert.equal(client.currentIndex,4);assert.equal(client.settingsOpen,true);
+client.syncFromUrl('https://x.com/alice');assert.equal(client.currentIndex,4,'后台读取本人资料不抢占设置标签');
+client.openSettingsRoute('/settings/notifications');client.syncFromUrl('https://x.com/settings/notifications');
+assert.equal(client.currentIndex,4,'设置子页保持来源标签');
+client.settingsOpen=true;client.leaveSettings();assert.equal(client.currentIndex,0);assert.equal(client.loaded,'https://x.com/home');
+client.syncFromUrl('https://x.com/alice');assert.equal(client.currentIndex,0,'个人主页不改变标签选中态');
+await client.setTabEnabled(5,true);assert.equal(saved.length,0);assert.equal(notices,1);
+await client.setTabEnabled(2,false);await client.setTabEnabled(5,true);
+assert.deepEqual(Array.from(client.enabledTabs),[0,1,3,5,4]);
+await client.setTabEnabled(0,false);assert.deepEqual(Array.from(client.enabledTabs),[0,1,3,5,4]);
+failedSave=true;await client.setTabEnabled(3,false);assert.deepEqual(Array.from(client.enabledTabs),[0,1,3,5,4]);
+
+const appearance=load('ClientSettings',['appearanceScript','accountDetailsScript','PLATFORM_SETTINGS']);
+assert.equal(appearance.PLATFORM_SETTINGS.length,6);
+let applySystemTheme;const themeStyle={textContent:''};const themeMedia={matches:false,addEventListener(_event,callback){applySystemTheme=callback;}};
+const themeContext={window:{},matchMedia:()=>themeMedia,document:{head:{},getElementById:()=>themeStyle},
+  MutationObserver:class{observe(){}}};
+vm.runInNewContext(appearance.appearanceScript('dark'),themeContext);assert(themeStyle.textContent.includes('#000000'));
+vm.runInNewContext(appearance.appearanceScript('light'),themeContext);assert(themeStyle.textContent.includes('#ffffff'));
+vm.runInNewContext(appearance.appearanceScript('system'),themeContext);themeMedia.matches=true;applySystemTheme();
+assert(themeStyle.textContent.includes('#000000'));assert(!themeStyle.textContent.includes('invert('));
+assert.equal(vm.runInNewContext(appearance.accountDetailsScript('alice'),{location:{pathname:'/bob'}}),'');
+console.log('PASS: native settings origins, stable navigation items, persistence failure, local theme and account boundaries');

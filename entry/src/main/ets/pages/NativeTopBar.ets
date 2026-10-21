@@ -9,7 +9,10 @@ export struct NativeTopBar {
   @Prop titleOpacity: number = 1;
   @Prop bannerButtons: boolean = false;
   onBack: () => void = () => {};
-  @BuilderParam action: () => void;
+  @BuilderParam action: () => void = this.emptyAction;
+
+  @Builder
+  emptyAction() {}
 
   build() {
     Row() {

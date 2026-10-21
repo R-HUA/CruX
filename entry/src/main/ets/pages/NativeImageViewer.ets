@@ -3,32 +3,35 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 import { pasteboard } from '@kit.BasicServicesKit';
 import { KeyCode } from '@kit.InputKit';
 import { curves, window } from '@kit.ArkUI';
-import { MediaAddress } from '../common/WebMedia';
+import { MediaAddress, imageForQuality } from '../common/WebMedia';
 import { MediaFile, MediaFiles } from '../common/MediaFiles';
 import { WebImageDownloads } from '../common/WebImageDownloads';
-import { FONT_FAMILY, S8, S12, S16, TOUCH_TARGET } from '../common/Theme';
+import { S8, S12, S16, TOUCH_TARGET } from '../common/Theme';
 
 /** 全窗口画布保留底层网页，只有悬浮操作栏避让系统区域。 */
 @Component
 export struct NativeImageViewer {
   items: MediaAddress[] = [];
-  initialIndex: number = 0;
+  @Link index: number;
+  originalImages: boolean = true;
+  @Link chromeVisible: boolean;
+  @Link dragging: boolean;
+  @Link detailsVisible: boolean;
+  @Link currentLoadedFile: MediaFile | undefined;
+  @Link busy: boolean;
+  @Link moreOpen: boolean;
+  @Prop footerOffset: number = 80;
+  @Prop @Watch('shareRequested') shareTrigger: number = 0;
   webImages: WebImageDownloads | undefined = undefined;
   onClose: () => void = () => {};
   onRecover: () => void = () => {};
   onWeb: () => void = () => {};
-  @State index: number = 0;
   @State loadedFiles: (MediaFile | undefined)[] = [];
   @State loadingIndices: number[] = [];
   @State failedIndices: number[] = [];
-  @State busy: boolean = false;
   @State zoomed: boolean = false;
-  @State chromeVisible: boolean = true;
   @State backdropOpacity: number = 1;
-  @State dragging: boolean = false;
   @State topInset: number = 0;
-  @State bottomInset: number = 0;
-  @State leftInset: number = 0;
   @State rightInset: number = 0;
   private viewerWindow: window.Window | undefined = undefined;
   private previousBars: window.SystemBarProperties | undefined = undefined;
@@ -43,7 +46,6 @@ export struct NativeImageViewer {
   aboutToAppear(): void {
     this.files = new MediaFiles(this.webImages);
     this.windowReady = this.prepareWindow();
-    this.index = this.initialIndex;
     this.loadIndex(this.index);
     this.loadIndex(this.index + 1);
     // 首次浏览后让出画布；用户主动操作后由单击控制显隐。
@@ -55,6 +57,7 @@ export struct NativeImageViewer {
 
   aboutToDisappear(): void {
     this.alive = false;
+    this.currentLoadedFile = undefined;
     clearTimeout(this.chromeHideTimer);
     this.windowReady.then(async () => {
       if (this.viewerWindow) {
@@ -94,11 +97,8 @@ export struct NativeImageViewer {
     if (!this.viewerWindow) { return; }
     const system = this.viewerWindow.getWindowAvoidArea(window.AvoidAreaType.TYPE_SYSTEM);
     const cutout = this.viewerWindow.getWindowAvoidArea(window.AvoidAreaType.TYPE_CUTOUT);
-    const navigation = this.viewerWindow.getWindowAvoidArea(window.AvoidAreaType.TYPE_NAVIGATION_INDICATOR);
     const ui = this.getUIContext();
     this.topInset = ui.px2vp(Math.max(system.topRect.height, cutout.topRect.height));
-    this.bottomInset = ui.px2vp(Math.max(system.bottomRect.height, cutout.bottomRect.height, navigation.bottomRect.height));
-    this.leftInset = ui.px2vp(Math.max(system.leftRect.width, cutout.leftRect.width));
     this.rightInset = ui.px2vp(Math.max(system.rightRect.width, cutout.rightRect.width));
   }
 
@@ -107,22 +107,25 @@ export struct NativeImageViewer {
   }
 
   /** 每张图保留已完成的文件；整体替换数组，确保 V1 状态更新可观察。 */
-  private async loadIndex(index: number): Promise<void> {
-    if (index >= this.items.length || this.loadedFiles[index] || this.loadingIndices.includes(index)) { return; }
+  private async loadIndex(index: number, original: boolean = false): Promise<void> {
+    if (index >= this.items.length || (!original && this.loadedFiles[index]) || this.loadingIndices.includes(index)) { return; }
     this.loadingIndices = [...this.loadingIndices, index];
     this.failedIndices = this.failedIndices.filter((value: number) => value !== index);
     try {
-      const file = await this.files.load(this.items[index], this.getUIContext().getHostContext() as common.UIAbilityContext);
+      const address = imageForQuality(this.items[index], original || this.originalImages, original);
+      const file = await this.files.load(address, this.getUIContext().getHostContext() as common.UIAbilityContext);
       if (this.alive) {
         const loaded = this.loadedFiles.slice();
         loaded[index] = file;
         this.loadedFiles = loaded;
+        if (index === this.index) { this.currentLoadedFile = file; }
       }
     } catch (error) {
       if (this.alive) {
         this.chromeVisible = true;
         clearTimeout(this.chromeHideTimer);
-        this.failedIndices = [...this.failedIndices, index];
+        if (!this.loadedFiles[index]) { this.failedIndices = [...this.failedIndices, index]; }
+        else { this.getUIContext().getPromptAction().showToast({ message: $r('app.string.operation_failed') }); }
         hilog.error(0x0A11, 'OpenTwit', 'event=image_load_failed error=%{public}s', JSON.stringify(error));
       }
     } finally {
@@ -152,16 +155,20 @@ export struct NativeImageViewer {
     } finally { this.busy = false; }
   }
 
-  private formatBytes(bytes: number): string {
-    return bytes >= 1024 * 1024 ? (bytes / (1024 * 1024)).toFixed(1) + ' MB' :
-      Math.max(1, Math.round(bytes / 1024)) + ' KB';
-  }
+  private shareRequested(): void { if (this.alive) { this.act('share'); } }
 
   private toggleChrome(): void {
     clearTimeout(this.chromeHideTimer);
+    if (this.detailsVisible) { this.detailsVisible = false; return; }
     this.getUIContext().animateTo({ duration: 200, curve: Curve.EaseInOut }, () => {
       this.chromeVisible = !this.chromeVisible;
     });
+  }
+
+  private dismissDetails(): boolean {
+    if (!this.detailsVisible) { return false; }
+    this.detailsVisible = false;
+    return true;
   }
 
   /** 放大图片的越界拖动在松手后切页，避免中途切换手势识别器。 */
@@ -172,100 +179,36 @@ export struct NativeImageViewer {
   }
 
   @Builder
-  glassButton(symbol: Resource, label: Resource, id: string, action: () => void) {
-    Button({ type: ButtonType.Circle }) {
-      SymbolGlyph(symbol).fontSize(20).fontColor([Color.White])
-    }
-    .id(id).width(TOUCH_TARGET).height(TOUCH_TARGET)
-    .backgroundColor('#66000000')
-    .backgroundBlurStyle(BlurStyle.COMPONENT_THICK, { colorMode: ThemeColorMode.DARK })
-    .border({ width: 0.5, color: '#26FFFFFF' })
-    .enabled(id === 'image-close' || (this.loadedFiles[this.index] !== undefined && !this.busy))
-    .opacity(id === 'image-close' || (this.loadedFiles[this.index] !== undefined && !this.busy) ? 1 : 0.38)
-    .accessibilityText(label).onClick(action)
-  }
-
-  @Builder
-  topBar() {
-    Row() {
-      this.glassButton($r('sys.symbol.xmark'), $r('app.string.media_close'), 'image-close', this.onClose)
-      Blank()
-      if (this.items.length > 1) {
-        Text((this.index + 1) + ' / ' + this.items.length)
-          .fontSize(13).fontFamily(FONT_FAMILY).fontWeight(FontWeight.Medium).fontColor(Color.White)
-          .padding({ left: S12, right: S12, top: 6, bottom: 6 })
-          .backgroundColor('#66000000').borderRadius(16)
-          .backgroundBlurStyle(BlurStyle.COMPONENT_THICK, { colorMode: ThemeColorMode.DARK })
+  moreMenu() {
+    Menu() {
+      MenuItem() {
+      Row() {
+      SaveButton({ text: SaveDescription.SAVE_IMAGE, buttonType: ButtonType.Normal })
+        .id('image-save').height(TOUCH_TARGET).fontSize(16).padding(0)
+        .fontColor(Color.White).backgroundColor(Color.Transparent)
+        .enabled(this.currentFile() !== undefined && !this.busy)
+        .onClick((_event: ClickEvent, result: SaveButtonOnClickResult) => {
+          if (result === SaveButtonOnClickResult.SUCCESS) { this.moreOpen = false; this.act('save'); }
+          else if (result === SaveButtonOnClickResult.TEMPORARY_AUTHORIZATION_FAILED) {
+            hilog.error(0x0A11, 'OpenTwit', 'event=image_save_authorization_failed');
+            this.getUIContext().getPromptAction().showToast({ message: $r('app.string.operation_failed') });
+          }
+        })
+      }.width(220).height(TOUCH_TARGET).padding({ left: S12, right: S12 })
       }
-    }
-    .width('100%')
-    .padding({ top: this.topInset + S8, bottom: S16, left: this.leftInset + S16, right: this.rightInset + S16 })
-    .linearGradient({ direction: GradientDirection.Bottom, colors: [['#80000000', 0], ['#00000000', 1]] })
-    .opacity(this.chromeVisible && !this.dragging ? 1 : 0)
-    .hitTestBehavior(this.chromeVisible && !this.dragging ? HitTestMode.Transparent : HitTestMode.None)
-  }
-
-  @Builder
-  metadata() {
-    Row({ space: 6 }) {
-      if (this.loadingIndices.includes(this.index)) {
-        LoadingProgress().width(14).height(14).color(Color.White)
-        Text($r('app.string.media_loading')).fontFamily(FONT_FAMILY).fontSize(11).fontColor('#B3FFFFFF')
-      } else if (this.failedIndices.includes(this.index)) {
-        Text($r('app.string.media_failed')).fontFamily(FONT_FAMILY).fontSize(11).fontColor('#B3FFFFFF')
-      } else if (this.loadedFiles[this.index]) {
-        Text(this.loadedFiles[this.index]!.originalSize ? $r('app.string.media_original_size') : $r('app.string.media_available_size'))
-          .fontFamily(FONT_FAMILY).fontSize(11).fontColor('#B3FFFFFF')
-        Text('· ' + this.loadedFiles[this.index]!.width + ' × ' + this.loadedFiles[this.index]!.height + ' · ' +
-          this.loadedFiles[this.index]!.extension.toUpperCase() + ' · ' + this.formatBytes(this.loadedFiles[this.index]!.size))
-          .fontFamily(FONT_FAMILY).fontSize(11).fontColor('#B3FFFFFF')
+      if (this.currentFile() && !this.currentFile()!.originalSize &&
+        !this.items[this.index].id.startsWith('avatar-') && !this.items[this.index].id.startsWith('card-')) {
+        MenuItem({ content: $r('app.string.media_load_original') }).contentFontColor(Color.White)
+          .enabled(!this.busy && !this.loadingIndices.includes(this.index))
+          .onClick(() => { this.moreOpen = false; this.loadIndex(this.index, true); })
       }
+      MenuItem({ content: $r('app.string.media_details') }).contentFontColor(Color.White)
+        .enabled(this.currentFile() !== undefined)
+        .onClick(() => { this.moreOpen = false; this.detailsVisible = true; this.chromeVisible = true; })
+      MenuItem({ content: $r('app.string.media_copy') }).contentFontColor(Color.White)
+        .enabled(this.currentFile() !== undefined && !this.busy)
+        .onClick(() => { this.moreOpen = false; this.act('copy'); })
     }
-    .height(26).padding({ left: S12, right: S12 }).justifyContent(FlexAlign.Center)
-    .backgroundColor('#4D000000').borderRadius(13)
-    .backgroundBlurStyle(BlurStyle.COMPONENT_THIN, { colorMode: ThemeColorMode.DARK })
-  }
-
-  @Builder
-  bottomBar() {
-    Column({ space: S12 }) {
-      this.metadata()
-      if (this.failedIndices.includes(this.index)) {
-        Row({ space: S12 }) {
-          Button($r('app.string.retry')).onClick(() => {
-            if (this.webImages?.needsRecovery()) { this.onRecover(); }
-            else { this.loadIndex(this.index); }
-          })
-          Button($r('app.string.media_view_web')).onClick(this.onWeb)
-        }
-      }
-      Row({ space: 28 }) {
-        Stack() {
-          // 安全控件仅用其支持的样式；模糊材质在背后，不能遮盖控件或降低控件透明度。
-          SaveButton({ icon: SaveIconStyle.FULL_FILLED, buttonType: ButtonType.Circle })
-            .id('image-save').width(TOUCH_TARGET).height(TOUCH_TARGET).padding(12)
-            .iconSize(20).iconColor(Color.White).backgroundColor('#66000000')
-            .borderWidth(0.5).borderColor('#26FFFFFF')
-            .enabled(this.currentFile() !== undefined && !this.busy && this.chromeVisible && !this.dragging)
-            .onClick((_event: ClickEvent, result: SaveButtonOnClickResult) => {
-              if (result === SaveButtonOnClickResult.SUCCESS) { this.act('save'); }
-              else if (result === SaveButtonOnClickResult.TEMPORARY_AUTHORIZATION_FAILED) {
-                hilog.error(0x0A11, 'OpenTwit', 'event=image_save_authorization_failed');
-                this.getUIContext().getPromptAction().showToast({ message: $r('app.string.operation_failed') });
-              }
-            })
-        }
-        .borderRadius(TOUCH_TARGET / 2)
-        .backgroundBlurStyle(BlurStyle.COMPONENT_THICK, { colorMode: ThemeColorMode.DARK })
-        this.glassButton($r('sys.symbol.share'), $r('app.string.media_share'), 'image-share', () => this.act('share'))
-        this.glassButton($r('sys.symbol.link'), $r('app.string.media_copy'), 'image-copy', () => this.act('copy'))
-      }.justifyContent(FlexAlign.Center)
-    }
-    .width('100%')
-    .padding({ top: S16, bottom: this.bottomInset + S16, left: this.leftInset + S16, right: this.rightInset + S16 })
-    .linearGradient({ direction: GradientDirection.Top, colors: [['#80000000', 0], ['#00000000', 1]] })
-    .opacity(this.chromeVisible && !this.dragging ? 1 : 0)
-    .hitTestBehavior(this.chromeVisible && !this.dragging ? HitTestMode.Transparent : HitTestMode.None)
   }
 
   build() {
@@ -291,25 +234,64 @@ export struct NativeImageViewer {
       }
       .index(this.index).loop(false).indicator(false).disableSwipe(this.zoomed || this.busy)
       .width('100%').height('100%')
+      // 底部安全区固定预留，工具栏显隐与详情开关不改变图片尺寸。
+      .padding({ bottom: this.footerOffset + 26 + S8 })
       .onChange((index: number) => {
         this.index = index;
         this.zoomed = false;
         this.backdropOpacity = 1;
         this.dragging = false;
+        this.detailsVisible = false;
+        this.moreOpen = false;
+        this.currentLoadedFile = this.loadedFiles[index];
         this.loadIndex(index);
         this.loadIndex(index + 1);
       })
-      Column() {
-        this.topBar()
-        Blank().hitTestBehavior(HitTestMode.None)
-        this.bottomBar()
-      }.width('100%').height('100%').hitTestBehavior(HitTestMode.Transparent)
+      // 菜单锚点跟随宿主原生更多按钮；不再绘制第二套顶部按钮。
+      Row().width(TOUCH_TARGET).height(TOUCH_TARGET)
+        .position({ top: this.topInset + S8, right: this.rightInset + S16 })
+        .hitTestBehavior(HitTestMode.None)
+        .bindMenu(this.moreOpen, this.moreMenu, { placement: Placement.BottomRight,
+          backgroundColor: '#2B2D31', backgroundBlurStyle: BlurStyle.NONE,
+          onAppear: () => { clearTimeout(this.chromeHideTimer); },
+          onDisappear: () => { this.moreOpen = false; } })
+      if (this.detailsVisible && this.currentLoadedFile) {
+        Column() {
+          Blank()
+          Text() {
+            Span(this.currentLoadedFile!.originalSize ? $r('app.string.media_original_size') :
+              $r('app.string.media_available_size'))
+            Span(' · ' + this.currentLoadedFile!.width + ' × ' + this.currentLoadedFile!.height + ' · ' +
+              this.currentLoadedFile!.extension.toUpperCase() + ' · ' +
+              (this.currentLoadedFile!.size >= 1048576 ? (this.currentLoadedFile!.size / 1048576).toFixed(1) + ' MB' :
+                Math.max(1, Math.round(this.currentLoadedFile!.size / 1024)) + ' KB'))
+          }.fontSize(12).fontColor('#99FFFFFF').height(26).backgroundColor(Color.Black)
+            .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+        }.width('100%').height('100%').padding({ left: S12, right: S12, bottom: this.footerOffset + S8 })
+          .backgroundColor(Color.Transparent).hitTestBehavior(HitTestMode.None)
+      }
+      if (this.failedIndices.includes(this.index)) {
+        Column({ space: S12 }) {
+          Text($r('app.string.media_failed')).fontColor(Color.White)
+          Button($r('app.string.retry')).onClick(() => {
+            if (this.webImages?.needsRecovery()) { this.onRecover(); } else { this.loadIndex(this.index); }
+          })
+          Button($r('app.string.media_view_web')).onClick(this.onWeb)
+        }
+      }
+      if (this.detailsVisible) {
+        Column().width('100%').height('100%').backgroundColor(Color.Transparent)
+          .onClick(() => { this.detailsVisible = false; })
+      }
     }
-    .width('100%').height('100%')
+    .width('100%').height(LayoutPolicy.matchParent)
     .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM,
       LayoutSafeAreaEdge.START, LayoutSafeAreaEdge.END])
     .onKeyEvent((event: KeyEvent) => {
-      if (event.type === KeyType.Down && event.keyCode === KeyCode.KEYCODE_ESCAPE) { this.onClose(); return true; }
+      if (event.type === KeyType.Down && event.keyCode === KeyCode.KEYCODE_ESCAPE) {
+        if (!this.dismissDetails()) { this.onClose(); }
+        return true;
+      }
       return false;
     })
   }

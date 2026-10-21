@@ -5,7 +5,7 @@ import vm from 'node:vm';
 
 const source = name => stripTypeScriptTypes(readFileSync(new URL('../entry/src/main/ets/common/' + name + '.ets', import.meta.url), 'utf8')
   .replace(/^import .*;\r?\n/gm, '')).replace(/^export /gm, '');
-const media = vm.runInNewContext(source('WebMedia') + ';({resolveMedia,MEDIA_CLICK_SCRIPT})');
+const media = vm.runInNewContext(source('WebMedia') + ';({resolveMedia,MEDIA_CLICK_SCRIPT,imageForQuality,mediaActionScript})');
 for (const url of ['https://pbs.twimg.com/profile_images/a.jpg', 'https://pbs.twimg.com.evil/media/a',
   'http://pbs.twimg.com/media/a', 'https://pbs.twimg.com/tweet_video_thumb/a.jpg']) {
   assert.equal(media.resolveMedia(url), undefined);
@@ -24,7 +24,7 @@ const urls = ['https://pbs.twimg.com/media/first?format=jpg&name=small','https:/
 const images = urls.map(src => ({src, currentSrc:src}));
 const links = images.map((image,i) => ({href:'https://x.com/alice/status/123/photo/'+(i+1),querySelector:()=>image}));
 const quote = {href:'https://x.com/bob/status/456/photo/1',querySelector:()=>({src:'https://pbs.twimg.com/media/quote?format=jpg'})};
-const scope = {querySelectorAll:()=>[...links,quote,links[0]]};
+const scope = {isConnected:true,closest(){return this;},querySelector:()=>null,querySelectorAll:()=>[...links,quote,links[0]]};
 const photo = {closest:s=>s==='a[href]'?links[1]:scope,querySelector:()=>images[1]};
 const target = new Element(); target.closest=s=>s==='a[href]'?links[1]:photo;
 const context = {Element,URL,location:{href:'https://x.com/home'},window:{otNative:{onImages:p=>{calls++;payload=JSON.parse(p);return accepted;}}},document:{addEventListener:(_event,h)=>handler=h}};
@@ -32,7 +32,7 @@ vm.runInNewContext(media.MEDIA_CLICK_SCRIPT,context);
 let prevented=0;
 const event={button:0,target,preventDefault(){prevented++},stopImmediatePropagation(){}};
 handler(event);
-assert.deepEqual(payload,{urls,index:1}); assert.equal(prevented,1);
+assert.deepEqual(payload,{urls,index:1,postId:'123',postUrl:'https://x.com/alice/status/123'}); assert.equal(prevented,1);
 accepted=false; handler(event); assert.equal(prevented,1);
 handler({...event,ctrlKey:true}); assert.equal(calls,2);
 delete context.window.otNative; handler(event); assert.equal(prevented,1);
@@ -40,6 +40,42 @@ context.window.otNative = {onImages:p=>{payload=JSON.parse(p);return true;}};
 const avatar = 'https://pbs.twimg.com/profile_images/123/avatar_normal.jpg';
 target.closest = () => ({href:'https://x.com/alice/photo',querySelector:()=>({src:avatar})});
 handler(event); assert.deepEqual(payload, {urls:[avatar],index:0}); assert.equal(prevented,2);
+
+// 网页尺寸、自动原图候选和手动原图不能互相误用缓存。
+const qualityAddress=media.resolveMedia(urls[0]);
+const preview=media.imageForQuality(qualityAddress,false);
+const automatic=media.imageForQuality(qualityAddress,true);
+const explicit=media.imageForQuality(qualityAddress,true,true);
+assert.deepEqual(Array.from(preview.candidates),[urls[0]]);
+assert.notEqual(preview.id,automatic.id);assert.notEqual(automatic.id,explicit.id);
+assert(explicit.candidates.every(url=>url.includes('name=orig')));
+assert(automatic.candidates.some(url=>url.includes('name=large')));
+
+// DOM 的乐观变色不足以完成互动；对应帖子请求成功后才返回完成。
+let selected=false,networkSuccess=true,networkPending=false,postConnected=true,completeNetwork;
+class Xhr {
+  open(_method,url){this.url=url;}
+  addEventListener(_event,callback){this.done=callback;}
+  send(){
+    completeNetwork=()=>{this.status=networkSuccess?200:403;this.responseText=JSON.stringify(networkSuccess?{data:{favorite_tweet:'Done'}}:{errors:[{}]});this.done.call(this);};
+    if(!networkPending)completeNetwork();
+  }
+}
+const postNode={get isConnected(){return postConnected;},querySelector(selector){
+  if(!selector.includes('like'))return null;
+  return {dataset:{testid:selected?'unlike':'like'},click(){selected=!selected;const xhr=new actionContext.XMLHttpRequest();
+    xhr.open('POST','https://x.com/i/api/graphql/id/'+(selected?'FavoriteTweet':'UnfavoriteTweet'));
+    xhr.send(JSON.stringify({variables:{tweet_id:'123'}}));}};
+}};
+const actionContext={XMLHttpRequest:Xhr,URL,location:{href:'https://x.com/home'},
+  window:{__otMediaPost:{id:'123',node:postNode},fetch:async()=>{}},document:{querySelector:()=>null}};
+const action=(id,start)=>JSON.parse(vm.runInNewContext(media.mediaActionScript('123',id,'like',start),actionContext));
+networkPending=true;assert.equal(action(1,true).status,'pending');
+assert.equal(action(1,false).status,'pending','乐观选中不能提前返回成功');
+completeNetwork();assert.equal(action(1,false).status,'done');assert.equal(action(1,false).liked,true);
+networkPending=false;networkSuccess=false;action(2,true);assert.equal(action(2,false).status,'failed');
+postConnected=false;assert.equal(action(3,true).status,'unavailable');
+postConnected=true;assert.equal(JSON.parse(vm.runInNewContext(media.mediaActionScript('999',4,'like',true),actionContext)).status,'unavailable');
 
 const png = Uint8Array.from([137,80,78,71,13,10,26,10,1,2,3,4]).buffer;
 let responses=[],requests=0,writes=[],removed=[],failWrite=false;

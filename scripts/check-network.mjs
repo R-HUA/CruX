@@ -114,7 +114,7 @@ assert(!/#[0-9a-fA-F]{3,8}\b/.test(sheet), 'network sheet must use system colors
 const main = read('entry/src/main/ets/pages/MainTabs.ets');
 assert(main.includes('this.networkSettingsSheet()'), 'network sheet is not mounted');
 assert(main.includes('bindSheet($$this.networkOpen'), 'network sheet host missing');
-assert(main.includes("app.string.network_title"), 'network menu entry missing');
+assert(main.includes("app.string.settings_network"), 'network menu entry missing');
 assert(main.includes('this.settingsPill()'), 'pre-login settings pill missing');
 assert(main.includes('bindMenu(this.settingsMenu)'), 'settings menu is not bound');
 assert(main.includes('app.string.settings_title'), 'settings pill label missing');

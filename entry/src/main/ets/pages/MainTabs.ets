@@ -1,6 +1,6 @@
 import web_webview from '@ohos.web.webview';
 import mediaquery from '@ohos.mediaquery';
-import { MediaAddress, resolveMedia, MEDIA_CLICK_SCRIPT } from '../common/WebMedia';
+import { MediaAddress, MediaPostState, MediaActionResult, resolveMedia, MEDIA_CLICK_SCRIPT, mediaActionScript } from '../common/WebMedia';
 import { MediaFile, MediaFiles } from '../common/MediaFiles';
 import { WebImageDownloads } from '../common/WebImageDownloads';
 import { IncomingContent } from '../common/IncomingContent';
@@ -9,14 +9,16 @@ import { NetworkSettingsSheet } from './NetworkSettingsSheet';
 import { ComposerPanel } from './ComposerPanel';
 import { NativeBottomBar } from './NativeBottomBar';
 import { NativeTopBar } from './NativeTopBar';
+import { NativeSettingsPage } from './NativeSettingsPage';
+import { DEFAULT_TABS, appearanceScript, accountDetailsScript } from '../common/ClientSettings';
 import { NetworkConfig, NetworkSnapshot } from '../common/NetworkConfig';
 import { preferences } from '@kit.ArkData';
-import { isSiteUrl, isAuthUrl, mediaAcceptTypes, chooseMedia, installDownloads, sharePage, removeExpiredDownloads } from '../common/WebSystem';
-import { abilityAccessCtrl, common, PermissionRequestResult, Permissions } from '@kit.AbilityKit';
+import { isSiteUrl, isAuthUrl, mediaAcceptTypes, chooseMedia, installDownloads, removeExpiredDownloads } from '../common/WebSystem';
+import { abilityAccessCtrl, common, ConfigurationConstant, PermissionRequestResult, Permissions } from '@kit.AbilityKit';
 import { BusinessError, deviceInfo, pasteboard } from '@kit.BasicServicesKit';
 import { notificationManager } from '@kit.NotificationKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
-import { ColorMetrics, FrameCallback, LengthMetrics, SymbolGlyphModifier, window } from '@kit.ArkUI';
+import { ColorMetrics, FrameCallback, LengthMetrics, window } from '@kit.ArkUI';
 import { HdsNavigation, HdsNavigationTitleMode, HdsTabs, hdsMaterial,
   HdsTabsController, HdsAnimationMode, BlurStrategy, ScrollEffectType } from '@kit.UIDesignKit';
 import { KeyCode } from '@kit.InputKit';
@@ -28,8 +30,7 @@ import {
 import {
   TWITTER_BASE, TWITTER_ROUTES, TWITTER_COMPOSE, TWITTER_UA,
   TWITTER_NOTIF_SETTINGS, TWITTER_EDIT_PROFILE,
-  TWITTER_SETTINGS, TWITTER_BOOKMARKS,
-  profileUrl, listsUrl, pathOf, routeIndexForUrl, profileHandleForUrl,
+  profileUrl, pathOf, routeIndexForUrl, profileHandleForUrl,
   isTabRootPath, isPostDetailUrl, isSecondaryUrl, usesNativeNavigation, usesNativeHeader, userAgentFor
 } from '../common/WebConfig';
 import {
@@ -120,6 +121,17 @@ const PROFILE_TIMEOUT_MS: number = 10000;
 interface ImagePayload {
   urls: string[];
   index: number;
+  postId?: string;
+  postUrl?: string;
+  liked?: boolean;
+  bookmarked?: boolean;
+  reposted?: boolean;
+}
+
+interface AccountDetails {
+  handle: string;
+  name: string;
+  bio: string;
 }
 
 /** 网页边界使用 CSS 像素，接收时按实际视口统一换算为 vp。 */
@@ -165,10 +177,37 @@ class AvatarCleanupFrame extends FrameCallback {
 @Entry
 @Component
 struct MainTabs {
-  @State imageViewerOpen: boolean = false;
+  @State @Watch('imageViewerChanged') imageViewerOpen: boolean = false;
   private imageItems: MediaAddress[] = [];
-  private imageIndex: number = 0;
+  @State imageIndex: number = 0;
+  @State imagePost: MediaPostState = { postId: '', postUrl: '' };
+  private imageActionSequence: number = 0;
+  @State imageChromeVisible: boolean = true;
+  @State imageDragging: boolean = false;
+  @State imageDetailsVisible: boolean = false;
+  @State imageCurrentFile: MediaFile | undefined = undefined;
+  @State imageBusy: boolean = false;
+  @State imageShareTrigger: number = 0;
+  @State imageRepostMenuOpen: boolean = false;
+  @State imageMoreOpen: boolean = false;
   @State currentIndex: number = 0;
+  @State settingsOpen: boolean = false;
+  @State settingsPage: string = '';
+  @State settingsWeb: boolean = false;
+  private settingsOrigin: number = 0;
+  private settingsOriginUrl: string = TWITTER_ROUTES[0];
+  private settingsWebRoot: string = '';
+  private settingsReadGeneration: number = 0;
+  @State accountName: string = '';
+  @State accountBio: string = '';
+  @State accountLoading: boolean = false;
+  @State accountError: boolean = false;
+  @State themeMode: string = 'system';
+  @State fontScale: number = 100;
+  @State originalImages: boolean = true;
+  @State enabledTabs: number[] = DEFAULT_TABS.slice();
+  @State tabToggleGeneration: number = 0;
+  @State customUa: string = '';
   @State progress: number = 0;
   @State hasError: boolean = false;
   @State ownHandle: string = '';
@@ -194,10 +233,9 @@ struct MainTabs {
   @State isWide: boolean = false;
   @State floatingBar: boolean = true;
   @State autoHideBar: boolean = true;
-  @State @Watch('onAppearanceOpenChanged') appearanceOpen: boolean = false;
+  @State immersiveMaterial: boolean = false;
   @State @Watch('onNetworkOpenChanged') networkOpen: boolean = false;
   @State @Watch('onBarsCollapsedChanged') barsCollapsed: boolean = false;
-  @State immersiveMaterial: boolean = false;
   @State bottomInset: number = 0;
   @State topInset: number = 0;
   private shellWindow: window.Window | undefined = undefined;
@@ -206,6 +244,7 @@ struct MainTabs {
   // Web 的滚动由渲染进程持有，HDS 只能读取 ArkUI 可滚动组件；把网页偏移镜像到
   // 这个 1vp 隐藏滚动容器，标题栏才能按官方指南在两种样式间过渡。
   private blurScroller: Scroller = new Scroller();
+  private settingsScroller: ListScroller = new ListScroller();
   private lastBlurOffset: number = 0;
   private profileLayout: ProfileLayout | undefined = undefined;
   @State profileBlurProgress: number = 0;
@@ -378,7 +417,8 @@ struct MainTabs {
         const red = Number(match[1]), green = Number(match[2]), blue = Number(match[3]);
         if (red > 255 || green > 255 || blue > 255) { return; }
         this.pageBackground = color;
-        this.webColorMode = red * 0.299 + green * 0.587 + blue * 0.114 < 128 ? ThemeColorMode.DARK : ThemeColorMode.LIGHT;
+        this.webColorMode = this.themeMode === 'dark' ? ThemeColorMode.DARK : this.themeMode === 'light' ?
+          ThemeColorMode.LIGHT : ThemeColorMode.SYSTEM;
       });
       this.bridge.setHandler((url: string) => {
         this.saveWebSession();
@@ -403,6 +443,16 @@ struct MainTabs {
         this.floatingBar = await prefs.get(FLOATING_BAR_KEY, true) as boolean;
         this.autoHideBar = await prefs.get(AUTO_HIDE_BAR_KEY, true) as boolean;
         this.desktopMode = await prefs.get(DESKTOP_MODE_KEY, false) as boolean;
+        this.themeMode = await prefs.get('theme_mode', 'system') as string;
+        ctx.getApplicationContext().setColorMode(this.themeMode === 'dark' ? ConfigurationConstant.ColorMode.COLOR_MODE_DARK :
+          this.themeMode === 'light' ? ConfigurationConstant.ColorMode.COLOR_MODE_LIGHT : ConfigurationConstant.ColorMode.COLOR_MODE_NOT_SET);
+        this.fontScale = await prefs.get('font_scale', 100) as number;
+        ctx.getApplicationContext().setFontSizeScale(this.fontScale / 100);
+        this.originalImages = await prefs.get('original_images', true) as boolean;
+        this.enabledTabs = JSON.parse(await prefs.get('enabled_tabs', JSON.stringify(DEFAULT_TABS)) as string) as number[];
+        this.customUa = await prefs.get('custom_ua', '') as string;
+        this.webColorMode = this.themeMode === 'dark' ? ThemeColorMode.DARK : this.themeMode === 'light' ?
+          ThemeColorMode.LIGHT : ThemeColorMode.SYSTEM;
         if (this.incomingControllerReady) { this.controller.setCustomUserAgent(this.userAgent()); }
         // 上次账号只预热头像，不用于资料跳转或发帖身份确认。
         const cachedHandle = await prefs.get(OWN_HANDLE_KEY, '') as string;
@@ -616,12 +666,21 @@ struct MainTabs {
   // requirement — back must not drop the user out of a page they can leave).
   onBackPress(): boolean {
     this.cancelProfileNavigation();
-    if (this.imageViewerOpen) { this.imageViewerOpen = false; return true; }
-    if (this.appearanceOpen) { this.appearanceOpen = false; return true; }
+    if (this.imageViewerOpen) { if (!this.dismissImageDetails()) { this.imageViewerOpen = false; } return true; }
     if (this.networkOpen) { this.networkOpen = false; return true; }
     if (this.fullScreenHandler !== undefined) { this.fullScreenHandler.exitFullScreen(); return true; }
     if (this.sheetOpen) {
       this.closeCompose();
+      return true;
+    }
+    if (this.settingsOpen) {
+      if (this.settingsPage !== '') { this.settingsPage = ''; return true; }
+      this.leaveSettings();
+      return true;
+    }
+    if (this.settingsWeb && (this.currentUrl === this.settingsWebRoot || !this.controller.accessBackward())) {
+      this.settingsWeb = false;
+      this.settingsOpen = true;
       return true;
     }
     try {
@@ -649,7 +708,8 @@ struct MainTabs {
     } else if (index === 3) {
       return $r('app.string.tab_messages');
     }
-    return $r('app.string.tab_profile');
+    if (index === 5) { return $r('app.string.tab_grok'); }
+    return $r('app.string.tab_settings');
   }
 
   private async saveOwnHandle(handle: string): Promise<void> {
@@ -858,6 +918,8 @@ struct MainTabs {
   private acceptHandle(handle: string, navigate: boolean): void {
     const changed: boolean = this.ownHandle.toLowerCase() !== handle.toLowerCase();
     if (changed) {
+      this.accountName = '';
+      this.accountBio = '';
       this.cancelProfileNavigation();
       this.resetAvatar();
       this.clearNetworkBadgeCounts();
@@ -929,14 +991,14 @@ struct MainTabs {
   // tablets and unfolded foldables keep the mobile web app they were built
   // against.
   private userAgent(): string {
-    return userAgentFor(this.desktopMode || deviceInfo.deviceType === '2in1');
+    return this.customUa || userAgentFor(this.desktopMode || deviceInfo.deviceType === '2in1');
   }
 
   private syncFromUrl(url: string): void {
     if (this.discovering && url !== this.currentUrl && pathOf(url) !== '/home') { this.cancelProfileNavigation(); }
     if (url !== this.currentUrl) { this.resetProfileLayout(); this.resetChromeScroll(); }
     const idx: number = routeIndexForUrl(url);
-    if (idx >= 0 && idx !== this.currentIndex) {
+    if (!this.settingsOpen && !this.settingsWeb && idx >= 0 && this.enabledTabs.includes(idx) && idx !== this.currentIndex) {
       this.currentIndex = idx;
     }
     this.viewingHandle = profileHandleForUrl(url);
@@ -944,21 +1006,22 @@ struct MainTabs {
     this.currentUrl = url;
   }
 
-  private async shareCurrentPage(): Promise<void> {
-    try {
-      await sharePage(this.getUIContext().getHostContext() as common.UIAbilityContext, this.controller.getUrl());
-    } catch (err) {
-      hilog.error(DOMAIN, TAG, 'event=page_share_failed code=%{public}d', (err as BusinessError).code);
-      this.toast($r('app.string.operation_failed'));
-    }
-  }
-
   /** 网页账号入口不修改会话；切换后重新确认身份和头像。 */
   private async openAccountSwitcher(): Promise<void> {
     this.cancelProfileNavigation();
     try {
-      const result = MainTabs.unquote(await this.controller.runJavaScript(ACCOUNT_SWITCH_SCRIPT));
-      if (result !== 'opened') { this.toast($r('app.string.account_unconfirmed')); }
+      if (!this.isHomeRoot()) { await this.loadWeb(TWITTER_ROUTES[0]); }
+      const generation = this.navigationGeneration;
+      const deadline = Date.now() + PROFILE_TIMEOUT_MS;
+      while (generation === this.navigationGeneration && this.avatarAlive && !this.appBackground) {
+        if (this.isHomeRoot()) {
+          const result = MainTabs.unquote(await this.controller.runJavaScript(ACCOUNT_SWITCH_SCRIPT));
+          if (result === 'opened') { return; }
+        }
+        if (Date.now() >= deadline) { break; }
+        await new Promise<void>((resolve) => { setTimeout(resolve, 150); });
+      }
+      this.toast($r('app.string.account_unconfirmed'));
     } catch (err) {
       hilog.error(DOMAIN, TAG, 'event=account_switch_open_failed code=%{public}d', (err as BusinessError).code);
       this.toast($r('app.string.operation_failed'));
@@ -967,11 +1030,17 @@ struct MainTabs {
 
   private goRoute(index: number): void {
     if (index === 4) {
-      this.openOwnProfile();
+      this.openSettings();
       return;
     }
+    const wasSettings = this.settingsOpen || this.settingsWeb;
+    const previousIndex = this.currentIndex;
+    this.settingsReadGeneration++;
+    this.settingsOpen = false;
+    this.settingsWeb = false;
+    this.currentIndex = index;
     this.cancelProfileNavigation();
-    if (index === this.currentIndex && isTabRootPath(this.currentPath)) {
+    if (!wasSettings && index === previousIndex && isTabRootPath(this.currentPath)) {
       // Tapping the active tab scrolls to top, like the stock app.
       try {
         this.controller.runJavaScript(scrollToTopScript());
@@ -980,7 +1049,172 @@ struct MainTabs {
       return;
     }
     this.tick();
-    this.loadWeb(TWITTER_ROUTES[index]);
+    this.loadWeb(index === 5 ? TWITTER_BASE + '/i/grok' : TWITTER_ROUTES[index]);
+  }
+
+  /** 原生设置覆盖常驻网页，资料读取与用户离开共用代际取消。 */
+  private openSettings(page: string = ''): void {
+    if (!this.settingsOpen && !this.settingsWeb) {
+      this.settingsOrigin = this.currentIndex;
+      this.settingsOriginUrl = this.currentUrl || TWITTER_ROUTES[0];
+    }
+    this.currentIndex = 4;
+    this.settingsPage = page;
+    this.settingsOpen = true;
+    this.settingsWeb = false;
+    this.resetChromeScroll();
+    if (this.authenticationPage || !this.incomingPageReady) { this.accountError = true; }
+    else if (this.accountName === '') { this.readSettingsAccount(); }
+  }
+
+  private leaveSettings(): void {
+    this.settingsReadGeneration++;
+    this.settingsOpen = false;
+    this.settingsWeb = false;
+    this.accountLoading = false;
+    this.currentIndex = this.settingsOrigin;
+    this.loadWeb(this.settingsOriginUrl);
+  }
+
+  private openSettingsRoute(path: string): void {
+    this.settingsReadGeneration++;
+    this.settingsOpen = false;
+    this.settingsWeb = true;
+    this.accountLoading = false;
+    this.settingsWebRoot = TWITTER_BASE + path;
+    this.loadWeb(this.settingsWebRoot);
+  }
+
+  private async readSettingsAccount(): Promise<void> {
+    const generation = ++this.settingsReadGeneration;
+    this.accountLoading = true;
+    this.accountError = false;
+    try {
+      await this.openOwnProfile();
+      const handle = this.ownHandle;
+      if (handle === '') { throw new Error('Account identity unavailable'); }
+      const deadline = Date.now() + PROFILE_TIMEOUT_MS;
+      while (generation === this.settingsReadGeneration && this.settingsOpen && this.avatarAlive) {
+        const raw = MainTabs.unquote(await this.controller.runJavaScript(accountDetailsScript(handle)));
+        if (generation !== this.settingsReadGeneration || !this.settingsOpen) { return; }
+        if (raw !== '') {
+          const account = JSON.parse(raw) as AccountDetails;
+          if (account.handle.toLowerCase() !== this.ownHandle.toLowerCase() ||
+            typeof account.name !== 'string' || typeof account.bio !== 'string') {
+            throw new Error('Account details mismatch');
+          }
+          this.accountName = account.name;
+          this.accountBio = account.bio;
+          return;
+        }
+        if (Date.now() >= deadline) { throw new Error('Account details timed out'); }
+        await new Promise<void>((resolve) => { setTimeout(resolve, 150); });
+      }
+    } catch (error) {
+      if (generation === this.settingsReadGeneration) {
+        this.accountError = true;
+        hilog.error(DOMAIN, TAG, 'event=settings_account_failed error=%{public}s', JSON.stringify(error));
+      }
+    } finally {
+      if (generation === this.settingsReadGeneration) { this.accountLoading = false; }
+    }
+  }
+
+  private async saveClientSetting(key: string, value: preferences.ValueType): Promise<void> {
+    try {
+      await this.putPreference(key, value);
+      if (key === 'theme_mode') {
+        this.themeMode = value as string;
+        // 应用级颜色模式同步系统资源与 HDS 内部控件，局部 WithTheme 无法替代资源配置。
+        this.getUIContext().getHostContext()!.getApplicationContext().setColorMode(value === 'dark' ?
+          ConfigurationConstant.ColorMode.COLOR_MODE_DARK : value === 'light' ?
+          ConfigurationConstant.ColorMode.COLOR_MODE_LIGHT : ConfigurationConstant.ColorMode.COLOR_MODE_NOT_SET);
+        this.webColorMode = value === 'dark' ? ThemeColorMode.DARK : value === 'light' ? ThemeColorMode.LIGHT : ThemeColorMode.SYSTEM;
+        if (this.incomingControllerReady) { await this.controller.runJavaScript(appearanceScript(this.themeMode)); }
+        if (this.composeReady) { await this.composeController.runJavaScript(appearanceScript(this.themeMode)); }
+      } else if (key === 'font_scale') {
+        this.getUIContext().getHostContext()!.getApplicationContext().setFontSizeScale((value as number) / 100);
+        this.fontScale = value as number;
+      }
+      else if (key === 'custom_ua') {
+        this.customUa = value as string;
+        this.controller.setCustomUserAgent(this.userAgent());
+        this.reloadCurrent();
+        this.toast($r('app.string.settings_saved'));
+      }
+      hilog.info(DOMAIN, TAG, 'event=client_setting_saved key=%{public}s', key);
+    } catch (error) {
+      hilog.error(DOMAIN, TAG, 'event=client_setting_failed key=%{public}s error=%{public}s', key, JSON.stringify(error));
+      this.toast($r('app.string.operation_failed'));
+    }
+  }
+
+  private async setTabEnabled(id: number, enabled: boolean): Promise<void> {
+    if (id !== 2 && id !== 3 && id !== 5) { return; }
+    if (enabled && !this.enabledTabs.includes(id) && this.enabledTabs.length >= 5) {
+      this.tabToggleGeneration++;
+      this.toast($r('app.string.settings_tabs_limit'));
+      return;
+    }
+    const selected = enabled ? [...this.enabledTabs, id] : this.enabledTabs.filter((value: number) => value !== id);
+    const tabs = [0, 1, 2, 3, 5, 4].filter((value: number) => selected.includes(value));
+    try {
+      await this.putPreference('enabled_tabs', JSON.stringify(tabs));
+      this.enabledTabs = tabs;
+    } catch (error) {
+      hilog.error(DOMAIN, TAG, 'event=tab_setting_failed error=%{public}s', JSON.stringify(error));
+      this.tabToggleGeneration++;
+      this.toast($r('app.string.operation_failed'));
+    }
+  }
+
+  private async clearWebCache(): Promise<void> {
+    try {
+      this.controller.removeCache(true);
+      hilog.info(DOMAIN, TAG, 'event=web_cache_cleared');
+      this.toast($r('app.string.settings_cache_cleared'));
+    } catch (error) {
+      hilog.error(DOMAIN, TAG, 'event=web_cache_clear_failed error=%{public}s', JSON.stringify(error));
+      this.toast($r('app.string.operation_failed'));
+    }
+  }
+
+  @Builder
+  settingsContent() {
+    NativeSettingsPage({ page: $settingsPage, scroller: this.settingsScroller, handle: this.ownHandle, displayName: this.accountName,
+      bio: this.accountBio, avatar: this.avatarPath, accountLoading: this.accountLoading, accountError: this.accountError,
+      themeMode: this.themeMode, fontScale: this.fontScale, floating: this.floatingBar, autoHide: this.autoHideBar,
+      originalImages: this.originalImages, enabledTabs: this.enabledTabs, customUa: this.customUa,
+      desktop: this.desktopMode, desktopLocked: deviceInfo.deviceType === '2in1', rawWeb: this.rawWeb,
+      topOffset: this.topInset + HEADER_HEIGHT, bottomOffset: this.bottomChromeHeight(),
+      tabToggleGeneration: this.tabToggleGeneration,
+      onScrollOffset: (offset: number) => { this.syncHeaderBlur(offset); },
+      onProfile: () => { if (this.ownHandle !== '') { this.openSettingsRoute('/' + this.ownHandle); } else { this.readSettingsAccount(); } },
+      onRetryAccount: () => { this.readSettingsAccount(); },
+      onSwitchAccount: () => {
+        this.settingsReadGeneration++;
+        this.settingsOpen = false;
+        this.settingsWeb = false;
+        this.currentIndex = this.settingsOrigin;
+        this.openAccountSwitcher();
+      },
+      onRoute: (path: string) => this.openSettingsRoute(path),
+      onTheme: (mode: string) => { this.saveClientSetting('theme_mode', mode); },
+      onFont: (scale: number) => { this.saveClientSetting('font_scale', scale); },
+      onToggle: (key: string, value: boolean) => { this.setAppearance(key, value); },
+      onTab: (id: number, value: boolean) => { this.setTabEnabled(id, value); },
+      onUa: (value: string) => {
+        const ua = value.trim();
+        if (/[\r\n\x00-\x1f\x7f]/.test(ua)) { this.toast($r('app.string.settings_ua_invalid')); return; }
+        this.saveClientSetting('custom_ua', ua);
+      },
+      onClearCache: () => { this.clearWebCache(); }, onDoh: () => { this.openNetworkSettings(); },
+      onRawWeb: () => {
+        this.rawWeb = !this.rawWeb;
+        this.leaveSettings();
+        this.controller.setCustomUserAgent(this.rawWeb ? web_webview.WebviewController.getDefaultUserAgent() : this.userAgent());
+        this.reloadCurrent();
+      } })
   }
 
   // Native Home switcher -> the page's own (hidden) timeline tab. The page
@@ -1157,16 +1391,19 @@ struct MainTabs {
 
   /** 账号读取失败不应使原生界面消失；登录与未知路由交给网页。 */
   private showsNativeNavigation(): boolean {
+    if (this.settingsOpen || this.imageViewerOpen) { return true; }
     return !this.rawWeb && !this.fullScreen && !this.authenticationPage &&
       usesNativeNavigation(this.currentUrl);
   }
 
   /** 私信使用固定视口和底部输入框，保留原生栏占位而不覆盖网页。 */
   private overlaysWeb(): boolean {
-    return this.showsNativeNavigation() && (isPostDetailUrl(this.currentUrl) || this.currentIndex !== 3);
+    return this.showsNativeNavigation() && (isPostDetailUrl(this.currentUrl) || routeIndexForUrl(this.currentUrl) !== 3);
   }
 
   private bottomChromeHeight(): number {
+    if (this.imageViewerOpen) { return this.imageChromeVisible && !this.imageDragging ? FLOATING_BAR_HEIGHT + this.bottomInset : 0; }
+    if (this.settingsOpen) { return this.isWide ? 0 : (this.floatingBar ? FLOATING_BAR_HEIGHT : BAR_HEIGHT) + this.bottomInset; }
     return this.webModalOpen || !this.showsNativeNavigation() || isSecondaryUrl(this.currentUrl) || (this.isWide && !isPostDetailUrl(this.currentUrl)) ? 0 :
       (this.floatingBar ? FLOATING_BAR_HEIGHT : BAR_HEIGHT) + this.bottomInset;
   }
@@ -1199,6 +1436,8 @@ struct MainTabs {
   }
 
   private topChromeHeight(): number {
+    if (this.imageViewerOpen) { return 0; }
+    if (this.settingsOpen) { return HEADER_HEIGHT; }
     return this.showsNativeNavigation() && usesNativeHeader(this.currentUrl) ? HEADER_HEIGHT : 0;
   }
 
@@ -1237,7 +1476,8 @@ struct MainTabs {
       hilog.error(DOMAIN, TAG, 'event=profile_layout_invalid error=%{public}s', String(error));
       return;
     }
-    if (!layout || typeof layout.ready !== 'boolean' || !this.avatarAlive || this.appBackground || this.rawWeb || this.viewingHandle === '' ||
+    if (!layout || typeof layout.ready !== 'boolean' || !this.avatarAlive || this.appBackground || this.rawWeb ||
+      this.settingsOpen || this.imageViewerOpen || this.viewingHandle === '' ||
       layout.url !== this.currentUrl || layout.url !== this.controller.getUrl() ||
       layout.viewWidth !== this.webWidth) { return; }
     if (!layout.ready) { this.resetProfileLayout(); return; }
@@ -1254,13 +1494,14 @@ struct MainTabs {
   }
 
   private profileBannerButtons(): boolean {
-    return this.viewingHandle !== '' && this.profileHasBanner && this.profileBlurProgress < 0.5;
+    return !this.settingsOpen && !this.imageViewerOpen && this.viewingHandle !== '' &&
+      this.profileHasBanner && this.profileBlurProgress < 0.5;
   }
 
   /** 把网页滚动位置镜像给 HDS，顶栏在顶部保持全透明，随滚动逐渐模糊。 */
   private syncHeaderBlur(yOffset: number): void {
     let position: number = yOffset;
-    if (this.viewingHandle !== '') {
+    if (!this.settingsOpen && this.viewingHandle !== '') {
       const layout = this.profileLayout;
       if (layout === undefined) { return; }
       const scale: number = this.webWidth / layout.width;
@@ -1333,6 +1574,7 @@ struct MainTabs {
 
   /** 网页偏移可能自行调整，只有与已确认手势方向一致的 vp 位移参与显隐。 */
   private handleWebScroll(yOffset: number): void {
+    if (this.settingsOpen || this.imageViewerOpen) { return; }
     const y: number = Math.max(0, yOffset);
     const delta: number = y - this.lastScrollY;
     const now: number = Date.now();
@@ -1393,6 +1635,7 @@ struct MainTabs {
       await this.putPreference(key, value);
       if (key === FLOATING_BAR_KEY) { this.floatingBar = value; }
       if (key === AUTO_HIDE_BAR_KEY) { this.autoHideBar = value; }
+      if (key === 'original_images') { this.originalImages = value; }
       if (key === DESKTOP_MODE_KEY) {
         this.desktopMode = value;
         this.controller.setCustomUserAgent(this.rawWeb ? web_webview.WebviewController.getDefaultUserAgent() : this.userAgent());
@@ -1413,7 +1656,7 @@ struct MainTabs {
 
   private settingsPillVisible(): boolean {
     if (this.fullScreen || this.imageViewerOpen || this.sheetOpen || this.networkOpen ||
-      this.appearanceOpen || this.discovering || this.isMediaViewer()) {
+      this.settingsOpen || this.discovering || this.isMediaViewer()) {
       return false;
     }
     if (this.rawWeb) { return true; }
@@ -1433,7 +1676,7 @@ struct MainTabs {
 
   private openNetworkSettings(): void {
     if (this.imageViewerOpen || this.sheetOpen || this.fullScreen ||
-      this.appearanceOpen || this.discovering) {
+      this.discovering) {
       return;
     }
     this.networkOpen = true;
@@ -1445,15 +1688,9 @@ struct MainTabs {
     }
   }
 
-  private onAppearanceOpenChanged(): void {
-    if (!this.appearanceOpen) {
-      this.flushNetworkReload();
-    }
-  }
-
   private modalBlocksNetworkReload(): boolean {
     return this.webModalOpen || this.imageViewerOpen || this.sheetOpen || this.networkOpen ||
-      this.appearanceOpen || this.discovering;
+      this.discovering;
   }
 
   /** DoH changes apply to new resolutions; reload once after the panel closes. */
@@ -1503,6 +1740,10 @@ struct MainTabs {
     if (this.rawWeb || !/^https:\/\/(www\.)?(x|twitter)\.com(\/|$)/.test(url)) { return; }
     const navigation: boolean = usesNativeNavigation(url);
     try {
+      this.controller.runJavaScript(appearanceScript(this.themeMode)).catch((error: Error) => {
+        hilog.error(DOMAIN, TAG, 'event=appearance_apply_failed error=%{public}s', error.message);
+        this.toast($r('app.string.operation_failed'));
+      });
       this.controller.runJavaScript(chromeScript(navigation, usesNativeHeader(url), url))
         .then((raw: string) => this.logChromeResult('apply', raw))
         .catch((err: Error) => {
@@ -1754,6 +1995,11 @@ struct MainTabs {
           if (this.authenticationPage) {
             this.clearNetworkBadgeCounts();
             this.ownHandle = '';
+            this.settingsReadGeneration++;
+            this.accountName = '';
+            this.accountBio = '';
+            this.accountLoading = false;
+            this.accountError = true;
             this.resetAvatar();
             this.unreadNotifications = 0;
             this.unreadMessages = 0;
@@ -2393,14 +2639,22 @@ struct MainTabs {
 
   @Builder
   navTitleBar() {
-    if (this.isHomeRoot()) {
+    if (this.imageViewerOpen) {
+      Text((this.imageIndex + 1) + ' / ' + this.imageItems.length)
+        .fontSize(13).fontFamily(FONT_FAMILY).fontWeight(FontWeight.Medium).fontColor(Color.White)
+        .width('100%').height(HEADER_HEIGHT).textAlign(TextAlign.Center).hitTestBehavior(HitTestMode.None)
+    } else if (this.settingsOpen) {
+      NativeTopBar({ title: this.localized(this.settingsPage === 'appearance' ? $r('app.string.settings_appearance') :
+        this.settingsPage === 'network' ? $r('app.string.settings_network') : $r('app.string.tab_settings')),
+        showBack: this.settingsPage !== '', onBack: () => { this.settingsPage = ''; } })
+    } else if (this.isHomeRoot()) {
       this.homeTitleBar()
     } else {
       NativeTopBar({ title: this.headerTitle(), subtitle: this.subtitleMain(), showBack: this.showBack(),
         titleOpacity: this.viewingHandle !== '' ? this.profileTitleOpacity : 1,
         bannerButtons: this.profileBannerButtons(),
         onBack: () => {
-          if (!this.canGoBack) { this.loadWeb(TWITTER_ROUTES[0]); } else { this.goBack(); }
+          this.onBackPress();
         }, action: () => { this.headerAction(); } })
     }
   }
@@ -2444,8 +2698,7 @@ struct MainTabs {
     if (isTabRootPath(this.currentPath)) {
       return true;
     }
-    return this.currentIndex === 4 && this.isOwnProfile() &&
-      this.currentPath === '/' + this.ownHandle.toLowerCase();
+    return false;
   }
 
   private isHomeRoot(): boolean {
@@ -2484,56 +2737,9 @@ struct MainTabs {
     // Pointer devices (2in1 / tablet with a mouse) get the hover the phone
     // never needed.
     .hoverEffect(HoverEffect.Highlight)
-    .accessibilityText($r('app.string.menu_account'))
+    .accessibilityText($r('app.string.menu_view_profile'))
     .accessibilityLevel('yes')
-    .bindMenu(this.accountMenu)
-  }
-
-  // The account pages the stock app keeps one level down from the avatar.
-  @Builder
-  accountMenu() {
-    Menu() {
-      MenuItem({ content: $r('app.string.menu_switch_account') })
-        .onClick(() => { this.openAccountSwitcher(); })
-      MenuItem({ content: $r('app.string.menu_share_page') })
-        .onClick(() => { this.shareCurrentPage(); })
-      MenuItem({ content: $r('app.string.appearance_title'),
-        symbolStartIcon: new SymbolGlyphModifier($r('sys.symbol.gearshape')) })
-        .onClick(() => { this.appearanceOpen = true; })
-        MenuItem({ content: $r('app.string.network_title'),
-          symbolStartIcon: new SymbolGlyphModifier($r('sys.symbol.lock_shield')) })
-          .onClick(() => { this.openNetworkSettings(); })
-        MenuItem({
-          content: $r('app.string.menu_view_profile'),
-          symbolStartIcon: new SymbolGlyphModifier($r('sys.symbol.person_fill'))
-        })
-          .onClick(() => {
-            this.openOwnProfile();
-          })
-        MenuItem({
-          content: $r('app.string.menu_bookmarks'),
-          symbolStartIcon: new SymbolGlyphModifier($r('sys.symbol.bookmark_fill'))
-        })
-          .onClick(() => {
-            this.loadWeb(TWITTER_BOOKMARKS);
-          })
-      if (this.ownHandle !== '') {
-        MenuItem({
-          content: $r('app.string.menu_lists'),
-          symbolStartIcon: new SymbolGlyphModifier($r('sys.symbol.list_bullet_square_fill'))
-        })
-          .onClick(() => {
-            this.loadWeb(listsUrl(this.ownHandle));
-          })
-      }
-      MenuItem({
-        content: $r('app.string.menu_settings'),
-        symbolStartIcon: new SymbolGlyphModifier($r('sys.symbol.gearshape'))
-      })
-        .onClick(() => {
-          this.loadWeb(TWITTER_SETTINGS);
-        })
-    }
+    .onClick(() => { this.openOwnProfile(); })
   }
 
   // "For you / Following", the one piece of the Home header the stock app draws
@@ -2623,11 +2829,11 @@ struct MainTabs {
       // /settings/messages route is gone), so this opens the settings root the
       // stock app's gear leads to as well.
       this.headerIconButton($r('sys.symbol.gearshape'), $r('app.string.menu_settings'), () => {
-        this.loadWeb(TWITTER_SETTINGS);
+        this.openSettings();
       })
-    } else if (this.currentIndex === 4 && this.isOwnProfile()) {
+    } else if (this.isOwnProfile()) {
       this.headerIconButton($r('sys.symbol.gearshape'), $r('app.string.menu_settings'), () => {
-        this.loadWeb(TWITTER_SETTINGS);
+        this.openSettings();
       })
     }
   }
@@ -2656,7 +2862,8 @@ struct MainTabs {
   nativeTabs() {
     NativeBottomBar({ currentIndex: this.currentIndex, notifications: this.unreadNotifications,
       messages: this.unreadMessages, wide: this.isWide,
-      labels: [this.tabLabel(0), this.tabLabel(1), this.tabLabel(2), this.tabLabel(3), this.tabLabel(4)],
+      labels: [this.tabLabel(0), this.tabLabel(1), this.tabLabel(2), this.tabLabel(3), this.tabLabel(4), this.tabLabel(5)],
+      enabledTabs: this.enabledTabs,
       onSelect: (index: number) => { this.resetChromeScroll(); this.goRoute(index); }
     })
   }
@@ -2682,7 +2889,9 @@ struct MainTabs {
 
   @Builder
   bottomNavigation() {
-    if (!this.webModalOpen) {
+    if (this.imageViewerOpen) {
+      this.imageViewerBottomBar()
+    } else if (!this.webModalOpen) {
       if (isPostDetailUrl(this.currentUrl)) {
         this.replyBar()
       } else {
@@ -2728,42 +2937,6 @@ struct MainTabs {
   }
 
   @Builder
-  appearanceSheet() {
-    Column({ space: S16 }) {
-      Text($r('app.string.appearance_title'))
-        .fontSize(20)
-        .fontWeight(FontWeight.Bold)
-        .fontColor($r('sys.color.ohos_id_color_text_primary'))
-      Row() {
-        Text($r('app.string.appearance_floating')).layoutWeight(1)
-        Toggle({ type: ToggleType.Switch, isOn: this.floatingBar })
-          .onChange((value: boolean) => { this.setAppearance(FLOATING_BAR_KEY, value); })
-      }.width('100%')
-      Row() {
-        Text($r('app.string.appearance_auto_hide')).layoutWeight(1)
-        Toggle({ type: ToggleType.Switch, isOn: this.autoHideBar })
-          .onChange((value: boolean) => { this.setAppearance(AUTO_HIDE_BAR_KEY, value); })
-      }.width('100%')
-      Row() {
-        Text($r('app.string.desktop_site')).layoutWeight(1)
-        Toggle({ type: ToggleType.Switch, isOn: this.desktopMode || deviceInfo.deviceType === '2in1' })
-          .enabled(deviceInfo.deviceType !== '2in1')
-          .onChange((value: boolean) => { this.setAppearance(DESKTOP_MODE_KEY, value); })
-      }.width('100%')
-      Button($r('app.string.menu_share_page')).onClick(() => { this.shareCurrentPage(); })
-      Button(this.rawWeb ? $r('app.string.show_native_shell') : $r('app.string.show_original_page'))
-        .onClick(() => {
-          this.rawWeb = !this.rawWeb;
-          this.appearanceOpen = false;
-          this.controller.setCustomUserAgent(this.rawWeb ? web_webview.WebviewController.getDefaultUserAgent() : this.userAgent());
-          this.reloadCurrent();
-        })
-    }
-    .width('100%')
-    .padding({ left: S16, right: S16, top: S16, bottom: 32 })
-  }
-
-  @Builder
   composeFab() {
     Button({ type: ButtonType.Circle }) {
       SymbolGlyph($r('sys.symbol.square_and_pencil'))
@@ -2773,7 +2946,7 @@ struct MainTabs {
     .width(52)
     .height(52)
     .backgroundColor(Color.Transparent)
-    // 官方建议悬浮按钮使用超薄/薄材质；这里使用组件级 THIN。
+    // 内容区悬浮按钮不在光感支持区域内，保留普通系统模糊。
     .backgroundBlurStyle(BlurStyle.COMPONENT_THIN)
     .margin({ right: S16, bottom: S16 + (this.overlaysWeb() ? this.bottomChromeHeight() : 0) })
     .scale({ x: this.barsCollapsed ? 0.01 : 1, y: this.barsCollapsed ? 0.01 : 1 })
@@ -2788,12 +2961,10 @@ struct MainTabs {
   @Builder
   settingsMenu() {
     Menu() {
-      MenuItem({ content: $r('app.string.network_title'),
-        symbolStartIcon: new SymbolGlyphModifier($r('sys.symbol.lock_shield')) })
-        .onClick(() => { this.openNetworkSettings(); })
-      MenuItem({ content: $r('app.string.appearance_title'),
-        symbolStartIcon: new SymbolGlyphModifier($r('sys.symbol.paintbrush_fill')) })
-        .onClick(() => { this.appearanceOpen = true; })
+      MenuItem({ content: $r('app.string.settings_network') })
+        .onClick(() => { this.openSettings('network'); })
+      MenuItem({ content: $r('app.string.settings_appearance') })
+        .onClick(() => { this.openSettings('appearance'); })
     }
   }
 
@@ -2921,6 +3092,7 @@ struct MainTabs {
         const media = resolveMedia(event.param.getSourceUrl());
         if (!media || this.imageViewerOpen) { return false; }
         this.imageItems = [media];
+        this.imagePost = { postId: '', postUrl: '' };
         this.imageIndex = 0;
         this.tick();
         this.imageViewerOpen = true;
@@ -2944,7 +3116,7 @@ struct MainTabs {
       .geolocationAccess(true)
       .mediaPlayGestureAccess(false)
       .darkMode(WebDarkMode.Auto)
-      .textZoomRatio(100)
+      .textZoomRatio(this.fontScale)
       .onTouch((event: TouchEvent) => { this.handleWebTouch(event); })
       .onScroll((event: OnScrollEvent) => { this.handleWebScroll(event.yOffset); })
       .onAreaChange((_old: Area, area: Area) => {
@@ -3161,7 +3333,14 @@ struct MainTabs {
         })
         .onLoadIntercept((event) => this.interceptExternal(event))
         .onPageBegin(() => { this.composeLoading = true; this.clearComposeSync(); })
-        .onPageEnd(() => { this.composeLoading = false; this.scheduleComposeSync(); })
+        .onPageEnd(() => {
+          this.composeLoading = false;
+          this.composeController.runJavaScript(appearanceScript(this.themeMode)).catch((error: Error) => {
+            hilog.error(DOMAIN, TAG, 'event=compose_appearance_failed error=%{public}s', error.message);
+            this.toast($r('app.string.operation_failed'));
+          });
+          this.scheduleComposeSync();
+        })
         .onFullScreenEnter((event) => { this.enterFullScreen(event.handler); })
         .onFullScreenExit(() => { this.exitFullScreen(); })
         .onRenderExited(() => {
@@ -3178,6 +3357,7 @@ struct MainTabs {
         .overScrollMode(OverScrollMode.NEVER)
         .zoomAccess(false)
         .darkMode(WebDarkMode.Auto)
+        .textZoomRatio(this.fontScale)
         .onShowFileSelector((event) => {
           return this.openFileSelector(event);
         })
@@ -3222,6 +3402,16 @@ struct MainTabs {
       }
       this.imageItems = items;
       this.imageIndex = data.index;
+      this.imagePost = { postId: '', postUrl: '' };
+      if (data.postId !== undefined) {
+        if (typeof data.postId !== 'string' || !/^\d+$/.test(data.postId) || typeof data.postUrl !== 'string' ||
+          !isPostDetailUrl(data.postUrl) || !data.postUrl.endsWith('/status/' + data.postId)) { return false; }
+        for (const value of [data.liked, data.bookmarked, data.reposted]) {
+          if (value !== undefined && typeof value !== 'boolean') { return false; }
+        }
+        this.imagePost = { postId: data.postId, postUrl: data.postUrl, liked: data.liked,
+          bookmarked: data.bookmarked, reposted: data.reposted };
+      }
       this.tick();
       this.imageViewerOpen = true;
       return true;
@@ -3231,15 +3421,130 @@ struct MainTabs {
     }
   }
 
+  /** 等待网页确认操作结果，超时和页面变更均不伪造互动成功。 */
+  private async imagePostAction(action: string): Promise<MediaActionResult> {
+    const id = ++this.imageActionSequence;
+    const postId = this.imagePost.postId;
+    const owner = this.ownHandle;
+    const generation = this.navigationGeneration;
+    const url = this.currentUrl;
+    const deadline = Date.now() + PROFILE_TIMEOUT_MS;
+    let start = true;
+    while (this.imageViewerOpen && this.avatarAlive && !this.appBackground && this.ownHandle === owner &&
+      this.navigationGeneration === generation && this.currentUrl === url && this.imagePost.postId === postId) {
+      const raw = MainTabs.unquote(await this.controller.runJavaScript(mediaActionScript(postId, id, action, start)));
+      const result = JSON.parse(raw) as MediaActionResult;
+      if (result.requestId !== id || result.postId !== postId) { throw new Error('Image action response mismatch'); }
+      if (result.status === 'unavailable' || result.status === 'failed') { throw new Error('Post action ' + result.status); }
+      if (result.status === 'done') {
+        if (!this.imageViewerOpen || this.ownHandle !== owner || this.currentUrl !== url) { throw new Error('Post context changed'); }
+        hilog.info(DOMAIN, TAG, 'event=image_post_action_confirmed action=%{public}s', action);
+        return result;
+      }
+      if (result.status === 'quote') {
+        const quoteUrl = result.quoteUrl;
+        if (!quoteUrl || !isSiteUrl(quoteUrl) || pathOf(quoteUrl) !== '/compose/post') { throw new Error('Quote route unavailable'); }
+        await this.controller.runJavaScript('document.dispatchEvent(new KeyboardEvent("keydown",{key:"Escape",bubbles:true}))');
+        this.imageViewerOpen = false;
+        this.composeOwner = owner;
+        this.composeController = new web_webview.WebviewController();
+        this.composeUrl = quoteUrl;
+        this.composeLoading = true;
+        this.webComposer = true;
+        this.sheetOpen = true;
+        return result;
+      }
+      if (Date.now() >= deadline) { throw new Error('Post action confirmation timed out'); }
+      start = false;
+      await new Promise<void>((resolve) => { setTimeout(resolve, 150); });
+    }
+    throw new Error('Post context changed');
+  }
+
   @Builder
   imageViewer() {
-    NativeImageViewer({ items: this.imageItems, initialIndex: this.imageIndex,
+    NativeImageViewer({ items: this.imageItems, index: $imageIndex,
+      originalImages: this.originalImages, chromeVisible: $imageChromeVisible, dragging: $imageDragging,
+      detailsVisible: $imageDetailsVisible, currentLoadedFile: $imageCurrentFile, busy: $imageBusy,
+      moreOpen: $imageMoreOpen, footerOffset: FLOATING_BAR_HEIGHT + this.bottomInset,
+      shareTrigger: this.imageShareTrigger,
       webImages: this.webImages, onClose: () => { this.imageViewerOpen = false; },
       onRecover: () => { this.recoverMediaWeb(false); }, onWeb: () => { this.recoverMediaWeb(true); } })
   }
 
+  /** 图片画布与常驻网页共用宿主，只切换现有 HDS 底栏的内容。 */
+  private imageViewerChanged(): void {
+    this.imageDetailsVisible = false;
+    this.imageRepostMenuOpen = false;
+    this.imageMoreOpen = false;
+    this.imageBusy = false;
+    this.imageCurrentFile = undefined;
+    this.imageChromeVisible = true;
+    this.imageDragging = false;
+  }
+
+  private dismissImageDetails(): boolean {
+    if (!this.imageDetailsVisible) { return false; }
+    this.imageDetailsVisible = false;
+    return true;
+  }
+
+  private async performImagePostAction(action: string): Promise<void> {
+    if (this.dismissImageDetails() || this.imageBusy) { return; }
+    this.imageBusy = true;
+    try {
+      const result = await this.imagePostAction(action);
+      this.imagePost = { postId: this.imagePost.postId, postUrl: this.imagePost.postUrl,
+        liked: result.liked, bookmarked: result.bookmarked, reposted: result.reposted };
+    } catch (error) {
+      hilog.error(DOMAIN, TAG, 'event=image_post_action_failed action=%{public}s error=%{public}s', action, JSON.stringify(error));
+      this.toast($r('app.string.operation_failed'));
+    } finally { this.imageBusy = false; }
+  }
+
+  @Builder
+  imagePostButton(symbol: Resource, label: Resource, id: string, selected: boolean, action: () => void) {
+    Button({ type: ButtonType.Normal }) {
+      SymbolGlyph(symbol).fontSize(22).fontColor([selected ? '#F91880' : Color.White])
+    }.id(id).layoutWeight(1).height(TOUCH_TARGET).backgroundColor(Color.Transparent)
+      .enabled(!this.imageBusy && (id !== 'image-share' || this.imageCurrentFile !== undefined))
+      .accessibilityText(label).accessibilitySelected(selected)
+      .onClick(() => { if (!this.dismissImageDetails()) { action(); } })
+  }
+
+  @Builder
+  imageRepostMenu() {
+    Menu() {
+      MenuItem({ content: this.imagePost.reposted ? $r('app.string.media_unrepost') : $r('app.string.media_repost') })
+        .onClick(() => { this.performImagePostAction('repost'); })
+      MenuItem({ content: $r('app.string.media_quote') }).onClick(() => { this.performImagePostAction('quote'); })
+    }
+  }
+
+  @Builder
+  imageViewerBottomBar() {
+      Row() {
+        if (this.imagePost.postId !== '') {
+          Button({ type: ButtonType.Normal }) {
+            SymbolGlyph($r('sys.symbol.repeat')).fontSize(22).fontColor([this.imagePost.reposted ? '#00BA7C' : Color.White])
+          }.id('image-repost').layoutWeight(1).height(TOUCH_TARGET).backgroundColor(Color.Transparent)
+            .enabled(!this.imageBusy).accessibilityText($r('app.string.media_repost'))
+            .onClick(() => { if (!this.dismissImageDetails()) { this.imageRepostMenuOpen = true; } })
+            .bindMenu(this.imageRepostMenuOpen, this.imageRepostMenu, {
+              onDisappear: () => { this.imageRepostMenuOpen = false; }
+            })
+          this.imagePostButton(this.imagePost.liked ? $r('sys.symbol.heart_fill') : $r('sys.symbol.heart'),
+            $r('app.string.media_like'), 'image-like', this.imagePost.liked === true, () => { this.performImagePostAction('like'); })
+          this.imagePostButton(this.imagePost.bookmarked ? $r('sys.symbol.bookmark_fill') : $r('sys.symbol.bookmark'),
+            $r('app.string.menu_bookmarks'), 'image-bookmark', this.imagePost.bookmarked === true, () => { this.performImagePostAction('bookmark'); })
+        }
+        this.imagePostButton($r('sys.symbol.share'), $r('app.string.media_share'), 'image-share', false,
+          () => { this.imageShareTrigger++; })
+      }.width('100%').height(FLOATING_BAR_HEIGHT).padding({ left: S8, right: S8 })
+  }
+
   build() {
-    WithTheme({ colorMode: this.webColorMode }) {
+    WithTheme({ colorMode: this.imageViewerOpen ? ThemeColorMode.DARK : this.webColorMode }) {
     HdsNavigation() {
       Stack() {
         // 网络设置面板独占一个 1x1 宿主，避免覆盖外观/发帖/图片查看器的弹层绑定。
@@ -3268,25 +3573,33 @@ struct MainTabs {
         .accessibilityLevel('no-hide-descendants')
 
         Row() {
-          if (this.isWide && this.showsNativeNavigation() && !isPostDetailUrl(this.currentUrl) && !isSecondaryUrl(this.currentUrl)) { this.navBar() }
+          if (!this.imageViewerOpen && this.isWide && this.showsNativeNavigation() && (this.settingsOpen || (!isPostDetailUrl(this.currentUrl) && !isSecondaryUrl(this.currentUrl)))) { this.navBar() }
           HdsTabs({ barPosition: BarPosition.End, controller: this.tabsController }) {
             // 五个入口均路由到同一网页会话，内容节点常驻，避免页签切换重建 Web。
             TabContent() {
-              Column() { this.webArea() }
+              Stack() {
+                Column() { this.webArea() }
+                  .width('100%').height('100%').opacity(this.settingsOpen || this.imageViewerOpen ? 0 : 1)
+                  .hitTestBehavior(this.settingsOpen || this.imageViewerOpen ? HitTestMode.None : HitTestMode.Default)
+                if (this.settingsOpen) { this.settingsContent() }
+                if (this.imageViewerOpen) { this.imageViewer() }
+              }
               .width('100%')
               .height('100%')
               // 网页自带标题时由视口避让状态栏；原生标题覆盖的列表仍从屏幕顶部绘制。
-              .padding({ top: this.fullScreen || (this.overlaysWeb() && this.topChromeHeight() > 0) ? 0 :
+              .padding({ top: this.settingsOpen || this.imageViewerOpen || this.fullScreen || (this.overlaysWeb() && this.topChromeHeight() > 0) ? 0 :
                 this.topInset + (this.overlaysWeb() ? 0 : this.topChromeHeight()),
-                bottom: this.overlaysWeb() ? 0 : this.bottomChromeHeight() })
+                bottom: this.settingsOpen || this.imageViewerOpen || this.overlaysWeb() ? 0 : this.bottomChromeHeight() })
             }
             .tabBar(this.bottomNavigation())
           }
           .scrollable(false)
           .barOverlap(true)
-          .barHeight(this.bottomChromeHeight() > 0 ? (this.floatingBar ? FLOATING_BAR_HEIGHT : BAR_HEIGHT) : 0)
-          .barFloatingStyle(this.bottomChromeHeight() > 0 && this.floatingBar ? {
-            barWidth: { smallWidth: '100%', mediumWidth: 380, largeWidth: 380 },
+          .barHeight(this.imageViewerOpen ? (this.imageChromeVisible && !this.imageDragging ?
+            FLOATING_BAR_HEIGHT : 0) :
+            this.bottomChromeHeight() > 0 ? (this.floatingBar ? FLOATING_BAR_HEIGHT : BAR_HEIGHT) : 0)
+          .barFloatingStyle(this.bottomChromeHeight() > 0 && (this.imageViewerOpen || this.floatingBar) ? {
+            barWidth: { smallWidth: 328, mediumWidth: 380, largeWidth: 380 },
             barSideMargin: 20,
             // 手势区已提供与图库相同的底边距离，不再叠加额外悬浮间距。
             barBottomMargin: this.bottomInset,
@@ -3296,12 +3609,6 @@ struct MainTabs {
               materialLevel: hdsMaterial.MaterialLevel.ADAPTIVE
             }
           } : undefined)
-          // 弹层绑定分属不同节点，避免外观面板的 bindSheet 覆盖图片查看器。
-          .bindContentCover($$this.imageViewerOpen, this.imageViewer(), {
-            modalTransition: ModalTransition.ALPHA,
-            backgroundColor: Color.Transparent,
-            onWillDismiss: (action: DismissContentCoverAction) => { action.dismiss(); this.imageViewerOpen = false; }
-          })
           .layoutWeight(1)
           // 忽略安全区时，matchParent 同时扩展尺寸；百分比高度只会移动位置。
           .height(LayoutPolicy.matchParent)
@@ -3310,12 +3617,7 @@ struct MainTabs {
         .width('100%')
         .height(LayoutPolicy.matchParent)
         .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
-        .bindSheet($$this.appearanceOpen, this.appearanceSheet(), {
-          height: SheetSize.FIT_CONTENT,
-          width: this.isWide ? 480 : '100%',
-          dragBar: true,
-          showClose: true
-        })
+
 
         if (this.settingsPillVisible()) {
           this.settingsPill()
@@ -3328,7 +3630,19 @@ struct MainTabs {
     .height(LayoutPolicy.matchParent)
     .titleBar({
       enableComponentSafeArea: true,
-      content: { stackBuilder: () => { this.navTitleBar(); } },
+      content: {
+        stackBuilder: () => { this.navTitleBar(); },
+        backIcon: {
+          icon: $r('sys.symbol.xmark'), label: $r('app.string.media_close'), componentId: 'image-close',
+          action: () => { if (!this.dismissImageDetails()) { this.imageViewerOpen = false; } }
+        },
+        menu: {
+          value: this.imageViewerOpen ? [{ content: {
+            icon: $r('sys.symbol.more'), label: $r('app.string.media_more'), componentId: 'image-more',
+            action: () => { if (!this.dismissImageDetails()) { this.imageMoreOpen = !this.imageMoreOpen; } }
+          } }] : []
+        }
+      },
       style: {
         // 顶部无模糊无底色，滚动后由 HDS 线性过渡到带材质底色的羽化模糊。
         // GRADIENT_BLUR 是唯一支持 maskExtraHeight 的类型，蒙层会向标题栏
@@ -3347,7 +3661,7 @@ struct MainTabs {
           }
         },
         scrollEffectOpts: {
-          enableScrollEffect: true,
+          enableScrollEffect: !this.imageViewerOpen,
           scrollEffectType: ScrollEffectType.GRADIENT_BLUR,
           blurEffectiveStartOffset: LengthMetrics.vp(0),
           blurEffectiveEndOffset: LengthMetrics.vp(HEADER_BLUR_DISTANCE)
@@ -3361,17 +3675,17 @@ struct MainTabs {
     })
     .bindToScrollable([this.blurScroller])
     .withTheme({ enableThemeColorMode: true })
-    .systemBarStyle({ statusBarContentColor: this.profileBannerButtons() || this.isMediaViewer() || this.webColorMode === ThemeColorMode.DARK ? '#FFFFFF' :
+    .systemBarStyle({ statusBarContentColor: this.imageViewerOpen || this.profileBannerButtons() || this.isMediaViewer() || this.webColorMode === ThemeColorMode.DARK ? '#FFFFFF' :
       this.webColorMode === ThemeColorMode.LIGHT ? '#000000' : this.statusBarContentColor }, undefined)
     .titleMode(HdsNavigationTitleMode.MINI)
-    .hideTitleBar(this.topChromeHeight() === 0)
+    .hideTitleBar(this.imageViewerOpen ? !this.imageChromeVisible || this.imageDragging : this.topChromeHeight() === 0)
     .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
     // Navigation defaults to Split mode on wide windows, which would reserve a
     // left pane for the title bar and squeeze our own rail + WebView into it.
     // The shell owns the wide layout, so keep Navigation in Stack mode.
     .mode(NavigationMode.Stack)
-    .hideBackButton(true)
-    .backgroundColor(this.isMediaViewer() ? Color.Black : this.pageBackground || $r('sys.color.ohos_id_color_background'))
+    .hideBackButton(!this.imageViewerOpen)
+    .backgroundColor(this.imageViewerOpen || this.isMediaViewer() ? Color.Black : $r('sys.color.ohos_id_color_background'))
     .bindSheet($$this.sheetOpen, this.composeSheet(), {
       height: SheetSize.LARGE,
       width: this.isWide ? 640 : '100%',

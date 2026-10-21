@@ -8,6 +8,7 @@ export struct NativeBottomBar {
   @Prop messages: number = 0;
   @Prop wide: boolean = false;
   @Prop labels: Resource[] = [];
+  @Prop enabledTabs: number[] = [0, 1, 2, 3, 4];
   @State pressedIndex: number = -1;
   onSelect: (index: number) => void = () => {};
 
@@ -16,7 +17,8 @@ export struct NativeBottomBar {
     if (index === 1) { return $r('sys.symbol.compass_circle_fill'); }
     if (index === 2) { return $r('sys.symbol.bell_fill'); }
     if (index === 3) { return $r('sys.symbol.envelope_fill'); }
-    return $r('sys.symbol.person_fill');
+    if (index === 5) { return $r('sys.symbol.wand_and_stars'); }
+    return $r('sys.symbol.gearshape');
   }
 
   private badge(index: number): number {
@@ -56,11 +58,7 @@ export struct NativeBottomBar {
   build() {
     Flex({ direction: this.wide ? FlexDirection.Column : FlexDirection.Row,
       justifyContent: this.wide ? FlexAlign.Center : FlexAlign.SpaceBetween, alignItems: ItemAlign.Center }) {
-      this.item(0)
-      this.item(1)
-      this.item(2)
-      this.item(3)
-      this.item(4)
+      ForEach(this.enabledTabs, (id: number) => { this.item(id) }, (id: number) => id.toString())
     }.width('100%').height('100%')
   }
 }

@@ -209,7 +209,7 @@ export function chromeDocumentStartScript(enabled: boolean): string {
     'var secondary=new RegExp(' + JSON.stringify(SECONDARY_PATH_PATTERN) + ').test(p);' +
     'var profile=Boolean((' + PROFILE_HANDLE_SCRIPT + ')(p));' +
     'var detail=/^\\/(?:[a-z0-9_]{1,15}|i\\/web)\\/status\\/\\d+$/.test(p);' +
-    'var nav=secondary||profile||detail||p==="/home"||/^\\/(explore|search|notifications|messages|i\\/chat)(\\/|$)/.test(p);' +
+    'var nav=secondary||profile||detail||p==="/home"||p==="/grok"||/^\\/(explore|search|notifications|messages|i\\/chat|i\\/grok)(\\/|$)/.test(p);' +
     'var header=secondary||profile||detail||["/home","/notifications"].indexOf(p)>=0;' +
     'var auth=document.querySelector(\'input[autocomplete="username"],input[autocomplete="current-password"],input[autocomplete="one-time-code"]\');' +
     'var css=document.getElementById("ot-initial-chrome");' +
