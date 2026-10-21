@@ -534,8 +534,7 @@ struct MainTabs {
   /** 外部入口只在控制器就绪后消费，编辑或模态操作进行中不覆盖用户状态。 */
   private onIncomingContentChanged(): void {
     const content = this.incomingContent;
-    if (content.kind === '' || !this.incomingControllerReady ||
-      (content.kind === 'compose' && !this.incomingPageReady)) { return; }
+    if (content.kind === '' || !this.incomingControllerReady || !this.incomingPageReady) { return; }
     this.incomingContent = { kind: '', value: '' };
     if (this.modalBlocksNetworkReload() || this.fullScreen || this.openingCompose) {
       this.toast($r('app.string.incoming_busy'));
@@ -545,13 +544,7 @@ struct MainTabs {
       this.openCompose(content.value);
       return;
     }
-    try {
-      this.hasError = false;
-      this.controller.loadUrl(content.value);
-    } catch (err) {
-      hilog.error(DOMAIN, TAG, 'event=incoming_navigation_failed code=%{public}d', (err as BusinessError).code);
-      this.toast($r('app.string.incoming_failed'));
-    }
+    this.loadWeb(content.value, false, true);
   }
 
   // A page that never finishes loading must not leave the first-load spinner up
@@ -887,34 +880,47 @@ struct MainTabs {
       return;
     }
     if (this.ownHandle !== '') {
-      this.viewingHandle = this.ownHandle;
       this.loadWeb(profileUrl(this.ownHandle));
       return;
     }
     this.toast($r('app.string.account_unconfirmed'));
   }
 
-  private async loadWeb(url: string, keepProfile: boolean = false): Promise<void> {
+  /** 常规入口只触发网页路由；外部链接和故障恢复才允许建立新文档。 */
+  private async loadWeb(url: string, keepProfile: boolean = false, allowDocumentLoad: boolean = false): Promise<void> {
     if (!this.webNetworkReady) { this.hasError = true; return; }
     if (!keepProfile) { this.cancelProfileNavigation(); }
     const generation = ++this.navigationGeneration;
+    const pageUrl = this.currentUrl;
     try {
-      const result: string = MainTabs.unquote(await this.controller.runJavaScript(clickRouteScript(url)));
+      const deadline = Date.now() + 3000;
+      while (generation === this.navigationGeneration && this.webNetworkReady) {
+        const result: string = MainTabs.unquote(await this.controller.runJavaScript(clickRouteScript(url)));
+        if (generation !== this.navigationGeneration || !this.webNetworkReady) { return; }
+        if (result === 'cancelled') { return; }
+        if (result === 'clicked' || result === 'same') { this.hasError = false; return; }
+        if (result !== 'pending' || Date.now() >= deadline) { break; }
+        await new Promise<void>((resolve) => { setTimeout(resolve, 100); });
+      }
       if (generation !== this.navigationGeneration || !this.webNetworkReady) { return; }
-      if (result === 'clicked') { this.hasError = false; return; }
+      await this.controller.runJavaScript('window.__otRouteCancel&&window.__otRouteCancel()');
+      hilog.warn(DOMAIN, TAG, 'event=page_route_unavailable');
     } catch (err) {
       hilog.warn(DOMAIN, TAG, 'event=page_route_script_failed error=%{public}s', JSON.stringify(err));
     }
-    if (generation !== this.navigationGeneration || !this.webNetworkReady) { return; }
-    this.hasError = false;
-    this.progress = 0;
-    try {
-      this.controller.loadUrl(url);
-    } catch (err) {
-      this.hasError = true;
-      hilog.error(DOMAIN, TAG, 'loadUrl failed: %{public}s', JSON.stringify(err));
-      this.toast($r('app.string.operation_failed'));
+    if (generation !== this.navigationGeneration || !this.webNetworkReady || this.currentUrl !== pageUrl) { return; }
+    if (allowDocumentLoad) {
+      try {
+        this.hasError = false;
+        this.progress = 0;
+        this.controller.loadUrl(url);
+        return;
+      } catch (err) {
+        this.hasError = true;
+        hilog.error(DOMAIN, TAG, 'event=document_navigation_failed error=%{public}s', JSON.stringify(err));
+      }
     }
+    this.toast($r('app.string.operation_failed'));
   }
 
   // A 2in1 window is a desktop, so it asks x.com for the desktop web app: a
@@ -965,7 +971,7 @@ struct MainTabs {
       return;
     }
     this.cancelProfileNavigation();
-    if (index === this.currentIndex) {
+    if (index === this.currentIndex && isTabRootPath(this.currentPath)) {
       // Tapping the active tab scrolls to top, like the stock app.
       try {
         this.controller.runJavaScript(scrollToTopScript());
@@ -1002,15 +1008,20 @@ struct MainTabs {
     this.discovering = true;
     this.hasError = false;
     try {
-      // 路由到达后再查 DOM，慢网只受总超时限制，不依赖固定页面加载时长。
-      if (!this.isHomeRoot()) { await this.loadWeb(TWITTER_ROUTES[0], true); }
-      const deadline = Date.now() + PROFILE_TIMEOUT_MS;
-      while (!this.isHomeRoot() && Date.now() < deadline) {
-        if (generation !== this.profileNavigation || !this.avatarAlive || this.appBackground) { return; }
-        await new Promise<void>((resolve) => { setTimeout(resolve, 100); });
-      }
+      // 能从当前网页确认身份时直接进入资料，避免先绕回主页。
+      let handle = MainTabs.unquote(await this.controller.runJavaScript(OWN_HANDLE_SCRIPT));
       if (generation !== this.profileNavigation || !this.avatarAlive || this.appBackground) { return; }
-      const handle = this.isHomeRoot() ? await this.confirmCurrentAccount() : '';
+      if (!/^[A-Za-z0-9_]{1,15}$/.test(handle)) {
+        // 移动网页只在首页提供账号抽屉，缺少本人入口时沿用该身份确认流程。
+        if (!this.isHomeRoot()) { await this.loadWeb(TWITTER_ROUTES[0], true); }
+        const deadline = Date.now() + PROFILE_TIMEOUT_MS;
+        while (!this.isHomeRoot() && Date.now() < deadline) {
+          if (generation !== this.profileNavigation || !this.avatarAlive || this.appBackground) { return; }
+          await new Promise<void>((resolve) => { setTimeout(resolve, 100); });
+        }
+        if (generation !== this.profileNavigation || !this.avatarAlive || this.appBackground) { return; }
+        handle = this.isHomeRoot() ? await this.confirmCurrentAccount() : '';
+      }
       if (generation !== this.profileNavigation || !this.avatarAlive || this.appBackground) { return; }
       if (handle === '') { this.toast($r('app.string.account_unconfirmed')); return; }
       this.acceptHandle(handle, true);
@@ -1477,7 +1488,7 @@ struct MainTabs {
       this.armFirstLoadTimeout();
     }
     if (this.currentUrl.length === 0) {
-      this.loadWeb(TWITTER_ROUTES[0]);
+      this.loadWeb(TWITTER_ROUTES[0], false, true);
     } else {
       this.reloadCurrent();
     }
@@ -2897,7 +2908,7 @@ struct MainTabs {
       .onWindowNew((event: OnWindowNewEvent) => {
         event.handler.setWebController(null);
         if (isSiteUrl(event.targetUrl) || isAuthUrl(event.targetUrl)) {
-          this.loadWeb(event.targetUrl);
+          this.loadWeb(event.targetUrl, false, true);
         } else if (/^https?:\/\//i.test(event.targetUrl)) {
           this.openExternal(event.targetUrl);
         } else { this.toast($r('app.string.operation_failed')); }

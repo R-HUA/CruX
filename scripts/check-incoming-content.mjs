@@ -83,13 +83,19 @@ const consume=vm.runInNewContext(stripTypeScriptTypes('(function(){'+consumeBody
 const opened=[],notices=[];
 const state={incomingContent:{kind:'compose',value:'文字'},incomingControllerReady:false,incomingPageReady:false,
   modalBlocksNetworkReload:()=>false,fullScreen:false,openingCompose:false,
-  openCompose:value=>opened.push(value),toast:value=>notices.push(value),controller:{loadUrl:value=>opened.push(value)}};
+  openCompose:value=>opened.push(value),toast:value=>notices.push(value),
+  loadWeb(value,keepProfile,allowDocumentLoad){assert.equal(keepProfile,false);assert.equal(allowDocumentLoad,true);opened.push(value);},
+  controller:{loadUrl(){throw Error('必须先尝试页内导航');}}};
 consume.call(state);assert.equal(state.incomingContent.value,'文字');
 state.incomingControllerReady=true;consume.call(state);assert.equal(opened.length,0);
 state.incomingPageReady=true;consume.call(state);assert.deepEqual(opened,['文字']);
 consume.call(state);assert.equal(opened.length,1);
 state.incomingContent={kind:'link',value:'https://x.com/alice'};state.modalBlocksNetworkReload=()=>true;
 consume.call(state);assert.equal(opened.length,1);assert.equal(notices.at(-1),'app.string.incoming_busy');
+state.modalBlocksNetworkReload=()=>false;state.incomingPageReady=false;
+state.incomingContent={kind:'link',value:'https://x.com/alice'};
+consume.call(state);assert.equal(state.incomingContent.kind,'link','冷启动链接等待网页路由就绪');
+state.incomingPageReady=true;consume.call(state);assert.equal(opened.at(-1),'https://x.com/alice');
 
 const composeBody=main.match(/private async openCompose\(sharedText: string = ''\): Promise<void> \{([\s\S]*?)\n  \}/)[1];
 let existingDraft='',uncertain=false,dialog,saved=[];

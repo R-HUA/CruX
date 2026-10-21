@@ -13,8 +13,8 @@ const method = name => {
 const store = new Map(), writes = [], notices = [];
 let failKey;
 const prefs = { get: async (key, fallback) => store.has(key) ? store.get(key) : fallback };
-const runtime = { Promise, Date, clearTimeout, DOMAIN: 1, TAG: 'test', PREFS_NAME: 'web', COMPOSE_DRAFT_KEY: 'compose_draft',
-  TWITTER_COMPOSE: 'https://x.com/compose/post', $r: key => key,
+const runtime = { Promise, Date, setTimeout, clearTimeout, DOMAIN: 1, TAG: 'test', PREFS_NAME: 'web', COMPOSE_DRAFT_KEY: 'compose_draft',
+  TWITTER_COMPOSE: 'https://x.com/compose/post', OWN_HANDLE_SCRIPT:'owner', $r: key => key,
   preferences: { getPreferences: async () => prefs },
   fillComposerScript: text => 'fill:' + text, clickRouteScript: url => 'route:' + url,
   web_webview: { WebviewController: class {} },
@@ -74,12 +74,25 @@ for (const failure of ['missing', 'throw', 'account', 'owner']) {
   failKey = 'compose_draft:alice'; await p.clearHandoffDraft(); failKey = undefined;
   assert.equal(p.composeHandoff, true); assert.equal(p.postUncertain, true);
 }
-// A broken enhancement falls back to an ordinary navigation through the same Web controller.
-{
+// 常规入口无论缺少链接还是脚本失败，都保留当前文档；外部新地址才允许建立文档。
+for(const failure of ['missing','throw']) {
   const p = page(), loaded = [];
-  p.controller = { runJavaScript: async () => { throw Error('DOM'); }, setCustomUserAgent() {}, loadUrl: url => loaded.push(url) };
+  p.controller = { runJavaScript: async () => { if(failure==='throw')throw Error('DOM');return 'missing'; },
+    loadUrl: url => loaded.push(url) };
   p.userAgent = () => 'mobile'; await p.loadWeb('https://x.com/home');
-  assert.deepEqual(loaded, ['https://x.com/home']);
+  assert.deepEqual(loaded, []);
+  await p.loadWeb('https://x.com/alice/status/123',false,true);
+  assert.deepEqual(loaded, ['https://x.com/alice/status/123']);
+}
+{
+  const p=page(),loaded=[],results=['pending','pending','clicked'];
+  p.controller={runJavaScript:async()=>results.shift(),loadUrl:url=>loaded.push(url)};
+  await p.loadWeb('https://x.com/settings');assert.deepEqual(loaded,[]);assert.equal(results.length,0);
+}
+{
+  const p=page(),loaded=[];
+  p.controller={runJavaScript:async()=> 'cancelled',loadUrl:url=>loaded.push(url)};
+  await p.loadWeb('https://x.com/alice/status/123',false,true);assert.deepEqual(loaded,[],'用户切页取消后不补发外部导航');
 }
 const panel = read('entry/src/main/ets/pages/ComposerPanel.ets');
 const more = panel.slice(panel.indexOf("Button($r('app.string.compose_more'))"), panel.indexOf('.onClick(this.onMore)'));
@@ -140,23 +153,33 @@ for (const transition of ['blocked', 'rebuilt']) {
   await ExtraPage.prototype.aboutToAppear.call(failedContext);
   assert.equal(failedContext.preferencesReady, true);
 }
-// Home can become ready after the previous fixed delay; cancelled identity reads cannot navigate.
+// 当前页面直接确认账号，不为个人资料固定绕回首页；取消后的身份读取不能导航。
 {
   const p = page(), accepted = [];
   Object.assign(p, { currentPath: '/search', incomingControllerReady: false,
+    controller:{runJavaScript:async()=> 'Alice'},
     isHomeRoot: ExtraPage.prototype.isHomeRoot, cancelProfileNavigation: ExtraPage.prototype.cancelProfileNavigation,
-    loadWeb: async () => {}, acceptHandle: (...args) => accepted.push(args) });
-  const navigating = ExtraPage.prototype.openOwnProfile.call(p); await tick();
-  assert.equal(accepted.length, 0); assert.equal(p.discovering, true);
-  waits.shift()(); await tick();
-  assert.equal(accepted.length, 0); assert.equal(p.discovering, true);
-  p.currentPath = '/home'; waits.shift()(); await navigating;
+    loadWeb: async () => {throw Error('不得绕回主页');}, acceptHandle: (...args) => accepted.push(args) });
+  await ExtraPage.prototype.openOwnProfile.call(p);
   assert.deepEqual(accepted, [['Alice', true]]);
   let finish;
+  p.currentPath='/home';p.controller.runJavaScript=async()=> '';
   p.confirmCurrentAccount = () => new Promise(resolve => { finish = resolve; });
   const stale = ExtraPage.prototype.openOwnProfile.call(p); await tick();
   p.cancelProfileNavigation(); p.currentPath = '/explore'; finish('old'); await stale;
   assert.equal(accepted.length, 1); assert.equal(p.discovering, false);
+}
+// 移动页没有本人资料链接时，保留从网页首页抽屉确认账号的流程。
+{
+  const p=page(),accepted=[];
+  Object.assign(p,{currentPath:'/search',incomingControllerReady:false,
+    controller:{runJavaScript:async()=> ''},isHomeRoot:ExtraPage.prototype.isHomeRoot,
+    cancelProfileNavigation:ExtraPage.prototype.cancelProfileNavigation,
+    loadWeb:async(url,keepProfile)=>{assert.equal(url,'https://x.com/home');assert.equal(keepProfile,true);},
+    acceptHandle:(...args)=>accepted.push(args)});
+  const navigating=ExtraPage.prototype.openOwnProfile.call(p);await tick();
+  assert.equal(accepted.length,0);p.currentPath='/home';waits.shift()();await navigating;
+  assert.deepEqual(accepted,[['Alice',true]]);
 }
 // Launcher state commits only after success, serializes writes, and bounds failures for an unchanged count.
 {

@@ -114,17 +114,45 @@ const PROFILE_HANDLE_SCRIPT: string = 'function(p){var match=new RegExp(' + JSON
   'if(!match)return "";var root="/"+match[1];return ' + JSON.stringify(RESERVED_ROOTS) + '[root]||' +
   '["/home","/explore","/search","/notifications","/messages"].indexOf(root)>=0?"":match[1];}';
 
-/** 无筛选的媒体入口默认打开照片；同次访问内保留用户后续的分类选择。 */
+// 等网页处理点击后再阻止链接的浏览器默认导航，尚未接管事件的链接不能重载文档。
+const PAGE_CLICK_SCRIPT: string = `function(node){
+  if(node.tagName!=='A'){node.click();return true;}
+  var event=new MouseEvent('click',{bubbles:true,cancelable:true,view:window});
+  var reached=false,handled=false;
+  function stop(e){if(e===event){reached=true;handled=e.defaultPrevented;e.preventDefault();}}
+  window.addEventListener('click',stop);
+  try{node.dispatchEvent(event);}finally{window.removeEventListener('click',stop);}
+  return reached?handled:event.defaultPrevented;
+}`;
+
+/** 通过网页分类菜单切换照片，同次访问不覆盖后续手动选择。 */
 export const PROFILE_MEDIA_SCRIPT: string = `(function(){
   var path=location.pathname.replace(/\\/$/,'').toLowerCase();
   var handle=(${PROFILE_HANDLE_SCRIPT})(path);
-  if(!handle||path!=='/'+handle+'/media'){window.__otPhotoEntry='';return;}
+  if(!handle||path!=='/'+handle+'/media'){window.__otPhotoEntry='';window.__otPhotoMenu='';return;}
   if(window.__otPhotoEntry===path)return;
-  window.__otPhotoEntry=path;
-  var target=new URL(location.href);
-  if(target.searchParams.has('filter'))return;
-  target.searchParams.set('filter','photo');
-  location.replace(target.href);
+  if(new URL(location.href).searchParams.has('filter')){window.__otPhotoEntry=path;return;}
+  var activate=${PAGE_CLICK_SCRIPT};
+  var menus=document.querySelectorAll('[role="menu"],[role="dialog"],[data-testid="Dropdown"]');
+  for(var m=0;m<menus.length;m++){
+    if(!menus[m].getClientRects().length)continue;
+    var options=menus[m].querySelectorAll('[role="menuitem"],[role="menuitemradio"],[role="option"]');
+    for(var o=0;o<options.length;o++){
+      var option=options[o];
+      var label=(option.getAttribute('aria-label')||option.textContent||'').trim();
+      if(!/^(Photos|照片|相片|الصور)$/i.test(label)||!option.getClientRects().length)continue;
+      window.__otPhotoEntry=path;activate(option);return;
+    }
+  }
+  if(window.__otPhotoMenu===path)return;
+  var tabs=document.querySelectorAll('main [role="tab"][aria-selected="true"][aria-haspopup="menu"]');
+  for(var t=0;t<tabs.length;t++){
+    var tabUrl=new URL(tabs[t].getAttribute('href'),location.href);
+    if(tabUrl.pathname.replace(/\\/$/,'').toLowerCase()!==path||!tabs[t].getClientRects().length)continue;
+    window.__otPhotoMenu=path;
+    if(!activate(tabs[t]))window.__otPhotoMenu='';
+    return;
+  }
 })()`;
 
 /** 网页弹层绘制在 Web 内，原生底栏须随其显示状态让位。 */
@@ -367,18 +395,45 @@ export function scrollToTopScript(): string {
   return 'window.scrollTo({top:0,behavior:"smooth"});';
 }
 
-/** 复用网页现有链接的路由事件，避免原生标签每次重载整个文档。 */
+/** 复用网页导航及其菜单；菜单尚未挂载时由原生等待，不回退到整页加载。 */
 export function clickRouteScript(url: string): string {
   return `(function(target){
     var wanted=new URL(target,location.href);
+    if(window.__otRouteRequest&&window.__otRouteRequest.target!==wanted.href)window.__otRouteCancel();
+    if(wanted.href===location.href)return 'same';
+    if(!window.__otRouteRequest){
+      window.__otRouteRequest={target:wanted.href,start:location.href,opener:null};
+      window.__otRouteCancel=function(){
+        var request=window.__otRouteRequest;window.__otRouteRequest=null;
+        if(!request||!request.opener||request.start!==location.href)return;
+        var close=document.querySelector('[role="dialog"] [data-testid="app-bar-close"]');
+        if(close)close.click();
+        else if(request.opener.getAttribute('aria-expanded')==='true')request.opener.click();
+      };
+    }
+    var request=window.__otRouteRequest;
+    if(request.start!==location.href){window.__otRouteCancel();return 'cancelled';}
+    var activate=${PAGE_CLICK_SCRIPT};
     var links=document.querySelectorAll('a[href]');
     for(var i=0;i<links.length;i++){
       var link=new URL(links[i].getAttribute('href'),location.href);
       if(link.origin===wanted.origin&&link.pathname===wanted.pathname&&link.search===wanted.search&&
         links[i].getAttribute('target')!=='_blank'){
-        links[i].click();return 'clicked';
+        if(!activate(links[i]))return 'pending';
+        window.__otRouteRequest=null;return 'clicked';
       }
     }
+    var menuTarget=/^\\/(settings(?:\\/|$)|i\\/(bookmarks|history)(?:\\/|$)|[a-z0-9_]{1,15}(?:\\/lists)?$)/i.test(wanted.pathname);
+    if(menuTarget){
+      if(request.opener)return 'pending';
+      var controls=document.querySelectorAll('[data-testid="DashButton_ProfileIcon_Link"],'+
+        '[data-testid="AppTabBar_More_Menu"]');
+      for(var c=0;c<controls.length;c++){
+        if(controls[c].tagName==='A')continue;
+        request.opener=controls[c];controls[c].click();return 'pending';
+      }
+    }
+    window.__otRouteCancel();
     return 'missing';
   })(` + JSON.stringify(url) + ')';
 }

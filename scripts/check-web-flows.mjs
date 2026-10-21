@@ -27,7 +27,7 @@ for(const tab of ['with_replies','reposts','highlights','articles','media','like
 for(const path of ['/home/media','/i/media','/alice/media/unknown','/alice/followers','/alice/status/1']){
   assert.equal(routes.profileHandleForUrl('https://x.com'+path),'',path);
 }
-for(const path of ['/home','/search?q=中文','/notifications','/messages/42','/i/chat','/alice','/alice/status/123','/settings','/settings/profile','/i/bookmarks','/alice/lists']){
+for(const path of ['/home','/search?q=中文','/notifications','/messages/42','/i/chat','/alice','/alice/status/123','/settings','/settings/profile','/i/bookmarks','/i/history','/alice/lists']){
   assert.equal(routes.usesNativeNavigation('https://x.com'+path),true,path);
 }
 for(const path of ['/','/i/flow/login','/login','/unknown/path']){
@@ -51,27 +51,49 @@ for (const url of ['https://x.com/alice/status/123/photo/1','https://x.com/alice
 }
 const scripts = load('WebChrome', ['fillComposerScript','CLICK_POST_BUTTON_SCRIPT','POST_RESULT_SCRIPT','chromeScript','chromeFlagScript','chromeInsetsScript','chromeDocumentStartScript','chromeActiveScript','COMPOSER_READY_SCRIPT','ACCOUNT_SWITCH_SCRIPT','OWN_HANDLE_SCRIPT','profileBootstrapScript','clickRouteScript','accountAvatarScript','accountAvatarDiagScript','PROFILE_LAYOUT_SCRIPT','PROFILE_MEDIA_SCRIPT','WEB_MODAL_SCRIPT']);
 assert.equal(scripts.chromeDocumentStartScript(false),'');
-const photoRoutes=[];
-const mediaContext={URL,window:{},location:{pathname:'/alice/media',href:'https://x.com/alice/media',replace:url=>photoRoutes.push(url)}};
-const selectPhotos=()=>vm.runInNewContext(scripts.PROFILE_MEDIA_SCRIPT,mediaContext);
-selectPhotos();assert.deepEqual(photoRoutes,['https://x.com/alice/media?filter=photo']);
-selectPhotos();assert.equal(photoRoutes.length,1,'用户随后切回无筛选的视频页时不再强制跳回照片');
-mediaContext.location.pathname='/alice';selectPhotos();
-mediaContext.location.pathname='/alice/media';selectPhotos();assert.equal(photoRoutes.length,2,'再次进入媒体页重新默认照片');
-mediaContext.location.pathname='/Bob/media/';mediaContext.location.href='https://x.com/Bob/media/?ref=profile#grid';selectPhotos();
-assert.equal(photoRoutes.at(-1),'https://x.com/Bob/media/?ref=profile&filter=photo#grid','保留账号大小写、已有参数与片段');
-for(const filter of ['photo','video','unknown','']){
-  mediaContext.window.__otPhotoEntry='';mediaContext.location.href='https://x.com/Bob/media/?filter='+filter;
-  selectPhotos();assert.equal(photoRoutes.length,3,'保留显式筛选参数，不猜测视频参数');
+// 模拟网页处理事件后，浏览器是否还会执行链接的默认导航。
+function clickRuntime() {
+  const handlers=new Set();
+  const window={addEventListener:(_name,fn)=>handlers.add(fn),removeEventListener:(_name,fn)=>handlers.delete(fn)};
+  class MouseEvent {
+    constructor(){this.defaultPrevented=false;}
+    preventDefault(){this.defaultPrevented=true;}
+  }
+  function anchor(href,handle) {
+    return {tagName:'A',getAttribute:name=>name==='href'?href:null,getClientRects:()=>[{}],
+      dispatchEvent(event){handle?.(event);for(const listener of handlers)listener(event);
+        assert.equal(event.defaultPrevented,true,'网页未接管的点击也不能触发整页加载');}};
+  }
+  return {window,MouseEvent,anchor};
 }
-mediaContext.location.href='https://x.com/Bob/media/';selectPhotos();
-assert.equal(photoRoutes.length,3,'从显式筛选切回默认视频仍属于同次访问');
+const mediaClicks=clickRuntime();
+let mediaMenuOpen=false,menuReady=false,photoClicks=0,dropdownClicks=0,tabReady=false;
+const menuPhoto={tagName:'DIV',textContent:'照片',getAttribute:()=>null,getClientRects:()=>[{}],
+  click(){photoClicks++;mediaMenuOpen=false;}};
+const menu={getAttribute:()=>null,getClientRects:()=>mediaMenuOpen?[{}]:[],querySelectorAll:()=>menuReady?[menuPhoto]:[]};
+const videoTab=mediaClicks.anchor('/alice/media',event=>{event.preventDefault();dropdownClicks++;mediaMenuOpen=true;});
+const mediaContext={...mediaClicks,URL,location:{pathname:'/alice/media',href:'https://x.com/alice/media'},
+  document:{querySelectorAll:selector=>selector.startsWith('[role="menu"]')?[menu]:tabReady?[videoTab]:[]}};
+const selectPhotos=()=>vm.runInNewContext(scripts.PROFILE_MEDIA_SCRIPT,mediaContext);
+selectPhotos();assert.equal(dropdownClicks,0);
+tabReady=true;selectPhotos();assert.equal(dropdownClicks,1);assert.equal(photoClicks,0);
+selectPhotos();assert.equal(dropdownClicks,1,'等待菜单挂载时不反复开关');
+menuReady=true;selectPhotos();assert.equal(photoClicks,1);assert.equal(mediaMenuOpen,false);
+mediaMenuOpen=true;selectPhotos();assert.equal(photoClicks,1,'同次访问保留用户后续手动选择');
+mediaMenuOpen=false;
+mediaContext.location.pathname='/alice';selectPhotos();
+mediaContext.location.pathname='/alice/media';selectPhotos();selectPhotos();
+assert.equal(dropdownClicks,2);assert.equal(photoClicks,2,'重新进入媒体页默认照片');
+for(const filter of ['photo','video','unknown','']){
+  mediaContext.window.__otPhotoEntry='';mediaContext.location.href='https://x.com/alice/media?filter='+filter;
+  selectPhotos();assert.equal(dropdownClicks,2,'保留显式筛选参数');
+}
+mediaContext.location.href='https://x.com/alice/media';selectPhotos();assert.equal(dropdownClicks,2);
 for(const path of ['/i/media','/home/media','/alice/status/1','/alice']){
   mediaContext.location.pathname=path;mediaContext.location.href='https://x.com'+path;selectPhotos();
-  assert.equal(photoRoutes.length,3,'不接管非用户媒体页');
+  assert.equal(dropdownClicks,2,'不接管非用户媒体页');
 }
-let mediaMenuOpen=true;
-const menu={getAttribute:()=>null,getClientRects:()=>mediaMenuOpen?[{}]:[]};
+mediaMenuOpen=true;
 const modalReports=[];
 const modalContext={window:{otNative:{onWebModal:(url,open)=>modalReports.push([url,open])}},
   location:{href:'https://x.com/alice/media'},document:{querySelectorAll:()=>[menu]}};
@@ -82,7 +104,7 @@ mediaMenuOpen=true;menu.getAttribute=()=> 'true';reportModal();assert.equal(moda
 new vm.Script(scripts.chromeDocumentStartScript(true));
 // 文档开始阶段与原生路由一致；登录表单出现时不得隐藏其导航。
 for (const path of ['/home','/explore','/search','/notifications','/messages','/messages/42',
-  '/i/chat','/i/chat/conversations/42','/alice','/alice/status/123','/settings','/settings/profile','/i/bookmarks',
+  '/i/chat','/i/chat/conversations/42','/alice','/alice/status/123','/settings','/settings/profile','/i/bookmarks','/i/history',
   '/alice/lists','/alice/with_replies','/alice/reposts','/alice/highlights','/alice/articles','/alice/media','/alice/likes',
   '/i/web/status/123','/i/flow/login','/grok','/unknown/path','/home/unknown','/invalid-handle','/']) {
   const style = {textContent:''};
@@ -101,6 +123,14 @@ for (const path of ['/home','/explore','/search','/notifications','/messages','/
 }
 // 回复直接使用当前详情的帖子编号，原帖是否被虚拟列表回收不影响面板显示。
 const mainSource=readFileSync(new URL('../entry/src/main/ets/pages/MainTabs.ets',import.meta.url),'utf8');
+const goRouteBody=mainSource.match(/private goRoute\(index: number\): void \{([\s\S]*?)\n  \}/)[1];
+const goRoute=vm.runInNewContext(stripTypeScriptTypes('(function(index){'+goRouteBody+'})'),{
+  isTabRootPath:routes.isTabRootPath,TWITTER_ROUTES:['/home','/explore','/notifications','/i/chat'],scrollToTopScript:()=> 'scroll'});
+const navigations=[],scrolls=[];
+const navigationState={currentIndex:0,currentPath:'/settings',cancelProfileNavigation(){},tick(){},
+  loadWeb:url=>navigations.push(url),controller:{runJavaScript:value=>scrolls.push(value)}};
+goRoute.call(navigationState,0);assert.deepEqual(navigations,['/home'],'二级页点击上次选中的标签仍须导航');
+navigationState.currentPath='/home';goRoute.call(navigationState,0);assert.deepEqual(scrolls,['scroll']);
 const modalMethods=['bottomChromeHeight','updateWebModal','modalBlocksNetworkReload'].map(name=>
   mainSource.match(new RegExp('^  private '+name+'\\([\\s\\S]*?^  \\}','m'))[0]).join('\n');
 const ModalPage=vm.runInNewContext(stripTypeScriptTypes('class ModalPage{'+modalMethods+'};ModalPage'),{
@@ -256,12 +286,38 @@ assert.equal(accountContext.window.__otBoot,'');
 profileReady=true;accountChanged();
 assert.equal(accountContext.window.__otBoot,'alice');assert.equal(menuOpen,false);
 let routeClicks=0;
-const link={getAttribute:name=>name==='href'?'/i/chat':null,click(){routeClicks++;}};
-const routeContext={URL,location:{href:'https://x.com/home'},document:{querySelectorAll:()=>[link]}};
+const routeEvents=clickRuntime();
+let routeLinks=[routeEvents.anchor('/i/chat',event=>{event.preventDefault();routeClicks++;})],routeControls=[];
+const routeContext={...routeEvents,URL,location:{href:'https://x.com/home'},
+  document:{querySelectorAll:selector=>selector==='a[href]'?routeLinks:routeControls,querySelector:()=>null}};
 assert.equal(vm.runInNewContext(scripts.clickRouteScript('https://x.com/i/chat'),routeContext),'clicked');
 assert.equal(routeClicks,1);
 assert.equal(vm.runInNewContext(scripts.clickRouteScript('https://x.com/search?q=a'),routeContext),'missing');
 assert.equal(routeClicks,1);
+assert.equal(vm.runInNewContext(scripts.clickRouteScript('https://x.com/home'),routeContext),'same');
+routeLinks=[routeEvents.anchor('/explore')];
+assert.equal(vm.runInNewContext(scripts.clickRouteScript('https://x.com/explore'),routeContext),'pending','未绑定路由的链接不得整页跳转');
+routeLinks=[];
+let expanded=false,menuOpens=0;
+const moreControl={tagName:'BUTTON',getAttribute:()=>expanded?'true':'false',click(){expanded=!expanded;menuOpens++;}};
+routeControls=[moreControl];
+assert.equal(vm.runInNewContext(scripts.clickRouteScript('https://x.com/settings'),routeContext),'pending');
+assert.equal(vm.runInNewContext(scripts.clickRouteScript('https://x.com/settings'),routeContext),'pending');
+assert.equal(menuOpens,1,'等待菜单挂载期间不反复点击');
+routeLinks=[routeEvents.anchor('/settings',event=>{event.preventDefault();routeClicks++;expanded=false;})];
+assert.equal(vm.runInNewContext(scripts.clickRouteScript('https://x.com/settings'),routeContext),'clicked');
+assert.equal(routeClicks,2);
+routeLinks=[];
+assert.equal(vm.runInNewContext(scripts.clickRouteScript('https://x.com/alice/lists'),routeContext),'pending');
+routeContext.location.href='https://x.com/notifications';
+assert.equal(vm.runInNewContext(scripts.clickRouteScript('https://x.com/alice/lists'),routeContext),'cancelled','用户已切页时取消旧菜单导航');
+routeControls=[];
+for(const path of ['/home','/explore','/notifications','/i/chat','/alice','/alice/with_replies','/alice/reposts',
+  '/alice/media','/i/history','/alice/lists','/settings','/settings/profile','/settings/notifications','/search?q=a']){
+  routeContext.location.href='https://x.com/other';
+  routeLinks=[routeEvents.anchor(path,event=>event.preventDefault())];
+  assert.equal(vm.runInNewContext(scripts.clickRouteScript('https://x.com'+path),routeContext),'clicked',path);
+}
 // 相同 DOM 不能因重复设置样式而持续触发自身观察器。
 let cssWrites=0, cssText='', authVisible=false;
 const style={get textContent(){return cssText;},set textContent(value){cssText=value;cssWrites++;}};

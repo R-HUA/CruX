@@ -9,7 +9,8 @@ export const TWITTER_NOTIFICATIONS: string = 'https://x.com/notifications';
 // 与当前账号网页底栏的真实私信入口保持一致。
 export const TWITTER_MESSAGES: string = 'https://x.com/i/chat';
 export const TWITTER_SETTINGS: string = 'https://x.com/settings';
-export const TWITTER_BOOKMARKS: string = 'https://x.com/i/bookmarks';
+// 当前网页的历史页默认显示书签，沿用其导航入口以保留页内路由。
+export const TWITTER_BOOKMARKS: string = 'https://x.com/i/history';
 export const TWITTER_COMPOSE: string = 'https://x.com/compose/post';
 export const TWITTER_LOGIN: string = 'https://x.com/i/flow/login';
 export const TWITTER_SIGNUP: string = 'https://x.com/i/flow/signup';
@@ -174,7 +175,7 @@ export function isTabRootPath(path: string): boolean {
 }
 
 // 与文档初始脚本共用路径规则，避免首帧和原生栏采用不同边界。
-export const SECONDARY_PATH_PATTERN: string = '^/(settings(?:/.*)?|i/bookmarks(?:/.*)?|i/lists(?:/.*)?|[a-z0-9_]{1,15}/lists(?:/.*)?)$';
+export const SECONDARY_PATH_PATTERN: string = '^/(settings(?:/.*)?|i/(?:bookmarks|history)(?:/.*)?|i/lists(?:/.*)?|[a-z0-9_]{1,15}/lists(?:/.*)?)$';
 
 /** 二级业务页保留原生返回入口，不显示主标签栏。 */
 export function isSecondaryUrl(url: string): boolean {
