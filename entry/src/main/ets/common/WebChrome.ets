@@ -114,40 +114,17 @@ const PROFILE_HANDLE_SCRIPT: string = 'function(p){var match=new RegExp(' + JSON
   'if(!match)return "";var root="/"+match[1];return ' + JSON.stringify(RESERVED_ROOTS) + '[root]||' +
   '["/home","/explore","/search","/notifications","/messages"].indexOf(root)>=0?"":match[1];}';
 
-/** 媒体分类位于网页底部菜单；每次进入只选择一次，不覆盖后续手动切换。 */
+/** 无筛选的媒体入口默认打开照片；同次访问内保留用户后续的分类选择。 */
 export const PROFILE_MEDIA_SCRIPT: string = `(function(){
   var path=location.pathname.replace(/\\/$/,'').toLowerCase();
   var handle=(${PROFILE_HANDLE_SCRIPT})(path);
-  if(!handle||path!=='/'+handle+'/media'){window.__otPhotoEntry='';window.__otPhotoMenu='';return;}
+  if(!handle||path!=='/'+handle+'/media'){window.__otPhotoEntry='';return;}
   if(window.__otPhotoEntry===path)return;
-  function label(node){return (node.getAttribute('aria-label')||node.innerText||node.textContent||'').trim();}
-  function photo(node){return /^(Photos|照片|相片|الصور)(?:\\s*\\1)?$/i.test(label(node));}
-  function select(node){
-    if(!node.getClientRects().length||node.getAttribute('aria-disabled')==='true'||node.disabled)return false;
-    window.__otPhotoEntry=path;
-    if(node.getAttribute('aria-selected')!=='true'&&node.getAttribute('aria-pressed')!=='true')node.click();
-    return true;
-  }
-  var menus=document.querySelectorAll('[role="menu"],[role="dialog"],[data-testid="Dropdown"]');
-  for(var m=0;m<menus.length;m++){
-    if(!menus[m].getClientRects().length)continue;
-    var options=menus[m].querySelectorAll('[role="menuitem"],[role="menuitemradio"],[role="option"],[role="button"],button,a[href]');
-    for(var o=0;o<options.length;o++){if(photo(options[o])&&select(options[o]))return;}
-  }
-  var choices=document.querySelectorAll('main [role="tab"],main [role="button"],main button');
-  for(var i=0;i<choices.length;i++){
-    var choice=choices[i];
-    if(choice.closest('article,[data-testid="cellInnerDiv"],[role="dialog"]'))continue;
-    if(photo(choice)&&select(choice))return;
-  }
-  if(window.__otPhotoMenu===path)return;
-  var tabs=document.querySelectorAll('main [role="tab"][aria-selected="true"]');
-  for(var t=0;t<tabs.length;t++){
-    if(!/^(Videos|视频|影片|الفيديوهات|Media|媒体|媒體|الوسائط)(?:\\s*\\1)?$/i.test(label(tabs[t])))continue;
-    var trigger=tabs[t].querySelector('button,[role="button"],[aria-haspopup="menu"]')||tabs[t];
-    if(!trigger.getClientRects().length)continue;
-    window.__otPhotoMenu=path;trigger.click();return;
-  }
+  window.__otPhotoEntry=path;
+  var target=new URL(location.href);
+  if(target.searchParams.has('filter'))return;
+  target.searchParams.set('filter','photo');
+  location.replace(target.href);
 })()`;
 
 /** 网页弹层绘制在 Web 内，原生底栏须随其显示状态让位。 */

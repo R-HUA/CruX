@@ -51,32 +51,27 @@ for (const url of ['https://x.com/alice/status/123/photo/1','https://x.com/alice
 }
 const scripts = load('WebChrome', ['fillComposerScript','CLICK_POST_BUTTON_SCRIPT','POST_RESULT_SCRIPT','chromeScript','chromeFlagScript','chromeInsetsScript','chromeDocumentStartScript','chromeActiveScript','COMPOSER_READY_SCRIPT','ACCOUNT_SWITCH_SCRIPT','OWN_HANDLE_SCRIPT','profileBootstrapScript','clickRouteScript','accountAvatarScript','accountAvatarDiagScript','PROFILE_LAYOUT_SCRIPT','PROFILE_MEDIA_SCRIPT','WEB_MODAL_SCRIPT']);
 assert.equal(scripts.chromeDocumentStartScript(false),'');
-let photoClicks=0, photoReady=false;
-const photoChoice={textContent:'照片',closest:()=>null,getAttribute:()=>null,getClientRects:()=>[{}],click(){photoClicks++;}};
-const mediaContext={window:{},location:{pathname:'/alice/media'},document:{querySelectorAll:selector=>photoReady&&selector.startsWith('main [role="tab"],')?[photoChoice]:[]}};
+const photoRoutes=[];
+const mediaContext={URL,window:{},location:{pathname:'/alice/media',href:'https://x.com/alice/media',replace:url=>photoRoutes.push(url)}};
 const selectPhotos=()=>vm.runInNewContext(scripts.PROFILE_MEDIA_SCRIPT,mediaContext);
-selectPhotos();assert.equal(photoClicks,0);
-photoReady=true;selectPhotos();assert.equal(photoClicks,1,'等待照片控件出现后选择');
-selectPhotos();assert.equal(photoClicks,1,'用户随后切回视频时不再强制跳回照片');
+selectPhotos();assert.deepEqual(photoRoutes,['https://x.com/alice/media?filter=photo']);
+selectPhotos();assert.equal(photoRoutes.length,1,'用户随后切回无筛选的视频页时不再强制跳回照片');
 mediaContext.location.pathname='/alice';selectPhotos();
-mediaContext.location.pathname='/alice/media';selectPhotos();assert.equal(photoClicks,2,'再次进入媒体页重新默认照片');
-mediaContext.location.pathname='/bob/media';photoChoice.textContent='PhotosPhotos';selectPhotos();assert.equal(photoClicks,3);
-photoChoice.closest=()=>({});mediaContext.location.pathname='/carol/media';selectPhotos();
-assert.equal(photoClicks,3,'不点击帖子或对话框中的同名内容');
-mediaContext.location.pathname='/i/media';photoChoice.closest=()=>null;selectPhotos();assert.equal(photoClicks,3);
-// 手机分类在 main 外的底部菜单里；先展开已选视频标签，再点击延迟出现的照片项。
-let mediaMenuOpen=false, menuReady=false, menuClicks=0, dropdownClicks=0;
-const menuPhoto={textContent:'照片',getAttribute:()=>null,getClientRects:()=>[{}],click(){menuClicks++;mediaMenuOpen=false;}};
-const menu={getAttribute:()=>null,getClientRects:()=>mediaMenuOpen?[{}]:[],querySelectorAll:()=>menuReady?[menuPhoto]:[]};
-const videoTab={textContent:'视频',getClientRects:()=>[{}],getAttribute:()=>null,querySelector:()=>null,click(){dropdownClicks++;mediaMenuOpen=true;}};
-mediaContext.location.pathname='/alice/media';mediaContext.window.__otPhotoEntry='';
-mediaContext.document.querySelectorAll=selector=>selector.startsWith('[role="menu"]')?[menu]:
-  selector==='main [role="tab"][aria-selected="true"]'?[videoTab]:[];
-selectPhotos();assert.equal(dropdownClicks,1);assert.equal(menuClicks,0);
-selectPhotos();assert.equal(dropdownClicks,1,'等待菜单内容时不能反复开关菜单');
-menuReady=true;selectPhotos();assert.equal(menuClicks,1);assert.equal(mediaMenuOpen,false);
-mediaMenuOpen=true;selectPhotos();assert.equal(menuClicks,1,'用户再次打开分类菜单时不自动替其选择');
-
+mediaContext.location.pathname='/alice/media';selectPhotos();assert.equal(photoRoutes.length,2,'再次进入媒体页重新默认照片');
+mediaContext.location.pathname='/Bob/media/';mediaContext.location.href='https://x.com/Bob/media/?ref=profile#grid';selectPhotos();
+assert.equal(photoRoutes.at(-1),'https://x.com/Bob/media/?ref=profile&filter=photo#grid','保留账号大小写、已有参数与片段');
+for(const filter of ['photo','video','unknown','']){
+  mediaContext.window.__otPhotoEntry='';mediaContext.location.href='https://x.com/Bob/media/?filter='+filter;
+  selectPhotos();assert.equal(photoRoutes.length,3,'保留显式筛选参数，不猜测视频参数');
+}
+mediaContext.location.href='https://x.com/Bob/media/';selectPhotos();
+assert.equal(photoRoutes.length,3,'从显式筛选切回默认视频仍属于同次访问');
+for(const path of ['/i/media','/home/media','/alice/status/1','/alice']){
+  mediaContext.location.pathname=path;mediaContext.location.href='https://x.com'+path;selectPhotos();
+  assert.equal(photoRoutes.length,3,'不接管非用户媒体页');
+}
+let mediaMenuOpen=true;
+const menu={getAttribute:()=>null,getClientRects:()=>mediaMenuOpen?[{}]:[]};
 const modalReports=[];
 const modalContext={window:{otNative:{onWebModal:(url,open)=>modalReports.push([url,open])}},
   location:{href:'https://x.com/alice/media'},document:{querySelectorAll:()=>[menu]}};
@@ -94,7 +89,7 @@ for (const path of ['/home','/explore','/search','/notifications','/messages','/
   let auth = false;
   let update;
   const context = {
-    window:{addEventListener(){}}, location:{pathname:path},
+    URL,window:{addEventListener(){}}, location:{pathname:path,href:'https://x.com'+path,replace(){}},
     document:{head:{},getElementById:()=>style,querySelector:()=>auth?{}:null,querySelectorAll:()=>[]},
     MutationObserver:class {constructor(callback){update=callback;}observe(){}disconnect(){}}
   };
