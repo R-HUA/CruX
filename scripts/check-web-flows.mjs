@@ -49,11 +49,11 @@ assert.equal(routes.isPostDetailUrl('https://x.com/i/web/status/123'),true);
 for (const url of ['https://x.com/alice/status/123/photo/1','https://x.com/alice/status/123/mediaViewer','https://example.com/alice/status/123']) {
   assert.equal(routes.isPostDetailUrl(url),false,url);
 }
-const scripts = load('WebChrome', ['fillComposerScript','CLICK_POST_BUTTON_SCRIPT','POST_RESULT_SCRIPT','chromeScript','chromeFlagScript','chromeInsetsScript','chromeDocumentStartScript','chromeActiveScript','COMPOSER_READY_SCRIPT','ACCOUNT_SWITCH_SCRIPT','OWN_HANDLE_SCRIPT','profileBootstrapScript','clickRouteScript','accountAvatarScript','accountAvatarDiagScript','PROFILE_LAYOUT_SCRIPT','PROFILE_MEDIA_SCRIPT']);
+const scripts = load('WebChrome', ['fillComposerScript','CLICK_POST_BUTTON_SCRIPT','POST_RESULT_SCRIPT','chromeScript','chromeFlagScript','chromeInsetsScript','chromeDocumentStartScript','chromeActiveScript','COMPOSER_READY_SCRIPT','ACCOUNT_SWITCH_SCRIPT','OWN_HANDLE_SCRIPT','profileBootstrapScript','clickRouteScript','accountAvatarScript','accountAvatarDiagScript','PROFILE_LAYOUT_SCRIPT','PROFILE_MEDIA_SCRIPT','WEB_MODAL_SCRIPT']);
 assert.equal(scripts.chromeDocumentStartScript(false),'');
 let photoClicks=0, photoReady=false;
-const photoChoice={textContent:'照片',closest:()=>null,getAttribute:()=>null,click(){photoClicks++;}};
-const mediaContext={window:{},location:{pathname:'/alice/media'},document:{querySelectorAll:()=>photoReady?[photoChoice]:[]}};
+const photoChoice={textContent:'照片',closest:()=>null,getAttribute:()=>null,getClientRects:()=>[{}],click(){photoClicks++;}};
+const mediaContext={window:{},location:{pathname:'/alice/media'},document:{querySelectorAll:selector=>photoReady&&selector.startsWith('main [role="tab"],')?[photoChoice]:[]}};
 const selectPhotos=()=>vm.runInNewContext(scripts.PROFILE_MEDIA_SCRIPT,mediaContext);
 selectPhotos();assert.equal(photoClicks,0);
 photoReady=true;selectPhotos();assert.equal(photoClicks,1,'等待照片控件出现后选择');
@@ -64,6 +64,26 @@ mediaContext.location.pathname='/bob/media';photoChoice.textContent='PhotosPhoto
 photoChoice.closest=()=>({});mediaContext.location.pathname='/carol/media';selectPhotos();
 assert.equal(photoClicks,3,'不点击帖子或对话框中的同名内容');
 mediaContext.location.pathname='/i/media';photoChoice.closest=()=>null;selectPhotos();assert.equal(photoClicks,3);
+// 手机分类在 main 外的底部菜单里；先展开已选视频标签，再点击延迟出现的照片项。
+let mediaMenuOpen=false, menuReady=false, menuClicks=0, dropdownClicks=0;
+const menuPhoto={textContent:'照片',getAttribute:()=>null,getClientRects:()=>[{}],click(){menuClicks++;mediaMenuOpen=false;}};
+const menu={getAttribute:()=>null,getClientRects:()=>mediaMenuOpen?[{}]:[],querySelectorAll:()=>menuReady?[menuPhoto]:[]};
+const videoTab={textContent:'视频',getClientRects:()=>[{}],getAttribute:()=>null,querySelector:()=>null,click(){dropdownClicks++;mediaMenuOpen=true;}};
+mediaContext.location.pathname='/alice/media';mediaContext.window.__otPhotoEntry='';
+mediaContext.document.querySelectorAll=selector=>selector.startsWith('[role="menu"]')?[menu]:
+  selector==='main [role="tab"][aria-selected="true"]'?[videoTab]:[];
+selectPhotos();assert.equal(dropdownClicks,1);assert.equal(menuClicks,0);
+selectPhotos();assert.equal(dropdownClicks,1,'等待菜单内容时不能反复开关菜单');
+menuReady=true;selectPhotos();assert.equal(menuClicks,1);assert.equal(mediaMenuOpen,false);
+mediaMenuOpen=true;selectPhotos();assert.equal(menuClicks,1,'用户再次打开分类菜单时不自动替其选择');
+
+const modalReports=[];
+const modalContext={window:{otNative:{onWebModal:(url,open)=>modalReports.push([url,open])}},
+  location:{href:'https://x.com/alice/media'},document:{querySelectorAll:()=>[menu]}};
+const reportModal=()=>vm.runInNewContext(scripts.WEB_MODAL_SCRIPT,modalContext);
+reportModal();reportModal();assert.deepEqual(modalReports,[[modalContext.location.href,true]]);
+mediaMenuOpen=false;reportModal();assert.equal(modalReports.at(-1)[1],false,'菜单关闭后报告恢复底栏');
+mediaMenuOpen=true;menu.getAttribute=()=> 'true';reportModal();assert.equal(modalReports.length,2,'忽略隐藏的菜单');
 new vm.Script(scripts.chromeDocumentStartScript(true));
 // 文档开始阶段与原生路由一致；登录表单出现时不得隐藏其导航。
 for (const path of ['/home','/explore','/search','/notifications','/messages','/messages/42',
@@ -86,6 +106,17 @@ for (const path of ['/home','/explore','/search','/notifications','/messages','/
 }
 // 回复直接使用当前详情的帖子编号，原帖是否被虚拟列表回收不影响面板显示。
 const mainSource=readFileSync(new URL('../entry/src/main/ets/pages/MainTabs.ets',import.meta.url),'utf8');
+const modalMethods=['bottomChromeHeight','updateWebModal','modalBlocksNetworkReload'].map(name=>
+  mainSource.match(new RegExp('^  private '+name+'\\([\\s\\S]*?^  \\}','m'))[0]).join('\n');
+const ModalPage=vm.runInNewContext(stripTypeScriptTypes('class ModalPage{'+modalMethods+'};ModalPage'),{
+  isSecondaryUrl:()=>false,isPostDetailUrl:()=>false,FLOATING_BAR_HEIGHT:58,BAR_HEIGHT:56});
+const modalPage=new ModalPage();let insetChanges=0,resumedReloads=0;
+Object.assign(modalPage,{webModalOpen:false,showsNativeNavigation:()=>true,isWide:false,floatingBar:true,bottomInset:24,
+  syncChromeInsets(){insetChanges++;},flushNetworkReload(){resumedReloads++;}});
+assert.equal(modalPage.bottomChromeHeight(),82);
+modalPage.updateWebModal(true);assert.equal(modalPage.bottomChromeHeight(),0);assert.equal(modalPage.modalBlocksNetworkReload(),true);
+modalPage.updateWebModal(true);assert.equal(insetChanges,1);
+modalPage.updateWebModal(false);assert.equal(modalPage.bottomChromeHeight(),82);assert.equal(resumedReloads,1);
 const insetBody=mainSource.match(/private overlayTopInset\(\): number \{([\s\S]*?)\n  \}/)[1];
 const topInset=vm.runInNewContext(stripTypeScriptTypes('(function(){'+insetBody+'})'),{
   HEADER_HEIGHT:56,HEADER_CONTENT_LIFT:4
@@ -155,7 +186,7 @@ domHandle='bob';measure();assert.equal(profileReports.at(-1).ready,true);assert.
 identityHeight=0;measure();assert.equal(profileReports.at(-1).ready,false,'Loading placeholders cannot reveal the title');
 const pageBegin=mainSource.match(/\.onPageBegin\(\(\) => \{([\s\S]*?)\n      \}\)/)[1];
 const begin=vm.runInNewContext('(function(){'+pageBegin+'})');
-const loadingState={webNetworkReady:true,documentLoading:false,incomingPageReady:true,hasError:true,resetProfileLayout(){this.reset=true;},armFirstLoadTimeout(){}};
+const loadingState={webNetworkReady:true,documentLoading:false,incomingPageReady:true,hasError:true,resetProfileLayout(){this.reset=true;},armFirstLoadTimeout(){},updateWebModal(){}};
 begin.call(loadingState);
 assert.equal(loadingState.reset,true);assert.equal(loadingState.documentLoading,true);assert.equal(loadingState.hasError,false);
 loadingState.documentLoading=false;loadingState.webNetworkReady=false;begin.call(loadingState);
@@ -348,7 +379,8 @@ chromeContext.window.__otPass();assert.equal(chromeNotifications,beforeAvatar+1)
 chromeContext.window.__otPass();assert.equal(chromeNotifications,beforeAvatar+1);
 chromeContext.document.querySelectorAll=()=>[];
 assert.equal(observedOptions.attributes,true);
-assert.deepEqual(Array.from(observedOptions.attributeFilter),['src','srcset','style','href']);
+assert.equal(observedOptions.characterData,true);
+assert.deepEqual(Array.from(observedOptions.attributeFilter),['src','srcset','style','href','aria-selected','aria-expanded','aria-hidden','hidden']);
 avatarContext.location.pathname='/alice';
 avatarContext.document.querySelectorAll=selector=>selector==='a[href]'?
   [{getAttribute:()=>'/alice/photo',...avatarRoot(ownAvatar)},

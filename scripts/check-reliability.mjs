@@ -126,7 +126,7 @@ for (const transition of ['blocked', 'rebuilt']) {
 {
   const p = page();
   Object.assign(p, { avatarAlive: true, ownHandle: '',
-    bridge: Object.fromEntries(['setImageHandler','setProfileHandler','setThemeHandler','setHandler'].map(name => [name, () => {}])),
+    bridge: Object.fromEntries(['setImageHandler','setProfileHandler','setThemeHandler','setHandler','setModalHandler'].map(name => [name, () => {}])),
     applyBreakpoints() {}, armFirstLoadTimeout() {}, armBadgeRefresh() {}, syncChromeInsets() {},
     recoverMediaWeb: ExtraPage.prototype.recoverMediaWeb });
   await ExtraPage.prototype.aboutToAppear.call(p);

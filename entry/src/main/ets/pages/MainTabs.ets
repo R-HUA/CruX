@@ -89,6 +89,10 @@ const DRAFT_SAVE_DEBOUNCE_MS: number = 700;
 // its navigations never fire the Web component's load callbacks; the injected
 // history hook calls this instead.
 class PageBridge {
+  // 网页弹层只能绘制在 Web 内，需要通知原生控件让位。
+  private modalHandler: (url: string, open: boolean) => void = () => {};
+  setModalHandler(handler: (url: string, open: boolean) => void): void { this.modalHandler = handler; }
+  onWebModal(url: string, open: boolean): void { this.modalHandler(url, open); }
   private profileHandler: (payload: string) => void = () => {};
   setProfileHandler(handler: (payload: string) => void): void { this.profileHandler = handler; }
   onProfileLayout(payload: string): void { this.profileHandler(payload); }
@@ -224,6 +228,7 @@ struct MainTabs {
   private lastTouchY: number = 0;
   @State firstLoadDone: boolean = false;
   @State documentLoading: boolean = false;
+  @State webModalOpen: boolean = false;
   @State sheetOpen: boolean = false;
   // Native composer state. "webComposer" is the escape hatch: when the page's
   // own composer cannot be driven (or the post needs media/GIF/poll), the sheet
@@ -362,6 +367,10 @@ struct MainTabs {
         }
       });
       this.bridge.setImageHandler((payload: string) => this.openImages(payload));
+      this.bridge.setModalHandler((url: string, open: boolean) => {
+        if (this.rawWeb || !this.incomingControllerReady || !isSiteUrl(url) || this.controller.getUrl() !== url) { return; }
+        this.updateWebModal(open);
+      });
       this.bridge.setProfileHandler((payload: string) => this.receiveProfileLayout(payload));
       this.bridge.setThemeHandler((color: string) => {
         const match = /^rgb\((\d{1,3}),\s*(\d{1,3}),\s*(\d{1,3})\)$/.exec(color);
@@ -1127,6 +1136,7 @@ struct MainTabs {
     this.webImages = undefined;
     this.incomingControllerReady = false;
     this.incomingPageReady = false;
+    this.webModalOpen = false;
     this.controller = new web_webview.WebviewController();
     this.hasError = false;
     this.progress = 0;
@@ -1146,8 +1156,16 @@ struct MainTabs {
   }
 
   private bottomChromeHeight(): number {
-    return !this.showsNativeNavigation() || isSecondaryUrl(this.currentUrl) || (this.isWide && !isPostDetailUrl(this.currentUrl)) ? 0 :
+    return this.webModalOpen || !this.showsNativeNavigation() || isSecondaryUrl(this.currentUrl) || (this.isWide && !isPostDetailUrl(this.currentUrl)) ? 0 :
       (this.floatingBar ? FLOATING_BAR_HEIGHT : BAR_HEIGHT) + this.bottomInset;
+  }
+
+  /** 弹层关闭后恢复原有底栏及网页留白，不改动标题栏和系统栏。 */
+  private updateWebModal(open: boolean): void {
+    if (this.webModalOpen === open) { return; }
+    this.webModalOpen = open;
+    this.syncChromeInsets();
+    if (!open) { this.flushNetworkReload(); }
   }
 
   private updateShellInsets(): void {
@@ -1423,7 +1441,7 @@ struct MainTabs {
   }
 
   private modalBlocksNetworkReload(): boolean {
-    return this.imageViewerOpen || this.sheetOpen || this.networkOpen ||
+    return this.webModalOpen || this.imageViewerOpen || this.sheetOpen || this.networkOpen ||
       this.appearanceOpen || this.discovering;
   }
 
@@ -2653,15 +2671,17 @@ struct MainTabs {
 
   @Builder
   bottomNavigation() {
-    if (isPostDetailUrl(this.currentUrl)) {
-      this.replyBar()
-    } else {
-      Row() {
-        this.nativeTabs()
+    if (!this.webModalOpen) {
+      if (isPostDetailUrl(this.currentUrl)) {
+        this.replyBar()
+      } else {
+        Row() {
+          this.nativeTabs()
+        }
+          .width('100%')
+          .height('100%')
+          .padding({ left: 4, right: 4 })
       }
-        .width('100%')
-        .height('100%')
-        .padding({ left: 4, right: 4 })
     }
   }
 
@@ -2852,7 +2872,7 @@ struct MainTabs {
       .javaScriptProxy({
         object: this.bridge,
         name: 'otNative',
-        methodList: ['onUrlChange', 'onImages', 'onTheme', 'onProfileLayout'],
+        methodList: ['onUrlChange', 'onImages', 'onTheme', 'onProfileLayout', 'onWebModal'],
         controller: this.controller
       })
       .onControllerAttached(() => {
@@ -2928,6 +2948,7 @@ struct MainTabs {
       })
       .onPageBegin(() => {
         if (!this.webNetworkReady) { return; }
+        this.updateWebModal(false);
         this.documentLoading = true;
         this.armFirstLoadTimeout();
         this.resetProfileLayout();

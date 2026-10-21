@@ -114,21 +114,53 @@ const PROFILE_HANDLE_SCRIPT: string = 'function(p){var match=new RegExp(' + JSON
   'if(!match)return "";var root="/"+match[1];return ' + JSON.stringify(RESERVED_ROOTS) + '[root]||' +
   '["/home","/explore","/search","/notifications","/messages"].indexOf(root)>=0?"":match[1];}';
 
-/** 每次进入媒体页只选择一次照片，之后保留用户手动选择的视频分类。 */
+/** 媒体分类位于网页底部菜单；每次进入只选择一次，不覆盖后续手动切换。 */
 export const PROFILE_MEDIA_SCRIPT: string = `(function(){
   var path=location.pathname.replace(/\\/$/,'').toLowerCase();
   var handle=(${PROFILE_HANDLE_SCRIPT})(path);
-  if(!handle||path!=='/'+handle+'/media'){window.__otPhotoEntry='';return;}
+  if(!handle||path!=='/'+handle+'/media'){window.__otPhotoEntry='';window.__otPhotoMenu='';return;}
   if(window.__otPhotoEntry===path)return;
+  function label(node){return (node.getAttribute('aria-label')||node.innerText||node.textContent||'').trim();}
+  function photo(node){return /^(Photos|照片|相片|الصور)(?:\\s*\\1)?$/i.test(label(node));}
+  function select(node){
+    if(!node.getClientRects().length||node.getAttribute('aria-disabled')==='true'||node.disabled)return false;
+    window.__otPhotoEntry=path;
+    if(node.getAttribute('aria-selected')!=='true'&&node.getAttribute('aria-pressed')!=='true')node.click();
+    return true;
+  }
+  var menus=document.querySelectorAll('[role="menu"],[role="dialog"],[data-testid="Dropdown"]');
+  for(var m=0;m<menus.length;m++){
+    if(!menus[m].getClientRects().length)continue;
+    var options=menus[m].querySelectorAll('[role="menuitem"],[role="menuitemradio"],[role="option"],[role="button"],button,a[href]');
+    for(var o=0;o<options.length;o++){if(photo(options[o])&&select(options[o]))return;}
+  }
   var choices=document.querySelectorAll('main [role="tab"],main [role="button"],main button');
   for(var i=0;i<choices.length;i++){
     var choice=choices[i];
     if(choice.closest('article,[data-testid="cellInnerDiv"],[role="dialog"]'))continue;
-    var label=(choice.getAttribute('aria-label')||choice.innerText||choice.textContent||'').trim();
-    if(!/^(Photos|照片|相片|الصور)(?:\\s*\\1)?$/i.test(label))continue;
-    window.__otPhotoEntry=path;
-    if(choice.getAttribute('aria-selected')!=='true'&&choice.getAttribute('aria-pressed')!=='true')choice.click();
-    return;
+    if(photo(choice)&&select(choice))return;
+  }
+  if(window.__otPhotoMenu===path)return;
+  var tabs=document.querySelectorAll('main [role="tab"][aria-selected="true"]');
+  for(var t=0;t<tabs.length;t++){
+    if(!/^(Videos|视频|影片|الفيديوهات|Media|媒体|媒體|الوسائط)(?:\\s*\\1)?$/i.test(label(tabs[t])))continue;
+    var trigger=tabs[t].querySelector('button,[role="button"],[aria-haspopup="menu"]')||tabs[t];
+    if(!trigger.getClientRects().length)continue;
+    window.__otPhotoMenu=path;trigger.click();return;
+  }
+})()`;
+
+/** 网页弹层绘制在 Web 内，原生底栏须随其显示状态让位。 */
+export const WEB_MODAL_SCRIPT: string = `(function(){
+  if(!window.otNative||!window.otNative.onWebModal)return;
+  var nodes=document.querySelectorAll('[role="dialog"],[role="menu"],[aria-modal="true"],[data-testid="Dropdown"]');
+  var open=false;
+  for(var i=0;i<nodes.length;i++){
+    if(nodes[i].getAttribute('aria-hidden')!=='true'&&nodes[i].getClientRects().length){open=true;break;}
+  }
+  var url=String(location.href);
+  if(window.__otModalOpen!==open||window.__otModalUrl!==url){
+    window.__otModalOpen=open;window.__otModalUrl=url;window.otNative.onWebModal(url,open);
   }
 })()`;
 
@@ -182,7 +214,7 @@ export function chromeDocumentStartScript(enabled: boolean): string {
     'if(p==="/home"&&!auth)rules+=' + JSON.stringify(HOME_TABS_CSS + PULL_CLIP_CSS) + ';' +
     'if(detail&&!auth)rules+=' + JSON.stringify(REPLY_CSS) + ';' +
     'if(css.textContent!==rules)css.textContent=rules;' +
-    PULL_CLIP_SCRIPT + '(p==="/home"&&!auth);if(!auth){' + PROFILE_MEDIA_SCRIPT + ';}' + REPORT_THEME_SCRIPT + '};' +
+    PULL_CLIP_SCRIPT + '(p==="/home"&&!auth);if(!auth){' + PROFILE_MEDIA_SCRIPT + ';}' + WEB_MODAL_SCRIPT + ';' + REPORT_THEME_SCRIPT + '};' +
     'var observer=new MutationObserver(function(){if(window.__otObs){observer.disconnect();return;}update();});' +
     'window.__otInitialObserver=observer;window.__otInitialUpdate=update;' +
     'observer.observe(document,{childList:true,subtree:true});update();' +
@@ -255,7 +287,7 @@ export function chromeScript(nativeNavigation: boolean, nativeHeader: boolean, u
     'if(/^\\/(?:[a-z0-9_]{1,15}|i\\/web)\\/status\\/\\d+$/i.test(p))rules+=' + JSON.stringify(REPLY_CSS) + ';' +
     'if(p==="/home")rules+=' + JSON.stringify(HOME_TABS_CSS) + ';}}' +
     'if(css.textContent!==rules)css.textContent=rules;' +
-    'if(!auth){' + PROFILE_MEDIA_SCRIPT + ';}' +
+    'if(!auth){' + PROFILE_MEDIA_SCRIPT + ';}' + WEB_MODAL_SCRIPT + ';' +
     'if(window.__otAuth!==Boolean(auth)){' +
     'window.__otAuth=Boolean(auth);' +
     'if(window.otNative)window.otNative.onUrlChange("main",String(location.href));}' +
@@ -298,8 +330,9 @@ export function chromeScript(nativeNavigation: boolean, nativeHeader: boolean, u
     'window.__otPass=function(){window.__otPend=0;try{' +
     'window.__otApplyTop&&window.__otApplyTop();' +
     '}catch(e){}};' +
-    'window.__otObserveOptions={childList:true,subtree:true,attributes:true,attributeFilter:["src","srcset","style","href"]};' +
+    'window.__otObserveOptions={childList:true,subtree:true,characterData:true,attributes:true,attributeFilter:["src","srcset","style","href","aria-selected","aria-expanded","aria-hidden","hidden"]};' +
     'window.__otObs=new MutationObserver(function(){' +
+    WEB_MODAL_SCRIPT + ';' +
     // 进入首页或替换加载占位时，裁剪先于下一帧；其余修饰仍合并到节流回调。
     'if(location.pathname.replace(/\\/$/,"").toLowerCase()==="/home"&&!document.querySelector(' +
     '\'input[autocomplete="username"],input[autocomplete="current-password"],input[autocomplete="one-time-code"]\')){' +
