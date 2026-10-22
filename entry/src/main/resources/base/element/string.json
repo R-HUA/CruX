@@ -580,7 +580,7 @@
     {"name":"settings_display","value":"Display"},
     {"name":"settings_original","value":"Load original images in viewer"},
     {"name":"settings_tabs","value":"Navigation items"},
-    {"name":"settings_tabs_limit","value":"Turn off a navigation item first"},
+    {"name":"settings_tabs_limit","value":"Maximum 5 items can be shown"},
     {"name":"settings_doh","value":"Encrypted DNS"},
     {"name":"settings_clear_cache","value":"Clear webpage cache"},
     {"name":"settings_cache_cleared","value":"Webpage cache cleared"},
@@ -601,6 +601,14 @@
     {"name":"media_repost","value":"Repost"},
     {"name":"media_unrepost","value":"Undo repost"},
     {"name":"media_quote","value":"Quote"},
-    {"name":"media_like","value":"Like"}
+    {"name":"media_like","value":"Like"},
+    {"name":"settings_bottom_bar","value":"Bottom Bar"},
+    {"name":"settings_immersive_light","value":"Immersive Light Sense"},
+    {"name":"settings_material_adaptive","value":"Adaptive"},
+    {"name":"settings_material_exquisite","value":"Exquisite"},
+    {"name":"settings_material_gentle","value":"Gentle"},
+    {"name":"settings_material_smooth","value":"Smooth"},
+    {"name":"settings_required","value":"Required"},
+    {"name":"settings_tabs_drag_hint","value":"Drag to reorder tabs, up to 5 items shown"}
   ]
 }

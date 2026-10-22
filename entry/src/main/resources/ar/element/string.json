@@ -580,7 +580,7 @@
     {"name":"settings_display","value":"العرض"},
     {"name":"settings_original","value":"تحميل الصور الأصلية في العارض"},
     {"name":"settings_tabs","value":"عناصر التنقل"},
-    {"name":"settings_tabs_limit","value":"أوقف أحد عناصر التنقل أولاً"},
+    {"name":"settings_tabs_limit","value":"يمكن إظهار ما يصل إلى 5 عناصر فقط"},
     {"name":"settings_doh","value":"تحليل أسماء النطاقات المشفر"},
     {"name":"settings_clear_cache","value":"مسح ذاكرة صفحات الويب"},
     {"name":"settings_cache_cleared","value":"تم مسح ذاكرة صفحات الويب"},
@@ -601,6 +601,14 @@
     {"name":"media_repost","value":"إعادة النشر"},
     {"name":"media_unrepost","value":"إلغاء إعادة النشر"},
     {"name":"media_quote","value":"اقتباس"},
-    {"name":"media_like","value":"إعجاب"}
+    {"name":"media_like","value":"إعجاب"},
+    {"name":"settings_bottom_bar","value":"شريط التنقل السفلي"},
+    {"name":"settings_immersive_light","value":"الإضاءة الغامرة"},
+    {"name":"settings_material_adaptive","value":"تكيفي"},
+    {"name":"settings_material_exquisite","value":"رائع"},
+    {"name":"settings_material_gentle","value":"لطيف"},
+    {"name":"settings_material_smooth","value":"سلس"},
+    {"name":"settings_required","value":"مطلوب"},
+    {"name":"settings_tabs_drag_hint","value":"اسحب لإعادة الترتيب، يظهر حتى 5 عناصر"}
   ]
 }

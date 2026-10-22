@@ -10,7 +10,7 @@ import { ComposerPanel } from './ComposerPanel';
 import { NativeBottomBar } from './NativeBottomBar';
 import { NativeTopBar } from './NativeTopBar';
 import { NativeSettingsPage } from './NativeSettingsPage';
-import { DEFAULT_TABS, appearanceScript, accountDetailsScript } from '../common/ClientSettings';
+import { DEFAULT_TABS, ALL_TAB_IDS, REQUIRED_TAB_IDS, appearanceScript, accountDetailsScript } from '../common/ClientSettings';
 import { NetworkConfig, NetworkSnapshot } from '../common/NetworkConfig';
 import { preferences } from '@kit.ArkData';
 import { isSiteUrl, isAuthUrl, mediaAcceptTypes, chooseMedia, installDownloads, removeExpiredDownloads } from '../common/WebSystem';
@@ -18,7 +18,7 @@ import { abilityAccessCtrl, common, ConfigurationConstant, PermissionRequestResu
 import { BusinessError, deviceInfo, pasteboard } from '@kit.BasicServicesKit';
 import { notificationManager } from '@kit.NotificationKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
-import { ColorMetrics, FrameCallback, LengthMetrics, window } from '@kit.ArkUI';
+import { ColorMetrics, FrameCallback, LengthMetrics, uiMaterial, window } from '@kit.ArkUI';
 import { HdsNavigation, HdsNavigationTitleMode, HdsTabs, hdsMaterial,
   HdsTabsController, HdsAnimationMode, BlurStrategy, ScrollEffectType } from '@kit.UIDesignKit';
 import { KeyCode } from '@kit.InputKit';
@@ -206,6 +206,8 @@ struct MainTabs {
   @State fontScale: number = 100;
   @State originalImages: boolean = true;
   @State enabledTabs: number[] = DEFAULT_TABS.slice();
+  @State tabOrder: number[] = ALL_TAB_IDS.slice();
+  @State materialLevel: string = 'adaptive';
   @State tabToggleGeneration: number = 0;
   @State customUa: string = '';
   @State progress: number = 0;
@@ -450,6 +452,19 @@ struct MainTabs {
         ctx.getApplicationContext().setFontSizeScale(this.fontScale / 100);
         this.originalImages = await prefs.get('original_images', true) as boolean;
         this.enabledTabs = JSON.parse(await prefs.get('enabled_tabs', JSON.stringify(DEFAULT_TABS)) as string) as number[];
+        const savedOrder = await prefs.get('tab_order', '') as string;
+        if (savedOrder !== '') {
+          try {
+            this.tabOrder = JSON.parse(savedOrder) as number[];
+          } catch {
+            this.tabOrder = ALL_TAB_IDS.slice();
+          }
+        } else {
+          const current = this.enabledTabs.slice();
+          const rest = ALL_TAB_IDS.filter(id => !current.includes(id));
+          this.tabOrder = current.concat(rest);
+        }
+        this.materialLevel = await prefs.get('material_level', 'adaptive') as string;
         this.customUa = await prefs.get('custom_ua', '') as string;
         this.webColorMode = this.themeMode === 'dark' ? ThemeColorMode.DARK : this.themeMode === 'light' ?
           ThemeColorMode.LIGHT : ThemeColorMode.SYSTEM;
@@ -678,9 +693,23 @@ struct MainTabs {
       this.leaveSettings();
       return true;
     }
-    if (this.settingsWeb && (this.currentUrl === this.settingsWebRoot || !this.controller.accessBackward())) {
+    if (this.settingsWeb) {
+      if (this.hasError || this.currentUrl === this.settingsWebRoot || !this.controller.accessBackward()) {
+        this.settingsWeb = false;
+        this.settingsOpen = true;
+        this.hasError = false;
+        return true;
+      }
+      try {
+        if (this.controller.accessBackward()) {
+          this.controller.backward();
+          return true;
+        }
+      } catch (err) {
+      }
       this.settingsWeb = false;
       this.settingsOpen = true;
+      this.hasError = false;
       return true;
     }
     try {
@@ -904,15 +933,21 @@ struct MainTabs {
     }
   }
 
+  private async closeWebDrawer(): Promise<void> {
+    if (this.incomingControllerReady) {
+      try {
+        await this.controller.runJavaScript('window.__otBootCancel&&window.__otBootCancel()');
+      } catch (error) {
+        hilog.warn(DOMAIN, TAG, 'event=account_read_cancel_failed code=%{public}d', (error as BusinessError).code);
+      }
+    }
+  }
+
   /** 切换路由或生命周期后，旧资料读取不能再驱动导航。 */
   private async cancelProfileNavigation(): Promise<void> {
     this.profileNavigation++;
     this.discovering = false;
-    if (this.incomingControllerReady) {
-      try { await this.controller.runJavaScript('window.__otBootCancel&&window.__otBootCancel()'); } catch (error) {
-        hilog.warn(DOMAIN, TAG, 'event=account_read_cancel_failed code=%{public}d', (error as BusinessError).code);
-      }
-    }
+    await this.closeWebDrawer();
   }
 
   private acceptHandle(handle: string, navigate: boolean): void {
@@ -941,19 +976,32 @@ struct MainTabs {
     if (!navigate) {
       return;
     }
-    if (this.ownHandle !== '') {
-      this.loadWeb(profileUrl(this.ownHandle));
+    if (this.ownHandle) {
+      this.loadWeb(profileUrl(this.ownHandle), false, true, true);
       return;
     }
     this.toast($r('app.string.account_unconfirmed'));
   }
 
-  /** 常规入口只触发网页路由；外部链接和故障恢复才允许建立新文档。 */
-  private async loadWeb(url: string, keepProfile: boolean = false, allowDocumentLoad: boolean = false): Promise<void> {
+  /** 常规入口只触发网页路由；外部链接和故障恢复才允许建立新文档。直接模式复用 WebView 和会话直达目标网址。 */
+  private async loadWeb(url: string, keepProfile: boolean = false, allowDocumentLoad: boolean = false, direct: boolean = false): Promise<void> {
     if (!this.webNetworkReady) { this.hasError = true; return; }
     if (!keepProfile) { this.cancelProfileNavigation(); }
     const generation = ++this.navigationGeneration;
     const pageUrl = this.currentUrl;
+    if (direct) {
+      try {
+        this.hasError = false;
+        this.progress = 0;
+        this.controller.loadUrl(url);
+        return;
+      } catch (err) {
+        this.hasError = true;
+        hilog.error(DOMAIN, TAG, 'event=direct_navigation_failed error=%{public}s', JSON.stringify(err));
+        this.toast($r('app.string.operation_failed'));
+      }
+      return;
+    }
     try {
       const deadline = Date.now() + 3000;
       while (generation === this.navigationGeneration && this.webNetworkReady) {
@@ -1064,7 +1112,6 @@ struct MainTabs {
     this.settingsWeb = false;
     this.resetChromeScroll();
     if (this.authenticationPage || !this.incomingPageReady) { this.accountError = true; }
-    else if (this.accountName === '') { this.readSettingsAccount(); }
   }
 
   private leaveSettings(): void {
@@ -1082,7 +1129,7 @@ struct MainTabs {
     this.settingsWeb = true;
     this.accountLoading = false;
     this.settingsWebRoot = TWITTER_BASE + path;
-    this.loadWeb(this.settingsWebRoot);
+    this.loadWeb(this.settingsWebRoot, false, true, true);
   }
 
   private async readSettingsAccount(): Promise<void> {
@@ -1090,25 +1137,27 @@ struct MainTabs {
     this.accountLoading = true;
     this.accountError = false;
     try {
-      await this.openOwnProfile();
-      const handle = this.ownHandle;
-      if (handle === '') { throw new Error('Account identity unavailable'); }
-      const deadline = Date.now() + PROFILE_TIMEOUT_MS;
-      while (generation === this.settingsReadGeneration && this.settingsOpen && this.avatarAlive) {
-        const raw = MainTabs.unquote(await this.controller.runJavaScript(accountDetailsScript(handle)));
+      if (this.ownHandle === '') {
+        const handle = await this.confirmCurrentAccount();
+        await this.cancelProfileNavigation();
         if (generation !== this.settingsReadGeneration || !this.settingsOpen) { return; }
-        if (raw !== '') {
-          const account = JSON.parse(raw) as AccountDetails;
-          if (account.handle.toLowerCase() !== this.ownHandle.toLowerCase() ||
-            typeof account.name !== 'string' || typeof account.bio !== 'string') {
-            throw new Error('Account details mismatch');
-          }
-          this.accountName = account.name;
-          this.accountBio = account.bio;
+        if (handle !== '') {
+          this.acceptHandle(handle, false);
+        } else {
+          this.accountError = true;
           return;
         }
-        if (Date.now() >= deadline) { throw new Error('Account details timed out'); }
-        await new Promise<void>((resolve) => { setTimeout(resolve, 150); });
+      }
+      const handle = this.ownHandle;
+      if (handle !== '' && isSiteUrl(this.currentUrl) && pathOf(this.currentUrl).toLowerCase() === '/' + handle.toLowerCase()) {
+        const raw = MainTabs.unquote(await this.controller.runJavaScript(accountDetailsScript(handle)));
+        if (generation === this.settingsReadGeneration && raw !== '') {
+          const account = JSON.parse(raw) as AccountDetails;
+          if (account.handle.toLowerCase() === this.ownHandle.toLowerCase()) {
+            if (account.name) { this.accountName = account.name; }
+            if (account.bio) { this.accountBio = account.bio; }
+          }
+        }
       }
     } catch (error) {
       if (generation === this.settingsReadGeneration) {
@@ -1157,7 +1206,7 @@ struct MainTabs {
       return;
     }
     const selected = enabled ? [...this.enabledTabs, id] : this.enabledTabs.filter((value: number) => value !== id);
-    const tabs = [0, 1, 2, 3, 5, 4].filter((value: number) => selected.includes(value));
+    const tabs = (this.tabOrder || [0, 1, 2, 3, 5, 4]).filter((value: number) => selected.includes(value));
     try {
       await this.putPreference('enabled_tabs', JSON.stringify(tabs));
       this.enabledTabs = tabs;
@@ -1166,6 +1215,42 @@ struct MainTabs {
       this.tabToggleGeneration++;
       this.toast($r('app.string.operation_failed'));
     }
+  }
+
+  private async reorderTabs(order: number[]): Promise<void> {
+    this.tabOrder = order.slice();
+    const newEnabled = this.tabOrder.filter((value: number) => this.enabledTabs.includes(value));
+    try {
+      await this.putPreference('tab_order', JSON.stringify(this.tabOrder));
+      await this.putPreference('enabled_tabs', JSON.stringify(newEnabled));
+      this.enabledTabs = newEnabled;
+    } catch (error) {
+      hilog.error(DOMAIN, TAG, 'event=tab_reorder_failed error=%{public}s', JSON.stringify(error));
+      this.toast($r('app.string.operation_failed'));
+    }
+  }
+
+  private async setMaterialLevel(level: string): Promise<void> {
+    this.materialLevel = level;
+    try {
+      await this.putPreference('material_level', level);
+    } catch (error) {
+      hilog.error(DOMAIN, TAG, 'event=material_level_save_failed error=%{public}s', JSON.stringify(error));
+      this.toast($r('app.string.operation_failed'));
+    }
+  }
+
+  private currentHdsMaterialLevel(): hdsMaterial.MaterialLevel {
+    if (this.materialLevel === 'exquisite') {
+      return hdsMaterial.MaterialLevel.EXQUISITE;
+    }
+    if (this.materialLevel === 'gentle') {
+      return hdsMaterial.MaterialLevel.GENTLE;
+    }
+    if (this.materialLevel === 'smooth') {
+      return hdsMaterial.MaterialLevel.SMOOTH;
+    }
+    return hdsMaterial.MaterialLevel.ADAPTIVE;
   }
 
   private async clearWebCache(): Promise<void> {
@@ -1182,14 +1267,14 @@ struct MainTabs {
   @Builder
   settingsContent() {
     NativeSettingsPage({ page: $settingsPage, scroller: this.settingsScroller, handle: this.ownHandle, displayName: this.accountName,
-      bio: this.accountBio, avatar: this.avatarPath, accountLoading: this.accountLoading, accountError: this.accountError,
-      themeMode: this.themeMode, fontScale: this.fontScale, floating: this.floatingBar, autoHide: this.autoHideBar,
-      originalImages: this.originalImages, enabledTabs: this.enabledTabs, customUa: this.customUa,
+      bio: this.accountBio, avatar: this.avatarPath, accountError: this.accountError,
+      themeMode: this.themeMode, materialLevel: this.materialLevel, fontScale: this.fontScale, floating: this.floatingBar, autoHide: this.autoHideBar,
+      originalImages: this.originalImages, enabledTabs: this.enabledTabs, tabOrder: this.tabOrder, customUa: this.customUa,
       desktop: this.desktopMode, desktopLocked: deviceInfo.deviceType === '2in1', rawWeb: this.rawWeb,
       topOffset: this.topInset + HEADER_HEIGHT, bottomOffset: this.bottomChromeHeight(),
       tabToggleGeneration: this.tabToggleGeneration,
       onScrollOffset: (offset: number) => { this.syncHeaderBlur(offset); },
-      onProfile: () => { if (this.ownHandle !== '') { this.openSettingsRoute('/' + this.ownHandle); } else { this.readSettingsAccount(); } },
+      onProfile: () => { this.openOwnProfile(); },
       onRetryAccount: () => { this.readSettingsAccount(); },
       onSwitchAccount: () => {
         this.settingsReadGeneration++;
@@ -1200,9 +1285,11 @@ struct MainTabs {
       },
       onRoute: (path: string) => this.openSettingsRoute(path),
       onTheme: (mode: string) => { this.saveClientSetting('theme_mode', mode); },
+      onMaterialLevel: (level: string) => { this.setMaterialLevel(level); },
       onFont: (scale: number) => { this.saveClientSetting('font_scale', scale); },
       onToggle: (key: string, value: boolean) => { this.setAppearance(key, value); },
       onTab: (id: number, value: boolean) => { this.setTabEnabled(id, value); },
+      onReorder: (order: number[]) => { this.reorderTabs(order); },
       onUa: (value: string) => {
         const ua = value.trim();
         if (/[\r\n\x00-\x1f\x7f]/.test(ua)) { this.toast($r('app.string.settings_ua_invalid')); return; }
@@ -1237,31 +1324,57 @@ struct MainTabs {
   }
 
   private async openOwnProfile(): Promise<void> {
-    this.cancelProfileNavigation();
+    await this.cancelProfileNavigation();
+    const fromSettings = this.settingsOpen;
+    if (this.ownHandle) {
+      if (fromSettings) {
+        this.settingsWeb = true;
+        this.settingsOpen = false;
+        this.settingsWebRoot = profileUrl(this.ownHandle);
+      }
+      this.loadWeb(profileUrl(this.ownHandle), false, true, true);
+      return;
+    }
     const generation = this.profileNavigation;
     this.discovering = true;
     this.hasError = false;
     try {
-      // 能从当前网页确认身份时直接进入资料，避免先绕回主页。
       let handle = MainTabs.unquote(await this.controller.runJavaScript(OWN_HANDLE_SCRIPT));
-      if (generation !== this.profileNavigation || !this.avatarAlive || this.appBackground) { return; }
+      if (generation !== this.profileNavigation || !this.avatarAlive || this.appBackground) {
+        return;
+      }
       if (!/^[A-Za-z0-9_]{1,15}$/.test(handle)) {
-        // 移动网页只在首页提供账号抽屉，缺少本人入口时沿用该身份确认流程。
         if (!this.isHomeRoot()) { await this.loadWeb(TWITTER_ROUTES[0], true); }
         const deadline = Date.now() + PROFILE_TIMEOUT_MS;
         while (!this.isHomeRoot() && Date.now() < deadline) {
-          if (generation !== this.profileNavigation || !this.avatarAlive || this.appBackground) { return; }
+          if (generation !== this.profileNavigation || !this.avatarAlive || this.appBackground) {
+            return;
+          }
           await new Promise<void>((resolve) => { setTimeout(resolve, 100); });
         }
-        if (generation !== this.profileNavigation || !this.avatarAlive || this.appBackground) { return; }
+        if (generation !== this.profileNavigation || !this.avatarAlive || this.appBackground) {
+          return;
+        }
         handle = this.isHomeRoot() ? await this.confirmCurrentAccount() : '';
       }
       if (generation !== this.profileNavigation || !this.avatarAlive || this.appBackground) { return; }
-      if (handle === '') { this.toast($r('app.string.account_unconfirmed')); return; }
+      if (handle === '') {
+        await this.closeWebDrawer();
+        this.toast($r('app.string.account_unconfirmed'));
+        return;
+      }
+      if (fromSettings) {
+        this.settingsWeb = true;
+        this.settingsOpen = false;
+        this.settingsWebRoot = profileUrl(handle);
+      }
       this.acceptHandle(handle, true);
     } catch (error) {
       hilog.warn(DOMAIN, TAG, 'event=profile_navigation_failed error=%{public}s', JSON.stringify(error));
-      if (generation === this.profileNavigation) { this.toast($r('app.string.account_unconfirmed')); }
+      if (generation === this.profileNavigation) {
+        await this.closeWebDrawer();
+        this.toast($r('app.string.account_unconfirmed'));
+      }
     } finally {
       if (generation === this.profileNavigation) { this.discovering = false; }
     }
@@ -1437,7 +1550,8 @@ struct MainTabs {
 
   private topChromeHeight(): number {
     if (this.imageViewerOpen) { return 0; }
-    if (this.settingsOpen) { return HEADER_HEIGHT; }
+    if (this.settingsOpen || this.settingsWeb) { return HEADER_HEIGHT; }
+    if (this.hasError) { return HEADER_HEIGHT; }
     return this.showsNativeNavigation() && usesNativeHeader(this.currentUrl) ? HEADER_HEIGHT : 0;
   }
 
@@ -1995,7 +2109,9 @@ struct MainTabs {
           if (this.authenticationPage) {
             this.clearNetworkBadgeCounts();
             this.ownHandle = '';
+            this.saveOwnHandle('');
             this.settingsReadGeneration++;
+            this.profileNavigation++;
             this.accountName = '';
             this.accountBio = '';
             this.accountLoading = false;
@@ -2017,6 +2133,23 @@ struct MainTabs {
     }
     this.readHomeTab();
     this.readAvatar();
+    if (this.isOwnProfile()) {
+      const handle = this.ownHandle;
+      const generation = this.settingsReadGeneration;
+      this.controller.runJavaScript(accountDetailsScript(handle)).then((raw: string) => {
+        if (!this.avatarAlive || this.ownHandle.toLowerCase() !== handle.toLowerCase() || generation !== this.settingsReadGeneration) { return; }
+        const clean = MainTabs.unquote(raw);
+        if (clean !== '') {
+          try {
+            const account = JSON.parse(clean) as AccountDetails;
+            if (account.handle.toLowerCase() === this.ownHandle.toLowerCase()) {
+              if (account.name) { this.accountName = account.name; }
+              if (account.bio) { this.accountBio = account.bio; }
+            }
+          } catch (err) {}
+        }
+      }).catch((_err: BusinessError) => {});
+    }
     try {
       this.canGoBack = this.controller.accessBackward();
     } catch (err) {
@@ -2639,20 +2772,19 @@ struct MainTabs {
 
   @Builder
   navTitleBar() {
-    if (this.imageViewerOpen) {
-      Text((this.imageIndex + 1) + ' / ' + this.imageItems.length)
-        .fontSize(13).fontFamily(FONT_FAMILY).fontWeight(FontWeight.Medium).fontColor(Color.White)
-        .width('100%').height(HEADER_HEIGHT).textAlign(TextAlign.Center).hitTestBehavior(HitTestMode.None)
-    } else if (this.settingsOpen) {
+    if (this.settingsOpen) {
       NativeTopBar({ title: this.localized(this.settingsPage === 'appearance' ? $r('app.string.settings_appearance') :
+        this.settingsPage === 'tabs' ? $r('app.string.settings_bottom_bar') :
         this.settingsPage === 'network' ? $r('app.string.settings_network') : $r('app.string.tab_settings')),
-        showBack: this.settingsPage !== '', onBack: () => { this.settingsPage = ''; } })
+        showBack: this.settingsPage !== '', onBack: () => { this.settingsPage = ''; },
+        immersiveMaterial: this.immersiveMaterial })
     } else if (this.isHomeRoot()) {
       this.homeTitleBar()
     } else {
       NativeTopBar({ title: this.headerTitle(), subtitle: this.subtitleMain(), showBack: this.showBack(),
         titleOpacity: this.viewingHandle !== '' ? this.profileTitleOpacity : 1,
         bannerButtons: this.profileBannerButtons(),
+        immersiveMaterial: this.immersiveMaterial,
         onBack: () => {
           this.onBackPress();
         }, action: () => { this.headerAction(); } })
@@ -2688,7 +2820,7 @@ struct MainTabs {
   // Back only exists where there is history to walk and the page is not one of
   // the five tab roots.
   private showBack(): boolean {
-    return isPostDetailUrl(this.currentUrl) || isSecondaryUrl(this.currentUrl) || (this.canGoBack && !this.isTabRoot());
+    return this.settingsWeb || this.viewingHandle !== '' || isPostDetailUrl(this.currentUrl) || isSecondaryUrl(this.currentUrl) || (this.canGoBack && !this.isTabRoot());
   }
 
   // A profile is a tab root too: /<handle> is what the Profile tab loads, so
@@ -2831,16 +2963,32 @@ struct MainTabs {
       this.headerIconButton($r('sys.symbol.gearshape'), $r('app.string.menu_settings'), () => {
         this.openSettings();
       })
-    } else if (this.isOwnProfile()) {
-      this.headerIconButton($r('sys.symbol.gearshape'), $r('app.string.menu_settings'), () => {
-        this.openSettings();
-      })
     }
   }
 
   private isOwnProfile(): boolean {
     return this.ownHandle !== '' &&
       this.viewingHandle.toLowerCase() === this.ownHandle.toLowerCase();
+  }
+
+  private headerButtonMaterial(): uiMaterial.Material | undefined {
+    if (!this.immersiveMaterial) {
+      return undefined;
+    }
+    try {
+      if (this.profileBannerButtons()) {
+        return new uiMaterial.ImmersiveMaterial({
+          style: uiMaterial.ImmersiveStyle.REGULAR,
+          interactive: true
+        });
+      }
+      return new uiMaterial.ImmersiveMaterial({
+        style: uiMaterial.ImmersiveStyle.ULTRA_THIN,
+        interactive: true
+      });
+    } catch (e) {
+      return undefined;
+    }
   }
 
   @Builder
@@ -2850,9 +2998,12 @@ struct MainTabs {
         .fontSize(22)
         .fontColor([this.profileBannerButtons() ? Color.White : $r('sys.color.ohos_id_color_text_primary')])
     }
-    .width(TOUCH_TARGET)
-    .height(TOUCH_TARGET)
-    .backgroundColor(this.profileBannerButtons() ? '#59000000' : Color.Transparent)
+    .width(40)
+    .height(40)
+    .responseRegion({ x: -4, y: -4, width: TOUCH_TARGET, height: TOUCH_TARGET })
+    .systemMaterial(this.headerButtonMaterial())
+    .backgroundBlurStyle(!this.immersiveMaterial && this.profileBannerButtons() ? BlurStyle.Thin : BlurStyle.NONE)
+    .backgroundColor(Color.Transparent)
     .accessibilityText(label)
     .accessibilityLevel('yes')
     .onClick(action)
@@ -2890,18 +3041,23 @@ struct MainTabs {
   @Builder
   bottomNavigation() {
     if (this.imageViewerOpen) {
-      this.imageViewerBottomBar()
-    } else if (!this.webModalOpen) {
-      if (isPostDetailUrl(this.currentUrl)) {
-        this.replyBar()
-      } else {
-        Row() {
-          this.nativeTabs()
-        }
-          .width('100%')
-          .height('100%')
-          .padding({ left: 4, right: 4 })
+      // 图片查看器在 TabContent 容器内直出支持平滑进出场的悬浮胶囊
+    } else if (this.settingsOpen) {
+      Row() {
+        this.nativeTabs()
       }
+      .width('100%')
+      .height('100%')
+      .padding({ left: 4, right: 4 })
+    } else if (isPostDetailUrl(this.currentUrl)) {
+      this.replyBar()
+    } else {
+      Row() {
+        this.nativeTabs()
+      }
+      .width('100%')
+      .height('100%')
+      .padding({ left: 4, right: 4 })
     }
   }
 
@@ -3025,6 +3181,18 @@ struct MainTabs {
         .backgroundColor($r('sys.color.ohos_id_color_emphasize'))
         .margin({ top: S8 })
         .onClick(() => this.reloadCurrent())
+      if (this.settingsWeb) {
+        Button($r('app.string.back'))
+          .type(ButtonType.Capsule)
+          .fontFamily(FONT_FAMILY)
+          .backgroundColor($r('sys.color.ohos_id_color_button_normal'))
+          .fontColor($r('sys.color.ohos_id_color_text_primary'))
+          .onClick(() => {
+            this.settingsWeb = false;
+            this.settingsOpen = true;
+            this.hasError = false;
+          })
+      }
       Button($r('app.string.network_open_settings'))
         .type(ButtonType.Capsule)
         .fontFamily(FONT_FAMILY)
@@ -3467,7 +3635,8 @@ struct MainTabs {
       originalImages: this.originalImages, chromeVisible: $imageChromeVisible, dragging: $imageDragging,
       detailsVisible: $imageDetailsVisible, currentLoadedFile: $imageCurrentFile, busy: $imageBusy,
       moreOpen: $imageMoreOpen, footerOffset: FLOATING_BAR_HEIGHT + this.bottomInset,
-      shareTrigger: this.imageShareTrigger,
+      shareTrigger: this.imageShareTrigger, immersiveMaterial: this.immersiveMaterial,
+      topInset: this.topInset,
       webImages: this.webImages, onClose: () => { this.imageViewerOpen = false; },
       onRecover: () => { this.recoverMediaWeb(false); }, onWeb: () => { this.recoverMediaWeb(true); } })
   }
@@ -3502,14 +3671,38 @@ struct MainTabs {
     } finally { this.imageBusy = false; }
   }
 
+  private imageViewerBarMaterial(): uiMaterial.Material | undefined {
+    if (!this.immersiveMaterial) {
+      return undefined;
+    }
+    try {
+      return new uiMaterial.ImmersiveMaterial({
+        style: uiMaterial.ImmersiveStyle.REGULAR,
+        interactive: true
+      });
+    } catch (e) {
+      return undefined;
+    }
+  }
+
   @Builder
   imagePostButton(symbol: Resource, label: Resource, id: string, selected: boolean, action: () => void) {
-    Button({ type: ButtonType.Normal }) {
-      SymbolGlyph(symbol).fontSize(22).fontColor([selected ? '#F91880' : Color.White])
-    }.id(id).layoutWeight(1).height(TOUCH_TARGET).backgroundColor(Color.Transparent)
-      .enabled(!this.imageBusy && (id !== 'image-share' || this.imageCurrentFile !== undefined))
-      .accessibilityText(label).accessibilitySelected(selected)
-      .onClick(() => { if (!this.dismissImageDetails()) { action(); } })
+    Row() {
+      SymbolGlyph(symbol).fontSize(22)
+        .fontColor([selected ? (id === 'image-bookmark' ? $r('sys.color.ohos_id_color_emphasize') : '#F91880') : Color.White])
+    }
+    .id(id)
+    .layoutWeight(1)
+    .height('100%')
+    .justifyContent(FlexAlign.Center)
+    .alignItems(VerticalAlign.Center)
+    .borderRadius(20)
+    .backgroundColor(Color.Transparent)
+    .enabled(!this.imageBusy && (id !== 'image-share' || this.imageCurrentFile !== undefined))
+    .accessibilityText(label)
+    .accessibilitySelected(selected)
+    .accessibilityLevel('yes')
+    .onClick(() => { if (!this.dismissImageDetails()) { action(); } })
   }
 
   @Builder
@@ -3523,16 +3716,29 @@ struct MainTabs {
 
   @Builder
   imageViewerBottomBar() {
+    Row() {
       Row() {
         if (this.imagePost.postId !== '') {
-          Button({ type: ButtonType.Normal }) {
-            SymbolGlyph($r('sys.symbol.repeat')).fontSize(22).fontColor([this.imagePost.reposted ? '#00BA7C' : Color.White])
-          }.id('image-repost').layoutWeight(1).height(TOUCH_TARGET).backgroundColor(Color.Transparent)
-            .enabled(!this.imageBusy).accessibilityText($r('app.string.media_repost'))
-            .onClick(() => { if (!this.dismissImageDetails()) { this.imageRepostMenuOpen = true; } })
-            .bindMenu(this.imageRepostMenuOpen, this.imageRepostMenu, {
-              onDisappear: () => { this.imageRepostMenuOpen = false; }
-            })
+          Row() {
+            SymbolGlyph($r('sys.symbol.repeat')).fontSize(22)
+              .fontColor([this.imagePost.reposted ? '#00BA7C' : Color.White])
+          }
+          .id('image-repost')
+          .layoutWeight(1)
+          .height('100%')
+          .justifyContent(FlexAlign.Center)
+          .alignItems(VerticalAlign.Center)
+          .borderRadius(20)
+          .backgroundColor(Color.Transparent)
+          .enabled(!this.imageBusy)
+          .accessibilityText($r('app.string.media_repost'))
+          .accessibilitySelected(this.imagePost.reposted)
+          .accessibilityLevel('yes')
+          .onClick(() => { if (!this.dismissImageDetails()) { this.imageRepostMenuOpen = true; } })
+          .bindMenu(this.imageRepostMenuOpen, this.imageRepostMenu, {
+            onDisappear: () => { this.imageRepostMenuOpen = false; }
+          })
+
           this.imagePostButton(this.imagePost.liked ? $r('sys.symbol.heart_fill') : $r('sys.symbol.heart'),
             $r('app.string.media_like'), 'image-like', this.imagePost.liked === true, () => { this.performImagePostAction('like'); })
           this.imagePostButton(this.imagePost.bookmarked ? $r('sys.symbol.bookmark_fill') : $r('sys.symbol.bookmark'),
@@ -3540,7 +3746,26 @@ struct MainTabs {
         }
         this.imagePostButton($r('sys.symbol.share'), $r('app.string.media_share'), 'image-share', false,
           () => { this.imageShareTrigger++; })
-      }.width('100%').height(FLOATING_BAR_HEIGHT).padding({ left: S8, right: S8 })
+      }
+      .width(this.imagePost.postId !== '' ? (this.isWide ? 380 : 328) : 80)
+      .constraintSize({ maxWidth: '90%' })
+      .height(FLOATING_BAR_HEIGHT)
+      .padding({ left: S8, right: S8 })
+      .borderRadius(FLOATING_BAR_HEIGHT / 2)
+      .systemMaterial(this.imageViewerBarMaterial())
+      .backgroundBlurStyle(!this.immersiveMaterial ? BlurStyle.COMPONENT_THICK : BlurStyle.NONE)
+      .backgroundColor(this.immersiveMaterial ? Color.Transparent : '#66000000')
+      .shadow({ radius: 16, color: '#24000000', offsetY: 4 })
+      .border({ width: 0.5, color: '#26FFFFFF' })
+      .hitTestBehavior(HitTestMode.Default)
+    }
+    .width('100%')
+    .justifyContent(FlexAlign.Center)
+    .position({ bottom: this.bottomInset, left: 0 })
+    .opacity(this.imageChromeVisible && !this.imageDragging ? 1 : 0)
+    .translate({ y: this.imageChromeVisible && !this.imageDragging ? 0 : 20 })
+    .animation({ duration: 200, curve: Curve.EaseInOut })
+    .hitTestBehavior(this.imageChromeVisible && !this.imageDragging ? HitTestMode.Transparent : HitTestMode.None)
   }
 
   build() {
@@ -3582,7 +3807,10 @@ struct MainTabs {
                   .width('100%').height('100%').opacity(this.settingsOpen || this.imageViewerOpen ? 0 : 1)
                   .hitTestBehavior(this.settingsOpen || this.imageViewerOpen ? HitTestMode.None : HitTestMode.Default)
                 if (this.settingsOpen) { this.settingsContent() }
-                if (this.imageViewerOpen) { this.imageViewer() }
+                if (this.imageViewerOpen) {
+                  this.imageViewer()
+                  this.imageViewerBottomBar()
+                }
               }
               .width('100%')
               .height('100%')
@@ -3595,10 +3823,9 @@ struct MainTabs {
           }
           .scrollable(false)
           .barOverlap(true)
-          .barHeight(this.imageViewerOpen ? (this.imageChromeVisible && !this.imageDragging ?
-            FLOATING_BAR_HEIGHT : 0) :
+          .barHeight(this.imageViewerOpen ? 0 :
             this.bottomChromeHeight() > 0 ? (this.floatingBar ? FLOATING_BAR_HEIGHT : BAR_HEIGHT) : 0)
-          .barFloatingStyle(this.bottomChromeHeight() > 0 && (this.imageViewerOpen || this.floatingBar) ? {
+          .barFloatingStyle(!this.imageViewerOpen && this.bottomChromeHeight() > 0 && this.floatingBar ? {
             barWidth: { smallWidth: 328, mediumWidth: 380, largeWidth: 380 },
             barSideMargin: 20,
             // 手势区已提供与图库相同的底边距离，不再叠加额外悬浮间距。
@@ -3606,7 +3833,7 @@ struct MainTabs {
             gradientMask: { maskColor: Color.Transparent, maskHeight: 1 },
             systemMaterialEffect: {
               materialType: this.immersiveMaterial ? hdsMaterial.MaterialType.IMMERSIVE : hdsMaterial.MaterialType.ADAPTIVE,
-              materialLevel: hdsMaterial.MaterialLevel.ADAPTIVE
+              materialLevel: this.currentHdsMaterialLevel()
             }
           } : undefined)
           .layoutWeight(1)
@@ -3633,14 +3860,11 @@ struct MainTabs {
       content: {
         stackBuilder: () => { this.navTitleBar(); },
         backIcon: {
-          icon: $r('sys.symbol.xmark'), label: $r('app.string.media_close'), componentId: 'image-close',
-          action: () => { if (!this.dismissImageDetails()) { this.imageViewerOpen = false; } }
+          icon: $r('sys.symbol.arrow_left'), label: $r('app.string.back'), componentId: 'navigation-back',
+          action: () => { this.onBackPress(); }
         },
         menu: {
-          value: this.imageViewerOpen ? [{ content: {
-            icon: $r('sys.symbol.more'), label: $r('app.string.media_more'), componentId: 'image-more',
-            action: () => { if (!this.dismissImageDetails()) { this.imageMoreOpen = !this.imageMoreOpen; } }
-          } }] : []
+          value: []
         }
       },
       style: {
@@ -3669,7 +3893,7 @@ struct MainTabs {
         blurStrategy: BlurStrategy.ENABLE,
         systemMaterialEffect: {
           materialType: this.immersiveMaterial ? hdsMaterial.MaterialType.IMMERSIVE : hdsMaterial.MaterialType.ADAPTIVE,
-          materialLevel: hdsMaterial.MaterialLevel.ADAPTIVE
+          materialLevel: this.currentHdsMaterialLevel()
         }
       }
     })
@@ -3678,13 +3902,13 @@ struct MainTabs {
     .systemBarStyle({ statusBarContentColor: this.imageViewerOpen || this.profileBannerButtons() || this.isMediaViewer() || this.webColorMode === ThemeColorMode.DARK ? '#FFFFFF' :
       this.webColorMode === ThemeColorMode.LIGHT ? '#000000' : this.statusBarContentColor }, undefined)
     .titleMode(HdsNavigationTitleMode.MINI)
-    .hideTitleBar(this.imageViewerOpen ? !this.imageChromeVisible || this.imageDragging : this.topChromeHeight() === 0)
+    .hideTitleBar(this.imageViewerOpen ? true : this.topChromeHeight() === 0)
     .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
     // Navigation defaults to Split mode on wide windows, which would reserve a
     // left pane for the title bar and squeeze our own rail + WebView into it.
     // The shell owns the wide layout, so keep Navigation in Stack mode.
     .mode(NavigationMode.Stack)
-    .hideBackButton(!this.imageViewerOpen)
+    .hideBackButton(true)
     .backgroundColor(this.imageViewerOpen || this.isMediaViewer() ? Color.Black : $r('sys.color.ohos_id_color_background'))
     .bindSheet($$this.sheetOpen, this.composeSheet(), {
       height: SheetSize.LARGE,

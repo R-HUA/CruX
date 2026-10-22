@@ -2,11 +2,11 @@ import { common } from '@kit.AbilityKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { pasteboard } from '@kit.BasicServicesKit';
 import { KeyCode } from '@kit.InputKit';
-import { curves, window } from '@kit.ArkUI';
+import { curves, uiMaterial, window } from '@kit.ArkUI';
 import { MediaAddress, imageForQuality } from '../common/WebMedia';
 import { MediaFile, MediaFiles } from '../common/MediaFiles';
 import { WebImageDownloads } from '../common/WebImageDownloads';
-import { S8, S12, S16, TOUCH_TARGET } from '../common/Theme';
+import { FONT_FAMILY, S8, S12, S16, TOUCH_TARGET } from '../common/Theme';
 
 /** 全窗口画布保留底层网页，只有悬浮操作栏避让系统区域。 */
 @Component
@@ -14,6 +14,7 @@ export struct NativeImageViewer {
   items: MediaAddress[] = [];
   @Link index: number;
   originalImages: boolean = true;
+  @Prop immersiveMaterial: boolean = false;
   @Link chromeVisible: boolean;
   @Link dragging: boolean;
   @Link detailsVisible: boolean;
@@ -31,7 +32,8 @@ export struct NativeImageViewer {
   @State failedIndices: number[] = [];
   @State zoomed: boolean = false;
   @State backdropOpacity: number = 1;
-  @State topInset: number = 0;
+  @Prop topInset: number = 0;
+  @State leftInset: number = 0;
   @State rightInset: number = 0;
   private viewerWindow: window.Window | undefined = undefined;
   private previousBars: window.SystemBarProperties | undefined = undefined;
@@ -99,7 +101,22 @@ export struct NativeImageViewer {
     const cutout = this.viewerWindow.getWindowAvoidArea(window.AvoidAreaType.TYPE_CUTOUT);
     const ui = this.getUIContext();
     this.topInset = ui.px2vp(Math.max(system.topRect.height, cutout.topRect.height));
+    this.leftInset = ui.px2vp(Math.max(system.leftRect.width, cutout.leftRect.width));
     this.rightInset = ui.px2vp(Math.max(system.rightRect.width, cutout.rightRect.width));
+  }
+
+  private buttonMaterial(): uiMaterial.Material | undefined {
+    if (!this.immersiveMaterial) {
+      return undefined;
+    }
+    try {
+      return new uiMaterial.ImmersiveMaterial({
+        style: uiMaterial.ImmersiveStyle.REGULAR,
+        interactive: true
+      });
+    } catch (e) {
+      return undefined;
+    }
   }
 
   private currentFile(): MediaFile | undefined {
@@ -211,8 +228,76 @@ export struct NativeImageViewer {
     }
   }
 
+  @Builder
+  topBar() {
+    Row() {
+      Button({ type: ButtonType.Circle }) {
+        SymbolGlyph($r('sys.symbol.xmark')).fontSize(22)
+          .fontColor([Color.White])
+      }
+      .id('image-close')
+      .width(40).height(40)
+      .responseRegion({ x: -4, y: -4, width: TOUCH_TARGET, height: TOUCH_TARGET })
+      .systemMaterial(this.buttonMaterial())
+      .backgroundBlurStyle(!this.immersiveMaterial ? BlurStyle.Thin : BlurStyle.NONE)
+      .backgroundColor(Color.Transparent)
+      .accessibilityText($r('app.string.media_close'))
+      .accessibilityLevel('yes')
+      .onClick(() => {
+        if (!this.dismissDetails()) { this.onClose(); }
+      })
+
+      Blank()
+
+      if (this.items.length > 1) {
+        Text((this.index + 1) + ' / ' + this.items.length)
+          .fontSize(13).fontFamily(FONT_FAMILY).fontWeight(FontWeight.Medium).fontColor(Color.White)
+          .padding({ left: S12, right: S12, top: 6, bottom: 6 })
+          .systemMaterial(this.buttonMaterial())
+          .backgroundBlurStyle(!this.immersiveMaterial ? BlurStyle.Thin : BlurStyle.NONE)
+          .backgroundColor(Color.Transparent)
+          .borderRadius(16)
+      }
+
+      Blank()
+
+      Button({ type: ButtonType.Circle }) {
+        SymbolGlyph($r('sys.symbol.more')).fontSize(22)
+          .fontColor([Color.White])
+      }
+      .id('image-more')
+      .width(40).height(40)
+      .responseRegion({ x: -4, y: -4, width: TOUCH_TARGET, height: TOUCH_TARGET })
+      .systemMaterial(this.buttonMaterial())
+      .backgroundBlurStyle(!this.immersiveMaterial ? BlurStyle.Thin : BlurStyle.NONE)
+      .backgroundColor(Color.Transparent)
+      .accessibilityText($r('app.string.media_more'))
+      .accessibilityLevel('yes')
+      .onClick(() => {
+        if (!this.dismissDetails()) { this.moreOpen = !this.moreOpen; }
+      })
+      .bindMenu(this.moreOpen, this.moreMenu, {
+        placement: Placement.BottomRight,
+        onAppear: () => { clearTimeout(this.chromeHideTimer); },
+        onDisappear: () => { this.moreOpen = false; }
+      })
+    }
+    .position({ top: 0, left: 0 })
+    .width('100%')
+    .padding({
+      top: this.topInset + S8,
+      left: this.leftInset + S12,
+      right: this.rightInset + S12,
+      bottom: S8
+    })
+    .opacity(this.chromeVisible && !this.dragging ? 1 : 0)
+    .translate({ y: this.chromeVisible && !this.dragging ? 0 : -20 })
+    .animation({ duration: 200, curve: Curve.EaseInOut })
+    .hitTestBehavior(this.chromeVisible && !this.dragging ? HitTestMode.Default : HitTestMode.None)
+  }
+
   build() {
-    Stack() {
+    Stack({ alignContent: Alignment.TopStart }) {
       Column().width('100%').height('100%').backgroundColor(Color.Black).opacity(this.backdropOpacity)
         .hitTestBehavior(HitTestMode.None)
       Swiper(this.swiper) {
@@ -247,14 +332,7 @@ export struct NativeImageViewer {
         this.loadIndex(index);
         this.loadIndex(index + 1);
       })
-      // 菜单锚点跟随宿主原生更多按钮；不再绘制第二套顶部按钮。
-      Row().width(TOUCH_TARGET).height(TOUCH_TARGET)
-        .position({ top: this.topInset + S8, right: this.rightInset + S16 })
-        .hitTestBehavior(HitTestMode.None)
-        .bindMenu(this.moreOpen, this.moreMenu, { placement: Placement.BottomRight,
-          backgroundColor: '#2B2D31', backgroundBlurStyle: BlurStyle.NONE,
-          onAppear: () => { clearTimeout(this.chromeHideTimer); },
-          onDisappear: () => { this.moreOpen = false; } })
+      this.topBar()
       if (this.detailsVisible && this.currentLoadedFile) {
         Column() {
           Blank()
@@ -278,6 +356,9 @@ export struct NativeImageViewer {
           })
           Button($r('app.string.media_view_web')).onClick(this.onWeb)
         }
+        .width('100%').height('100%')
+        .justifyContent(FlexAlign.Center)
+        .alignItems(HorizontalAlign.Center)
       }
       if (this.detailsVisible) {
         Column().width('100%').height('100%').backgroundColor(Color.Transparent)

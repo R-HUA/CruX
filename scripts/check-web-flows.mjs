@@ -709,4 +709,369 @@ vm.runInNewContext(appearance.appearanceScript('light'),themeContext);assert(the
 vm.runInNewContext(appearance.appearanceScript('system'),themeContext);themeMedia.matches=true;applySystemTheme();
 assert(themeStyle.textContent.includes('#000000'));assert(!themeStyle.textContent.includes('invert('));
 assert.equal(vm.runInNewContext(appearance.accountDetailsScript('alice'),{location:{pathname:'/bob'}}),'');
+assert.equal(vm.runInNewContext(appearance.accountDetailsScript('alice'),{location:{pathname:'/bob'}}),'');
 console.log('PASS: native settings origins, stable navigation items, persistence failure, local theme and account boundaries');
+
+// 验证指定入口直接导航、身份识别取消与抽屉清理、设置加载不导航、返回设置、旧账号结果失效、后台弹层不影响原生底栏、排序及五项上限、偏好持久化。
+const navMethods = ['closeWebDrawer', 'loadWeb', 'openSettingsRoute', 'openOwnProfile', 'cancelProfileNavigation', 'acceptHandle', 'onBackPress', 'reorderTabs', 'setMaterialLevel', 'currentHdsMaterialLevel'].map(name =>
+  mainSource.match(new RegExp('^  (?:private )?(?:async )?' + name + '\\([\\s\\S]*?^  \\}', 'm'))[0]).join('\n');
+const NavTestPage = vm.runInNewContext(stripTypeScriptTypes('class NavTestPage {\n' + navMethods + '\n};NavTestPage'), {
+  TWITTER_ROUTES: ['https://x.com/home'],
+  TWITTER_BASE: 'https://x.com',
+  PROFILE_TIMEOUT_MS: 10000,
+  hdsMaterial: { MaterialLevel: { ADAPTIVE: 0, EXQUISITE: 1, GENTLE: 2, SMOOTH: 3 } },
+  clickRouteScript: scripts.clickRouteScript,
+  OWN_HANDLE_SCRIPT: scripts.OWN_HANDLE_SCRIPT,
+  profileBootstrapScript: scripts.profileBootstrapScript,
+  profileUrl: handle => 'https://x.com/' + handle,
+  MainTabs: { unquote: val => typeof val === 'string' && val.startsWith('"') ? JSON.parse(val) : val },
+  hilog: { error() {}, warn() {}, info() {} },
+  DOMAIN: 0, TAG: 'test',
+  $r: v => v
+});
+
+// 1. 指定入口直接导航 (Direct navigation on specified entries)
+{
+  const nav = new NavTestPage();
+  const directUrls = [], scriptRuns = [];
+  Object.assign(nav, {
+    webNetworkReady: true,
+    navigationGeneration: 0,
+    profileNavigation: 0,
+    settingsOpen: true,
+    settingsWeb: false,
+    settingsWebUrl: '',
+    settingsWebRoot: '',
+    currentUrl: 'https://x.com/home',
+    cancelProfileNavigation() {},
+    controller: {
+      loadUrl: url => directUrls.push(url),
+      runJavaScript: async s => { scriptRuns.push(s); return 'clicked'; }
+    },
+    toast() {}
+  });
+
+  // 书签与平台设置直接导航
+  nav.openSettingsRoute('/i/bookmarks');
+  assert.equal(nav.settingsWeb, true);
+  assert.equal(nav.settingsOpen, false);
+  assert.equal(nav.settingsWebRoot, 'https://x.com/i/bookmarks');
+  assert.deepEqual(directUrls, ['https://x.com/i/bookmarks']);
+  assert.equal(scriptRuns.length, 0, '直接导航不执行网页链接脚本');
+
+  // 平台设置直接导航
+  directUrls.length = 0;
+  nav.openSettingsRoute('/settings/your_twitter_data');
+  assert.equal(nav.settingsWeb, true);
+  assert.equal(nav.settingsOpen, false);
+  assert.equal(nav.settingsWebRoot, 'https://x.com/settings/your_twitter_data');
+  assert.deepEqual(directUrls, ['https://x.com/settings/your_twitter_data']);
+
+  // 本人主页在账号已知时直接导航
+  directUrls.length = 0;
+  nav.ownHandle = 'alice';
+  nav.settingsOpen = true;
+  await nav.openOwnProfile();
+  assert.equal(nav.settingsWeb, true);
+  assert.equal(nav.settingsWebRoot, 'https://x.com/alice');
+  assert.deepEqual(directUrls, ['https://x.com/alice']);
+}
+
+// 2. 身份识别取消与抽屉清理 (Identity confirmation cancellation & failure drawer cleanup)
+{
+  // 网页端 profileBootstrapScript 的 stop() 行为
+  let dialogOpen = false;
+  let closeClicked = false;
+  const mockBtn = { click: () => { dialogOpen = true; } };
+  const mockDialog = {
+    querySelector: sel => sel === '[data-testid=app-bar-close]' ? { click: () => { closeClicked = true; dialogOpen = false; } } : null
+  };
+  let obsDisconnected = false;
+  const cancelDoc = {
+    querySelector: sel => sel === '[role=dialog]' ? (dialogOpen ? mockDialog : null) : mockBtn,
+    querySelectorAll: () => []
+  };
+  const cancelContext = {
+    window: {},
+    document: cancelDoc,
+    setTimeout: () => 123,
+    clearTimeout: () => {},
+    MutationObserver: class {
+      observe() {}
+      disconnect() { obsDisconnected = true; }
+    }
+  };
+  vm.runInNewContext(scripts.profileBootstrapScript(false), cancelContext);
+  assert.equal(dialogOpen, true, '启动脚本点击头像按钮打开抽屉');
+  assert.ok(typeof cancelContext.window.__otBootCancel === 'function');
+  cancelContext.window.__otBootCancel();
+  assert.equal(obsDisconnected, true, '取消时必须断开 MutationObserver');
+  assert.equal(closeClicked, true, '取消时必须关闭抽屉');
+
+  // 原生 cancelProfileNavigation 递增世代、重置 discovering 并调用 __otBootCancel
+  const nav = new NavTestPage();
+  let cancelScriptRun = '';
+  Object.assign(nav, {
+    profileNavigation: 5,
+    discovering: true,
+    incomingControllerReady: true,
+    controller: {
+      runJavaScript: async s => { cancelScriptRun = s; }
+    }
+  });
+  await nav.cancelProfileNavigation();
+  assert.equal(nav.profileNavigation, 6);
+  assert.equal(nav.discovering, false);
+  assert.match(cancelScriptRun, /__otBootCancel/);
+
+  // 连续多次调用 openOwnProfile 时，旧请求返回不得取消新请求
+  {
+    const raceNav = new NavTestPage();
+    let resolveFirst;
+    const firstPromise = new Promise(r => { resolveFirst = r; });
+    const directLoads = [];
+    Object.assign(raceNav, {
+      profileNavigation: 0,
+      discovering: false,
+      avatarAlive: true,
+      appBackground: false,
+      ownHandle: '',
+      incomingControllerReady: true,
+      isHomeRoot: () => true,
+      loadWeb: (url) => { directLoads.push(url); },
+      acceptHandle: (h) => { raceNav.ownHandle = h; directLoads.push('https://x.com/' + h); },
+      toast: () => {},
+      controller: {
+        runJavaScript: async (s) => {
+          if (s.includes('__otBootCancel')) return '';
+          if (raceNav.profileNavigation === 1) {
+            await firstPromise;
+            return '"alice"';
+          }
+          return '"bob"';
+        }
+      }
+    });
+
+    const p1 = raceNav.openOwnProfile();
+    // 等待一个微任务周期，让 p1 完成初始清理并进入资料脚本读取中
+    await new Promise(r => setTimeout(r, 0));
+    const p2 = raceNav.openOwnProfile();
+    await p2;
+    assert.equal(raceNav.ownHandle, 'bob');
+    assert.deepEqual(directLoads, ['https://x.com/bob']);
+
+    resolveFirst();
+    await p1;
+    assert.equal(raceNav.ownHandle, 'bob', '旧请求不得覆盖新请求账号');
+    assert.equal(raceNav.profileNavigation, 2, '旧请求结束不得递增世代');
+    assert.deepEqual(directLoads, ['https://x.com/bob'], '旧请求不得额外触发导航');
+  }
+
+  // 识别发生异常时，代际匹配必须提示未确认并清理抽屉
+  {
+    const errNav = new NavTestPage();
+    let toastMsg = '';
+    let drawerClosed = false;
+    Object.assign(errNav, {
+      profileNavigation: 0,
+      discovering: false,
+      avatarAlive: true,
+      appBackground: false,
+      ownHandle: '',
+      incomingControllerReady: true,
+      toast: (msg) => { toastMsg = msg; },
+      controller: {
+        runJavaScript: async (s) => {
+          if (s.includes('__otBootCancel')) {
+            drawerClosed = true;
+            return '';
+          }
+          throw new Error('network failure');
+        }
+      }
+    });
+
+    await errNav.openOwnProfile();
+    assert.equal(toastMsg, 'app.string.account_unconfirmed', '识别异常必须提示 account_unconfirmed');
+    assert.equal(drawerClosed, true, '识别异常必须清理网页抽屉');
+    assert.equal(errNav.discovering, false, '识别异常后 discovering 必须恢复 false');
+  }
+}
+
+// 3. 设置加载不导航 (Settings opening does not navigate background webview)
+{
+  const navClient = new ClientPage();
+  let navUrl = '';
+  Object.assign(navClient, {
+    currentIndex: 0,
+    currentUrl: 'https://x.com/home',
+    settingsOpen: false,
+    resetChromeScroll() {},
+    resetProfileLayout() {},
+    loadWeb: url => { navUrl = url; }
+  });
+  navClient.openSettings();
+  assert.equal(navClient.settingsOpen, true);
+  assert.equal(navClient.currentIndex, 4);
+  assert.equal(navUrl, '', '打开原生设置不得导航背景网页');
+}
+
+// 4. 返回设置 (Back button from web project returns to native settings)
+{
+  const nav = new NavTestPage();
+  let backwardCalled = false;
+  Object.assign(nav, {
+    settingsWeb: true,
+    settingsOpen: false,
+    settingsWebRoot: 'https://x.com/settings/your_twitter_data',
+    currentUrl: 'https://x.com/settings/your_twitter_data',
+    hasError: false,
+    cancelProfileNavigation() {},
+    controller: {
+      accessBackward: () => true,
+      backward: () => { backwardCalled = true; }
+    }
+  });
+
+  // 在 settingsWebRoot 处点击返回，应回到原生设置
+  const handledRoot = nav.onBackPress();
+  assert.equal(handledRoot, true);
+  assert.equal(nav.settingsWeb, false);
+  assert.equal(nav.settingsOpen, true);
+  assert.equal(backwardCalled, false);
+
+  // 网页加载失败时返回，也应回到原生设置
+  nav.settingsWeb = true;
+  nav.settingsOpen = false;
+  nav.hasError = true;
+  nav.currentUrl = 'https://x.com/settings/other';
+  const handledError = nav.onBackPress();
+  assert.equal(handledError, true);
+  assert.equal(nav.settingsWeb, false);
+  assert.equal(nav.settingsOpen, true);
+  assert.equal(nav.hasError, false);
+
+  // 深层网页有历史记录时，返回后退历史
+  nav.settingsWeb = true;
+  nav.settingsOpen = false;
+  nav.hasError = false;
+  nav.currentUrl = 'https://x.com/settings/subpage';
+  const handledBack = nav.onBackPress();
+  assert.equal(handledBack, true);
+  assert.equal(backwardCalled, true);
+  assert.equal(nav.settingsWeb, true);
+}
+
+// 5. 旧账号结果失效 (Stale account details invalidated when handle changes)
+{
+  const nav = new NavTestPage();
+  let avatarReset = false;
+  Object.assign(nav, {
+    ownHandle: 'alice',
+    accountName: 'Alice Old',
+    accountBio: 'Old Bio',
+    unreadNotifications: 5,
+    unreadMessages: 2,
+    badgeShown: 7,
+    cancelProfileNavigation() {},
+    resetAvatar() { avatarReset = true; },
+    clearNetworkBadgeCounts() {},
+    saveOwnHandle() {},
+    restoreAvatar() {},
+    readAvatar() {},
+    finishDiscover() {}
+  });
+
+  // 账号改变时，清空资料、头像、未读计数
+  nav.acceptHandle('bob', false);
+  assert.equal(nav.ownHandle, 'bob');
+  assert.equal(nav.accountName, '');
+  assert.equal(nav.accountBio, '');
+  assert.equal(nav.unreadNotifications, 0);
+  assert.equal(nav.unreadMessages, 0);
+  assert.equal(nav.badgeShown, -1);
+  assert.equal(avatarReset, true);
+}
+
+// 6. 后台弹层不影响原生底栏 (Background web modal does not affect bottom bar when settingsOpen is true)
+{
+  const bgModalPage = new ModalPage();
+  Object.assign(bgModalPage, {
+    webModalOpen: false,
+    settingsOpen: true,
+    showsNativeNavigation: () => true,
+    isWide: false,
+    floatingBar: true,
+    bottomInset: 24,
+    syncChromeInsets() {},
+    flushNetworkReload() {}
+  });
+  // 原生设置打开时，即使后台网页触发弹层，底栏高度保持不变
+  assert.equal(bgModalPage.bottomChromeHeight(), 82);
+  bgModalPage.updateWebModal(true);
+  assert.equal(bgModalPage.bottomChromeHeight(), 82, '原生设置显示时后台弹层不得清空底栏高度');
+  bgModalPage.settingsOpen = false;
+  assert.equal(bgModalPage.bottomChromeHeight(), 0, '退出设置后正常响应网页弹层隐藏');
+}
+
+// 7. 排序及五项上限 (Reordering tabs and 5-item limit enforcement)
+{
+  const nav = new NavTestPage();
+  const prefsSaved = [];
+  let noticeTriggered = 0;
+  Object.assign(nav, {
+    tabOrder: [0, 1, 2, 3, 5, 4],
+    enabledTabs: [0, 1, 2, 3, 4],
+    putPreference: async (k, v) => { prefsSaved.push([k, v]); },
+    toast: () => { noticeTriggered++; }
+  });
+
+  // 拖动排序
+  await nav.reorderTabs([0, 3, 1, 2, 5, 4]);
+  assert.deepEqual(nav.tabOrder, [0, 3, 1, 2, 5, 4]);
+  assert.deepEqual(nav.enabledTabs, [0, 3, 1, 2, 4], '启用项顺序跟随新排列');
+  assert.equal(prefsSaved.some(p => p[0] === 'tab_order'), true);
+
+  // 必选项 (0, 1, 4) 不得被禁用
+  await client.setTabEnabled(0, false);
+  await client.setTabEnabled(1, false);
+  await client.setTabEnabled(4, false);
+  assert.ok(client.enabledTabs.includes(0));
+  assert.ok(client.enabledTabs.includes(1));
+  assert.ok(client.enabledTabs.includes(4));
+
+  // 启用第 6 项受限
+  client.enabledTabs = [0, 1, 2, 3, 4];
+  const noticesBefore = notices;
+  await client.setTabEnabled(5, true);
+  assert.equal(notices, noticesBefore + 1, '达到 5 项上限时提示不能启用更多');
+  assert.deepEqual(client.enabledTabs, [0, 1, 2, 3, 4]);
+}
+
+// 8. 偏好持久化 (Preference persistence: material_level, tab_order, enabled_tabs)
+{
+  const nav = new NavTestPage();
+  const prefsMap = new Map();
+  Object.assign(nav, {
+    materialLevel: 'adaptive',
+    putPreference: async (k, v) => { prefsMap.set(k, v); },
+    toast() {}
+  });
+
+  await nav.setMaterialLevel('exquisite');
+  assert.equal(nav.materialLevel, 'exquisite');
+  assert.equal(prefsMap.get('material_level'), 'exquisite');
+  assert.equal(nav.currentHdsMaterialLevel(), 1); // EXQUISITE
+
+  await nav.setMaterialLevel('gentle');
+  assert.equal(nav.currentHdsMaterialLevel(), 2); // GENTLE
+
+  await nav.setMaterialLevel('smooth');
+  assert.equal(nav.currentHdsMaterialLevel(), 3); // SMOOTH
+
+  await nav.setMaterialLevel('adaptive');
+  assert.equal(nav.currentHdsMaterialLevel(), 0); // ADAPTIVE
+}
+
+console.log('PASS: direct navigation, cancellation drawer cleanup, settings independence, back-to-settings, stale account invalidation, background modal isolation, reorder/5-limit, and preference persistence');

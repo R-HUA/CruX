@@ -25,7 +25,7 @@ function page() {
   const p = new Page();
   Object.assign(p, { draft: '保留完整文本\nsecond line', composeOwner: 'alice', posting: false, postUncertain: false,
     webNetworkReady: true, navigationGeneration: 0, profileNavigation: 0, avatarAlive: true,
-    appBackground: false, cancelProfileNavigation() {},
+    appBackground: false, cancelProfileNavigation() {}, closeWebDrawer() {},
     composeHandoff: false, composeRevision: 0, draftSaveTimer: -1, draftWrite: Promise.resolve(), sheetOpen: false,
     getUIContext: () => ({ getHostContext: () => ({}), showAlertDialog() {} }),
     clearComposeSync() { this.composeRevision++; }, scheduleComposeSync() {}, acceptHandle() {},
@@ -103,7 +103,7 @@ assert.match(viewer, /needsRecovery\(\)/);
 console.log('PASS: editor fallback, durable handoff, restart barrier, explicit recovery and local-only image display');
 
 // Real startup reaches its final mount state even when optional material/window APIs fail.
-const extraMethods = ['aboutToAppear', 'openOwnProfile', 'cancelProfileNavigation', 'isHomeRoot', 'syncLauncherBadge', 'recoverMediaWeb'];
+const extraMethods = ['aboutToAppear', 'closeWebDrawer', 'openOwnProfile', 'cancelProfileNavigation', 'isHomeRoot', 'syncLauncherBadge', 'recoverMediaWeb'];
 const extra = Object.fromEntries(extraMethods.map(name => {
   const code = method(name).replace(/^  (?:private )?/, '');
   return [name, code];
@@ -120,6 +120,7 @@ Object.assign(runtime, { PROFILE_TIMEOUT_MS: 10000, BADGE_RETRY_LIMIT: 3,
   removeExpiredDownloads: async () => {}, NetworkConfig: { getInstance: () => net },
   notificationManager: { async setBadgeNumber(total) { badgeCalls.push(total); if (badgeGate) { await badgeGate; } if (badgeError) { throw badgeError; } } },
   setTimeout: callback => { waits.push(callback); return waits.length; },
+  profileUrl: handle => 'https://x.com/' + handle,
   isSiteUrl: () => true });
 const ExtraPage = vm.runInNewContext(stripTypeScriptTypes('class ExtraPage {\n' + Object.values(extra).join('\n') + '\n};ExtraPage'), runtime);
 const tick = async () => { for (let i = 0; i < 30; i++) { await Promise.resolve(); } };
@@ -158,7 +159,9 @@ for (const transition of ['blocked', 'rebuilt']) {
   const p = page(), accepted = [];
   Object.assign(p, { currentPath: '/search', incomingControllerReady: false,
     controller:{runJavaScript:async()=> 'Alice'},
-    isHomeRoot: ExtraPage.prototype.isHomeRoot, cancelProfileNavigation: ExtraPage.prototype.cancelProfileNavigation,
+    isHomeRoot: ExtraPage.prototype.isHomeRoot,
+    cancelProfileNavigation: ExtraPage.prototype.cancelProfileNavigation,
+    closeWebDrawer: ExtraPage.prototype.closeWebDrawer,
     loadWeb: async () => {throw Error('不得绕回主页');}, acceptHandle: (...args) => accepted.push(args) });
   await ExtraPage.prototype.openOwnProfile.call(p);
   assert.deepEqual(accepted, [['Alice', true]]);
@@ -175,6 +178,7 @@ for (const transition of ['blocked', 'rebuilt']) {
   Object.assign(p,{currentPath:'/search',incomingControllerReady:false,
     controller:{runJavaScript:async()=> ''},isHomeRoot:ExtraPage.prototype.isHomeRoot,
     cancelProfileNavigation:ExtraPage.prototype.cancelProfileNavigation,
+    closeWebDrawer:ExtraPage.prototype.closeWebDrawer,
     loadWeb:async(url,keepProfile)=>{assert.equal(url,'https://x.com/home');assert.equal(keepProfile,true);},
     acceptHandle:(...args)=>accepted.push(args)});
   const navigating=ExtraPage.prototype.openOwnProfile.call(p);await tick();

@@ -21,6 +21,16 @@ export struct NativeBottomBar {
     return $r('sys.symbol.gearshape');
   }
 
+  private label(index: number): Resource {
+    if (this.labels && this.labels[index]) { return this.labels[index]; }
+    if (index === 0) { return $r('app.string.tab_home'); }
+    if (index === 1) { return $r('app.string.tab_explore'); }
+    if (index === 2) { return $r('app.string.tab_notifications'); }
+    if (index === 3) { return $r('app.string.tab_messages'); }
+    if (index === 5) { return $r('app.string.tab_grok'); }
+    return $r('app.string.tab_settings');
+  }
+
   private badge(index: number): number {
     if (index === this.currentIndex) { return 0; }
     return index === 2 ? this.notifications : index === 3 ? this.messages : 0;
@@ -34,7 +44,7 @@ export struct NativeBottomBar {
           .fontColor([this.currentIndex === index ? $r('sys.color.ohos_id_color_emphasize') :
             $r('sys.color.ohos_id_color_text_secondary')])
       }
-      Text(this.labels[index]).fontSize(11).fontFamily(FONT_FAMILY).maxLines(1)
+      Text(this.label(index)).fontSize(11).fontFamily(FONT_FAMILY).maxLines(1)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
         .fontWeight(this.currentIndex === index ? FontWeight.Medium : FontWeight.Regular)
         .fontColor(this.currentIndex === index ? $r('sys.color.ohos_id_color_emphasize') :
@@ -45,8 +55,8 @@ export struct NativeBottomBar {
     .borderRadius(24).backgroundColor(Color.Transparent)
     .scale({ x: this.pressedIndex === index ? 0.92 : 1, y: this.pressedIndex === index ? 0.92 : 1 })
     .animation({ duration: 150, curve: Curve.FastOutSlowIn }).layoutWeight(this.wide ? 0 : 1)
-    .hoverEffect(HoverEffect.Highlight).accessibilityText(this.labels[index])
-    .accessibilityDescription(this.labels[index]).accessibilitySelected(this.currentIndex === index)
+    .hoverEffect(HoverEffect.Highlight).accessibilityText(this.label(index))
+    .accessibilityDescription(this.label(index)).accessibilitySelected(this.currentIndex === index)
     .accessibilityLevel('yes')
     .onTouch((event: TouchEvent) => {
       if (event.type === TouchType.Down) { this.pressedIndex = index; }

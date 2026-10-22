@@ -580,7 +580,7 @@
     {"name":"settings_display","value":"显示"},
     {"name":"settings_original","value":"查看图片时默认加载原图"},
     {"name":"settings_tabs","value":"底栏功能"},
-    {"name":"settings_tabs_limit","value":"请先关闭通知或私信中的一项"},
+    {"name":"settings_tabs_limit","value":"最多显示五项"},
     {"name":"settings_doh","value":"加密域名解析"},
     {"name":"settings_clear_cache","value":"清理网页缓存"},
     {"name":"settings_cache_cleared","value":"网页缓存已清理"},
@@ -601,6 +601,14 @@
     {"name":"media_repost","value":"转发"},
     {"name":"media_unrepost","value":"取消转发"},
     {"name":"media_quote","value":"引用"},
-    {"name":"media_like","value":"喜欢"}
+    {"name":"media_like","value":"喜欢"},
+    {"name":"settings_bottom_bar","value":"底栏设置"},
+    {"name":"settings_immersive_light","value":"沉浸光感"},
+    {"name":"settings_material_adaptive","value":"自适应"},
+    {"name":"settings_material_exquisite","value":"精致"},
+    {"name":"settings_material_gentle","value":"柔和"},
+    {"name":"settings_material_smooth","value":"平滑"},
+    {"name":"settings_required","value":"必选"},
+    {"name":"settings_tabs_drag_hint","value":"拖动调整底栏项目顺序，最多显示 5 项"}
   ]
 }

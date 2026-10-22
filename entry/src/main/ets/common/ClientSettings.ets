@@ -1,5 +1,8 @@
 /** 底栏使用稳定标识，开关只改变呈现顺序，不改变路由含义。 */
 export const DEFAULT_TABS: number[] = [0, 1, 2, 3, 4];
+export const ALL_TAB_IDS: number[] = [0, 1, 2, 3, 5, 4];
+export const REQUIRED_TAB_IDS: number[] = [0, 1, 4];
+export const MATERIAL_LEVELS: string[] = ['adaptive', 'exquisite', 'gentle', 'smooth'];
 
 export const PLATFORM_SETTINGS: string[] = [
   '/settings/account', '/settings/security_and_account_access', '/settings/privacy_and_safety',
