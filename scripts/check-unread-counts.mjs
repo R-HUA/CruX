@@ -115,54 +115,154 @@ for (const [name, bySelector, title, expected] of cases) {
   console.log(`${ok ? 'ok  ' : 'FAIL'} ${name}: got ${JSON.stringify(actual)}, want ${JSON.stringify(expected)}`);
 }
 
-// 使用只读实测的响应结构验证主路径，不在测试中发起网络请求。
+// 未读结构沿用本地已有证据；账号与发布回执使用协议夹具，不代表真实账号验收。
 const source = readFileSync(chrome, 'utf8');
-const responseScript = eval(source.match(/export const UNREAD_RESPONSE_SCRIPT: string = (`[\s\S]*?`);/)[1]);
-let sent = 0, warnings = 0;
-class Request {
-  listeners = [];
-  status = 200;
-  responseType = '';
-  responseURL = 'https://x.com/i/api/graphql/current/ViewerBadgeCounts';
-  addEventListener(name, callback, options) {
-    assert.equal(name, 'load'); assert.equal(options.once, true);
-    this.listeners.push(callback);
+const responseSource = readFileSync(join(here, '..', 'entry', 'src', 'main', 'ets', 'common', 'WebResponses.ets'), 'utf8');
+const responseScript = eval(responseSource.match(/export const WEB_RESPONSE_SCRIPT: string = (`[\s\S]*?`);/)[1]);
+const ownHandleScript = eval(source.match(/export const OWN_HANDLE_SCRIPT: string = (`[\s\S]*?`);/)[1]);
+const clickPostButtonScript = vm.runInNewContext(stripTypeScriptTypes(source
+  .match(/export function clickPostButtonScript[\s\S]*?^}\r?$/m)[0].replace('export ', '')) + ';clickPostButtonScript');
+function browser(cookie = 'twid=u%3D42') {
+  const stats = {sent:0,warnings:[],fetches:[],pageReads:0,clones:0};
+  class Request {
+    listeners = [];
+    status = 200;
+    responseType = '';
+    open(method, url) { this.responseURL = new URL(url, 'https://x.com').href; return 'opened'; }
+    addEventListener(name, callback, options) {
+      assert.equal(name, 'loadend'); assert.equal(options.once, true);
+      this.listeners.push(callback);
+    }
+    send() { stats.sent++; return 'original-result'; }
+    complete(data) {
+      if (this.responseType === 'json') this.response = data;
+      else this.responseText = typeof data === 'string' ? data : JSON.stringify(data);
+      for (const callback of this.listeners.splice(0)) callback.call(this);
+    }
   }
-  send() { sent++; return 'original-result'; }
-  complete() { for (const callback of this.listeners.splice(0)) callback.call(this); }
+  const document = {cookie,querySelectorAll:()=>[]};
+  const window = {fetch(...args) { return new Promise((resolve,reject)=>stats.fetches.push({args,resolve,reject})); }};
+  window.top = window;
+  const context = vm.createContext({window,document,XMLHttpRequest:Request,URL,Date,
+    location:{href:'https://x.com/home'},console:{warn:message=>stats.warnings.push(message)}});
+  vm.runInContext(responseScript, context);
+  vm.runInContext(responseScript, context);
+  function xhr(op = 'ViewerBadgeCounts', method = op === 'CreateTweet' ? 'POST' : 'GET') {
+    const request = new Request();
+    assert.equal(request.open(method, '/i/api/graphql/current/' + op), 'opened');
+    assert.equal(request.send(), 'original-result');
+    return request;
+  }
+  function reply(index, data, options = {}) {
+    const response = {ok:true,url:'https://x.com/i/api/graphql/current/ViewerBadgeCounts',
+      json(){stats.pageReads++;return Promise.resolve(data);},
+      clone(){stats.clones++;return {json:()=>options.body||Promise.resolve(data)};},...options};
+    stats.fetches[index].resolve(response);
+    return response;
+  }
+  return {stats,document,window,context,xhr,reply,Request};
 }
-const window = {}; window.top = window;
-const runtime = { window, XMLHttpRequest: Request, URL, Date, console: {warn(){warnings++;}} };
-vm.runInNewContext(responseScript, runtime);
-vm.runInNewContext(responseScript, runtime);
+const settleResponses = async () => { for(let i=0;i<8;i++)await Promise.resolve(); };
+const b = browser(), window = b.window;
 const response = (n, m) => ({data:{viewer_v2:{user_results:{result:{__typename:'User',badge_counts:{
   ntab_unread_count:n,xchat_unread_count:m,dm_unread_count:99,total_unread_count:105,is_from_urt:true
 }}}}}});
-let request = new Request(); request.responseText = JSON.stringify(response(4, 2));
-assert.equal(request.send(), 'original-result'); request.complete();
-assert.equal(sent, 1); assert.equal(run(script, {}, '', window), '4/2');
-assert.equal(warnings, 0);
+let request = b.xhr(); request.complete(response(4, 2));
+assert.equal(b.stats.sent, 1); assert.equal(run(script, {}, '', window), '4/2');
+assert.equal(b.stats.warnings.length, 0);
 // 返回零必须覆盖旧值，旧账号的在途结果不得回写。
-request = new Request(); request.responseType = 'json'; request.response = response(0, 0);
-request.send(); request.complete(); assert.equal(run(script, {}, '', window), '0/0');
-request = new Request(); request.responseText = JSON.stringify(response(9, 9)); request.send();
-window.__otBadgeEpoch++; window.__otBadgeCounts = null; request.complete();
+request = b.xhr(); request.responseType = 'json'; request.complete(response(0, 0));
+assert.equal(run(script, {}, '', window), '0/0');
+request = b.xhr(); window.__otBadgeEpoch++; window.__otBadgeCounts = null; request.complete(response(9, 9));
 assert.equal(run(script, {}, '', window), '-1/-1');
 for (const [url, status] of [['https://other.example/i/api/graphql/current/ViewerBadgeCounts',200],
   ['https://x.com/i/api/graphql/current/OtherOperation',200],
   ['https://x.com/i/api/graphql/current/ViewerBadgeCounts',500]]) {
-  request = new Request(); request.responseURL = url; request.status = status;
-  request.responseText = JSON.stringify(response(8, 8)); request.send(); request.complete();
+  request = new b.Request(); request.open('GET',url);request.status = status;
+  request.send(); request.complete(response(8, 8));
   assert.equal(window.__otBadgeCounts, null);
 }
 for (const body of ['invalid', JSON.stringify(response(-1, 1)), JSON.stringify(response(1, '2'))]) {
-  request = new Request(); request.responseText = body; request.send(); request.complete();
+  request = b.xhr(); request.complete(body);
   assert.equal(window.__otBadgeCounts, null);
 }
-assert.equal(warnings, 3);
+assert.equal(b.stats.warnings.length, 3);
 window.__otBadgeCounts = {notifications:5,messages:2,time:Date.now()-60001};
 assert.equal(run(script, {[NOTIFICATIONS]:[element({text:'',attrs:{'aria-label':'Notifications (3 unread)'}})]}, '', window), '3/-1');
-console.log('Passive XHR counts, account changes, response boundaries and stale response fallback passed.');
+const newer = b.xhr(); request = b.xhr(); request.complete(response(2,1));newer.complete(response(9,9));
+assert.equal(run(script, {}, '', window),'2/1','旧请求后返回也不能覆盖新计数');
+// XHR 复用时，已取消请求的监听不能把新响应当成旧请求结果。
+request = b.xhr(); request.open('GET','/unrelated');request.send();request.complete(response(8,8));
+assert.equal(run(script, {}, '', window),'2/1');
+
+const olderFetch = window.fetch('/i/api/graphql/current/ViewerBadgeCounts');
+const newerFetch = window.fetch({url:'https://x.com/i/api/graphql/current/ViewerBadgeCounts',method:'GET'});
+const freshResponse = b.reply(1,response(6,3));assert.equal(await newerFetch,freshResponse);
+await settleResponses();b.reply(0,response(8,8));await olderFetch;await settleResponses();
+assert.equal(run(script, {}, '', window),'6/3');
+assert.equal(b.stats.pageReads,0,'旁路解析不能消费页面响应正文');
+assert.deepEqual(await freshResponse.json(),response(6,3));assert.equal(b.stats.pageReads,1);
+const failure = Error('offline'), failedFetch = window.fetch('/unrelated');
+b.stats.fetches[2].reject(failure);await assert.rejects(failedFetch,error=>error===failure);
+const malformed = window.fetch('/i/api/graphql/current/ViewerBadgeCounts');
+const malformedResponse = b.reply(3,null,{body:Promise.reject(Error('invalid JSON'))});
+assert.equal(await malformed,malformedResponse);await settleResponses();
+assert.equal(run(script, {}, '', window),'6/3');assert.equal(b.stats.warnings.length,4);
+const badClone = window.fetch('/i/api/graphql/current/ViewerBadgeCounts');
+const unclonable = b.reply(4,null,{clone(){throw Error('used body');}});
+assert.equal(await badClone,unclonable);assert.equal(b.stats.warnings.length,5);
+
+const user = (id,handle) => ({__typename:'User',rest_id:id,core:{screen_name:handle}});
+const timeline = (...users) => ({data:{home:{home_timeline_urt:{instructions:users.map(author=>({
+  entries:[{content:{itemContent:{tweet_results:{result:{core:{user_results:{result:author}}}}}}}]
+}))}}}});
+request = b.xhr('HomeTimeline');request.complete(timeline(user('7','other'),user('42','Alice')));
+assert.equal(vm.runInContext(ownHandleScript,b.context),'Alice','只使用与 twid 对应的用户对象');
+const oldIdentity = b.xhr('HomeTimeline');
+request = b.xhr('HomeLatestTimeline');request.complete(timeline({__typename:'User',rest_id:'42',legacy:{screen_name:'Renamed'}}));
+oldIdentity.complete(timeline(user('42','Alice')));assert.equal(window.__otReadAccount(),'Renamed');
+request=b.xhr('HomeTimeline');b.document.cookie='twid=u%3D7';
+assert.equal(window.__otReadAccount(),'');assert.equal(window.__otBadgeCounts,null);
+request.complete(timeline(user('42','Alice')));assert.equal(window.__otReadAccount(),'');
+request=b.xhr('HomeTimeline');request.complete(timeline(user('42','Alice'),user('7','Bob')));
+assert.equal(window.__otReadAccount(),'Bob');
+const anonymous=browser('');anonymous.xhr('HomeTimeline').complete(timeline(user('42','Alice')));
+assert.equal(anonymous.window.__otReadAccount(),'','没有可读账号 ID 时不能从时间线作者猜测当前账号');
+
+const receipt = (author = user('42','Alice'),id='123') => ({data:{create_tweet:{tweet_results:{result:{
+  __typename:'Tweet',rest_id:id,core:{user_results:{result:author}}
+}}}}});
+const posted=browser();let postRequest,expirePost;
+posted.context.setTimeout=callback=>{expirePost=callback;};
+posted.document.querySelector=()=>({disabled:false,getAttribute:()=>null,click(){postRequest=posted.xhr('CreateTweet');}});
+assert.equal(vm.runInContext(clickPostButtonScript('alice'),posted.context),'submitted');
+assert.equal(vm.runInContext(clickPostButtonScript('alice'),posted.context),'unknown');
+postRequest.complete(receipt());assert.equal(posted.window.__otReadPost(),'confirmed');
+expirePost();assert.equal(posted.window.__otReadPost(),'confirmed');
+for(const body of [{errors:[{code:1}],...receipt()},receipt(user('7','Bob')),receipt(user('7','Alice')),
+  receipt(user('42','Alice'),''),{data:{create_tweet:{}}}]){
+  const rejected=browser();rejected.window.__otBeginPost('alice');rejected.xhr('CreateTweet').complete(body);
+  assert.notEqual(rejected.window.__otReadPost(),'confirmed','无有效回执或账号不符时必须保留待核对状态');
+  assert.equal(rejected.stats.warnings.length,1);
+}
+const unarmed=browser(),inflight=unarmed.xhr('CreateTweet');
+unarmed.window.__otBeginPost('alice');inflight.complete(receipt());
+assert.notEqual(unarmed.window.__otReadPost(),'confirmed','提交前已有请求不能确认本次发布');
+const first=unarmed.xhr('CreateTweet'),second=unarmed.xhr('CreateTweet');
+second.complete(receipt());assert.notEqual(unarmed.window.__otReadPost(),'confirmed');
+first.complete(receipt());assert.equal(unarmed.window.__otReadPost(),'confirmed');
+const switched=browser();switched.window.__otBeginPost('alice');request=switched.xhr('CreateTweet');
+switched.document.cookie='twid=u%3D7';switched.window.__otReadAccount();
+switched.document.cookie='twid=u%3D42';request.complete(receipt());
+assert.equal(switched.window.__otReadPost(),'unknown','切回相同账号也不能接收已失效的旧发布回执');
+const fetchPost=browser();fetchPost.window.__otBeginPost('alice');
+const sentPost=fetchPost.window.fetch('/i/api/graphql/current/CreateTweet',{method:'POST'});
+fetchPost.reply(0,receipt(),{url:'https://x.com/i/api/graphql/current/CreateTweet'});
+await sentPost;await settleResponses();assert.equal(fetchPost.window.__otReadPost(),'confirmed');
+const mainSource=readFileSync(join(here,'..','entry','src','main','ets','pages','MainTabs.ets'),'utf8');
+assert.match(mainSource.slice(mainSource.indexOf('Web({ src: this.composer.composeUrl')),
+  /javaScriptOnDocumentStart\(\[\{ script: WEB_RESPONSE_SCRIPT/,'发帖文档必须在网页请求前安装监听');
+console.log('Passive XHR/fetch, response ownership, order, body preservation and post receipt checks passed.');
 
 // Run the production session against platform doubles; page DOM checks above remain independent.
 const unreadSource = readFileSync(unreadSessionPath, 'utf8')

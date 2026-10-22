@@ -16,7 +16,8 @@ const prefs = { get: async (key, fallback) => store.has(key) ? store.get(key) : 
 const runtime = { Promise, Date, setTimeout, clearTimeout, DOMAIN: 1, TAG: 'test', PREFS_NAME: 'web', COMPOSE_DRAFT_KEY: 'compose_draft',
   TWITTER_COMPOSE: 'https://x.com/compose/post', OWN_HANDLE_SCRIPT:'owner', $r: key => key,
   preferences: { getPreferences: async () => prefs },
-  fillComposerScript: text => 'fill:' + text, clickRouteScript: url => 'route:' + url,
+  fillComposerScript: text => 'fill:' + text, clickPostButtonScript: owner => 'post:' + owner,
+  clickRouteScript: url => 'route:' + url,
   web_webview: { WebviewController: class { loadUrl() {} } },
   hilog: { info() {}, warn() {}, error() {} } };
 const composerSource = read('entry/src/main/ets/common/ComposerSession.ets')
@@ -118,6 +119,16 @@ for (const failure of ['missing', 'throw', 'account', 'owner']) {
   const p = composer(); p.postUncertain = true; p.composeHandoff = true;
   failKey = 'compose_draft:alice'; await p.clearHandoffDraft(); failKey = undefined;
   assert.equal(p.composeHandoff, true); assert.equal(p.postUncertain, true);
+}
+// 没有点击网页按钮时解除提交屏障，正文仍保留在同一账号的草稿中。
+for (const result of ['missing','disabled','unavailable']) {
+  const p=composer(),text=p.draft;
+  Object.assign(p,{composeReady:true,composeLoading:false,sheetOpen:true});
+  p.composeController.runJavaScript=async script=>script==='post:alice'?result:'ok';
+  await p.postFromSheet();p.dispose();
+  assert.equal(p.draft,text);assert.equal(p.posting,false);assert.equal(p.postUncertain,false);
+  assert.equal(store.get('post_pending:alice'),false);assert.equal(store.get('compose_draft:alice'),text);
+  assert.equal(p.composeMessage,'app.string.compose_submit_unavailable');
 }
 // 常规入口无论缺少链接还是脚本失败，都保留当前文档；外部新地址才允许建立文档。
 for(const failure of ['missing','throw']) {

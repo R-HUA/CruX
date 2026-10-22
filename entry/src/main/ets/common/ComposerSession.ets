@@ -6,7 +6,7 @@ import { KeyCode } from '@kit.InputKit';
 import { UIContext } from '@kit.ArkUI';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { TWITTER_BASE, TWITTER_COMPOSE } from './WebConfig';
-import { fillComposerScript, COMPOSER_READY_SCRIPT, CLICK_POST_BUTTON_SCRIPT, POST_RESULT_SCRIPT,
+import { fillComposerScript, COMPOSER_READY_SCRIPT, clickPostButtonScript, POST_RESULT_SCRIPT,
   unquoteScriptResult } from './WebChrome';
 
 const DOMAIN: number = 0x0A11;
@@ -392,8 +392,8 @@ export class ComposerSession {
       }
       await this.host.putPreference('post_pending:' + this.composeOwner, true);
       this.postUncertain = true;
-      const result = unquoteScriptResult(await this.composeController.runJavaScript(CLICK_POST_BUTTON_SCRIPT));
-      if (result === 'missing' || result === 'disabled') {
+      const result = unquoteScriptResult(await this.composeController.runJavaScript(clickPostButtonScript(this.composeOwner)));
+      if (result === 'missing' || result === 'disabled' || result === 'unavailable') {
         await this.host.putPreference('post_pending:' + this.composeOwner, false);
         this.postUncertain = false;
         this.posting = false;

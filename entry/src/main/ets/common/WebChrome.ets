@@ -80,6 +80,8 @@ export function chromeInsetsScript(top: number, bottom: number, viewportWidth: n
 
 // 仅从明确的本人资料入口读取账号；读不到时不能推断用户已退出登录。
 export const OWN_HANDLE_SCRIPT: string = `(function(){
+  var responseHandle=window.__otReadAccount&&window.__otReadAccount();
+  if(responseHandle)return responseHandle;
   var links=document.querySelectorAll('a[data-testid="AppTabBar_Profile_Link"],a[data-testid="DashButton_ProfileIcon_Link"]');
   for(var i=0;i<links.length;i++){
     var href=links[i].getAttribute('href')||'';
@@ -550,30 +552,6 @@ export function accountAvatarDiagScript(): string {
   })()`;
 }
 
-/** 被动读取网页已有的计数响应，不发起额外请求，也不改变响应内容。 */
-export const UNREAD_RESPONSE_SCRIPT: string = `(function(){
-  if(window!==window.top||window.__otBadgeHook)return;
-  window.__otBadgeHook=true;
-  window.__otBadgeEpoch=0;
-  var send=XMLHttpRequest.prototype.send;
-  XMLHttpRequest.prototype.send=function(){
-    var epoch=window.__otBadgeEpoch;
-    this.addEventListener('load',function(){
-      if(epoch!==window.__otBadgeEpoch||this.status!==200)return;
-      try{
-        var url=new URL(this.responseURL);
-        if(url.hostname!=='x.com'||!/^\\/i\\/api\\/graphql\\/[^/]+\\/ViewerBadgeCounts$/.test(url.pathname))return;
-        var data=this.responseType==='json'?this.response:JSON.parse(this.responseText);
-        var counts=data.data.viewer_v2.user_results.result.badge_counts;
-        var n=counts.ntab_unread_count,m=counts.xchat_unread_count;
-        if(!Number.isSafeInteger(n)||n<0||!Number.isSafeInteger(m)||m<0)throw new Error('Invalid badge counts');
-        window.__otBadgeCounts={notifications:n,messages:m,time:Date.now()};
-      }catch(error){console.warn('CruX unread response invalid');}
-    },{once:true});
-    return send.apply(this,arguments);
-  };
-})();`;
-
 // Unread counters for the shell's own tab bar and for the launcher badge.
 //
 // The counts belong to x.com, and the page already publishes them twice, so the
@@ -593,6 +571,7 @@ export const UNREAD_RESPONSE_SCRIPT: string = `(function(){
 // tabs.
 export const UNREAD_COUNTS_SCRIPT: string =
   '(function(){try{' +
+  'if(window.__otReadAccount)window.__otReadAccount();' +
   // 响应只在一分钟内优先使用；站点未提供有效响应时继续读取原有页面入口。
   'var cached=window.__otBadgeCounts;' +
   'if(cached&&Date.now()-cached.time<60000)return cached.notifications+"/"+cached.messages;' +
@@ -629,33 +608,22 @@ export const UNREAD_COUNTS_SCRIPT: string =
 // Native "Post" action for the compose sheet: clicks x.com's own submit button.
 // Returns 'missing' when the page has not rendered one yet, so the shell can
 // tell the user instead of failing silently.
-/** 仅网页在本次提交后生成的成功提示与帖子链接可确认发布。 */
-export const CLICK_POST_BUTTON_SCRIPT: string = `(function(){
+/** 发布回执须与本次按钮操作及已确认账号对应，不按提示文字判断成功。 */
+export function clickPostButtonScript(owner: string): string {
+  return `(function(owner){
   var b=document.querySelector('[data-testid="tweetButton"]')||document.querySelector('[data-testid="tweetButtonInline"]');
   if(!b)return 'missing';
   if(b.disabled||b.getAttribute('aria-disabled')==='true')return 'disabled';
   if(window.__otPostState==='submitted'||window.__otPostState==='unknown')return 'unknown';
-  var before=new Set(Array.from(document.querySelectorAll('[data-testid="toast"]')));
-  window.__otPostState='submitted';
-  var observer=new MutationObserver(function(){
-    var toasts=document.querySelectorAll('[data-testid="toast"]');
-    for(var i=0;i<toasts.length;i++){
-      var t=toasts[i];
-      if(before.has(t))continue;
-      var text=t.textContent||'';
-      var link=t.querySelector('a[href*="/status/"]');
-      if(link && /Your post was sent|Your Tweet was sent|帖子已发送|帖子已發送|推文已发送|推文已發送/.test(text)){
-        window.__otPostState='confirmed';observer.disconnect();return;
-      }
-    }
-  });
-  observer.observe(document.documentElement,{childList:true,subtree:true,characterData:true});
-  window.addEventListener('pagehide',function(){observer.disconnect();},{once:true});
-  setTimeout(function(){observer.disconnect();if(window.__otPostState==='submitted')window.__otPostState='unknown';},15000);
-  try{b.click();return 'submitted';}catch(e){observer.disconnect();window.__otPostState='unknown';return 'unknown';}
-})()`;
+  if(!window.__otBeginPost)return 'unavailable';
+  var token=window.__otBeginPost(owner);
+  if(!token)return 'unavailable';
+  setTimeout(function(){if(window.__otPostToken===token&&window.__otPostState==='submitted')window.__otPostState='unknown';},15000);
+  try{b.click();return 'submitted';}catch(e){window.__otPostState='unknown';return 'unknown';}
+})(` + JSON.stringify(owner) + `)`;
+}
 
-export const POST_RESULT_SCRIPT: string = 'window.__otPostState||"unknown"';
+export const POST_RESULT_SCRIPT: string = 'window.__otReadPost?window.__otReadPost():"unknown"';
 
 // Pushes the text typed in the native composer into x.com's own editor, so the
 // native sheet posts through the real web session (DraftJS state, character

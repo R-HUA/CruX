@@ -11,6 +11,7 @@ import { ComposerSession } from '../common/ComposerSession';
 import { UnreadSession } from '../common/UnreadSession';
 import { AccountSession } from '../common/AccountSession';
 import { WebNavigation } from '../common/WebNavigation';
+import { WEB_RESPONSE_SCRIPT } from '../common/WebResponses';
 import { NativeBottomBar } from './NativeBottomBar';
 import { NativeTopBar } from './NativeTopBar';
 import { NativeSettingsPage } from './NativeSettingsPage';
@@ -39,7 +40,7 @@ import {
   OWN_HANDLE_SCRIPT, chromeScript, chromeFlagScript, chromeInsetsScript, chromeDocumentStartScript, chromeActiveScript, scrollToTopScript,
   unquoteScriptResult,
   HOME_TAB_SCRIPT, selectHomeTabScript,
-  ACCOUNT_SWITCH_SCRIPT, UNREAD_RESPONSE_SCRIPT
+  ACCOUNT_SWITCH_SCRIPT
 } from '../common/WebChrome';
 
 // 原生层提供导航、纯文字编辑与系统交互，网页保留搜索及会话交互。
@@ -2215,7 +2216,7 @@ struct MainTabs {
         return true;
       })
       .javaScriptAccess(true)
-      .javaScriptOnDocumentStart([{ script: this.rawWeb ? '' : UNREAD_RESPONSE_SCRIPT + chromeDocumentStartScript(true),
+      .javaScriptOnDocumentStart([{ script: this.rawWeb ? '' : WEB_RESPONSE_SCRIPT + chromeDocumentStartScript(true),
         scriptRules: ['https://x.com', 'https://www.x.com', 'https://twitter.com', 'https://www.twitter.com'] }])
       .domStorageAccess(true)
       // x.com's chat client keeps its session state in browser storage; ArkWeb
@@ -2468,6 +2469,8 @@ struct MainTabs {
           this.composer.renderExited();
         })
         .javaScriptAccess(true)
+        .javaScriptOnDocumentStart([{ script: WEB_RESPONSE_SCRIPT,
+          scriptRules: ['https://x.com', 'https://www.x.com', 'https://twitter.com', 'https://www.twitter.com'] }])
         .domStorageAccess(true)
         .databaseAccess(true)
         .fileAccess(false)

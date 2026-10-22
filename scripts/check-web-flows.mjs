@@ -49,7 +49,7 @@ assert.equal(routes.isPostDetailUrl('https://x.com/i/web/status/123'),true);
 for (const url of ['https://x.com/alice/status/123/photo/1','https://x.com/alice/status/123/mediaViewer','https://example.com/alice/status/123']) {
   assert.equal(routes.isPostDetailUrl(url),false,url);
 }
-const scripts = load('WebChrome', ['fillComposerScript','CLICK_POST_BUTTON_SCRIPT','POST_RESULT_SCRIPT','chromeScript','chromeFlagScript','chromeInsetsScript','chromeDocumentStartScript','chromeActiveScript','COMPOSER_READY_SCRIPT','ACCOUNT_SWITCH_SCRIPT','OWN_HANDLE_SCRIPT','profileBootstrapScript','clickRouteScript','accountAvatarScript','accountAvatarDiagScript','PROFILE_LAYOUT_SCRIPT','PROFILE_MEDIA_SCRIPT','WEB_MODAL_SCRIPT']);
+const scripts = load('WebChrome', ['fillComposerScript','clickPostButtonScript','POST_RESULT_SCRIPT','chromeScript','chromeFlagScript','chromeInsetsScript','chromeDocumentStartScript','chromeActiveScript','COMPOSER_READY_SCRIPT','ACCOUNT_SWITCH_SCRIPT','OWN_HANDLE_SCRIPT','profileBootstrapScript','clickRouteScript','accountAvatarScript','accountAvatarDiagScript','PROFILE_LAYOUT_SCRIPT','PROFILE_MEDIA_SCRIPT','WEB_MODAL_SCRIPT']);
 assert.equal(scripts.chromeDocumentStartScript(false),'');
 // 模拟网页处理事件后，浏览器是否还会执行链接的默认导航。
 function clickRuntime() {
@@ -346,14 +346,14 @@ const accountDocument={
     selector==='[role=dialog] a[href]'&&menuOpen?[profileLink]:[],
   querySelector:selector=>selector==='[role=dialog]'?(menuOpen?dialog:null):(profileReady?profileButton:null)
 };
-assert.equal(vm.runInNewContext(scripts.OWN_HANDLE_SCRIPT,{document:accountDocument}),'');
+assert.equal(vm.runInNewContext(scripts.OWN_HANDLE_SCRIPT,{window:{},document:accountDocument}),'');
 const accountContext={window:{},document:accountDocument,setTimeout:()=>1,clearTimeout(){},
   MutationObserver:class{constructor(callback){accountChanged=callback;}observe(){}disconnect(){}}};
 assert.equal(vm.runInNewContext(scripts.profileBootstrapScript(false),accountContext),'armed');
 assert.equal(accountContext.window.__otBoot,'alice');assert.equal(menuOpen,false);assert.equal(clicks,2);
-menuOpen=true;assert.equal(vm.runInNewContext(scripts.OWN_HANDLE_SCRIPT,{document:accountDocument}),'alice');
+menuOpen=true;assert.equal(vm.runInNewContext(scripts.OWN_HANDLE_SCRIPT,{window:{},document:accountDocument}),'alice');
 ambiguous=true;dialog.textContent='@alice @bob';
-assert.equal(vm.runInNewContext(scripts.OWN_HANDLE_SCRIPT,{document:accountDocument}),'');
+assert.equal(vm.runInNewContext(scripts.OWN_HANDLE_SCRIPT,{window:{},document:accountDocument}),'');
 ambiguous=false;menuOpen=false;
 assert.equal(vm.runInNewContext(scripts.profileBootstrapScript(true),accountContext),'armed');
 assert.equal(profileClicks,1);assert.equal(menuOpen,false);
@@ -674,23 +674,23 @@ pillState.rawWeb=true;assert.equal(pill.call(pillState),true,'Original web mode 
 
 // 头像下载、缓存和异步状态测试见 check-avatar-loading.mjs，使用生产下载器覆盖平台 I/O 边界。
 
-function posting({ disabled=false, missing=false, throws=false }={}) {
-  let clicks=0; let observe; let timeout; let toasts=[];
+function posting({ disabled=false, missing=false, throws=false, hook=true }={}) {
+  let clicks=0; let timeout;
   const button={disabled,getAttribute:()=>null,click(){clicks++;if(throws)throw Error('click');}};
-  const window={addEventListener(){}};
-  const context={window,document:{documentElement:{},querySelector:()=>missing?null:button,querySelectorAll:()=>toasts},
-    MutationObserver:class{constructor(callback){observe=callback;}observe(){}disconnect(){}},setTimeout(callback){timeout=callback;}};
-  return {run:()=>vm.runInNewContext(scripts.CLICK_POST_BUTTON_SCRIPT,context),window,
-    count:()=>clicks,expire:()=>timeout(),toast(text,link=true){toasts=[{textContent:text,querySelector:()=>link?{}:null}];observe();}};
+  const window={};
+  if(hook)window.__otBeginPost=owner=>{assert.equal(owner,'alice');window.__otPostState='submitted';window.__otPostToken=1;return 1;};
+  const context={window,document:{querySelector:()=>missing?null:button,
+    querySelectorAll(){throw Error('发布结果不能再读取 Toast');}},setTimeout(callback){timeout=callback;}};
+  return {run:()=>vm.runInNewContext(scripts.clickPostButtonScript('alice'),context),window,
+    count:()=>clicks,expire:()=>timeout()};
 }
 let p=posting();assert.equal(p.run(),'submitted');assert.equal(p.window.__otPostState,'submitted');
 assert.equal(p.run(),'unknown');assert.equal(p.count(),1);
-p.toast('Something went wrong',false);assert.equal(p.window.__otPostState,'submitted');
 p.expire();assert.equal(p.window.__otPostState,'unknown');
-p=posting();p.run();p.toast('Your post was sent.',false);assert.equal(p.window.__otPostState,'submitted');
-p.toast('Your post was sent.',true);assert.equal(p.window.__otPostState,'confirmed');
+p=posting();p.run();p.window.__otPostState='confirmed';p.expire();assert.equal(p.window.__otPostState,'confirmed');
 p=posting({disabled:true});assert.equal(p.run(),'disabled');assert.equal(p.count(),0);
 p=posting({missing:true});assert.equal(p.run(),'missing');assert.equal(p.count(),0);
+p=posting({hook:false});assert.equal(p.run(),'unavailable');assert.equal(p.count(),0);
 p=posting({throws:true});assert.equal(p.run(),'unknown');assert.equal(p.count(),1);
 const media=load('WebSystem',['mediaAcceptTypes','isSiteUrl','isAuthUrl']);
 assert.deepEqual(Array.from(media.mediaAcceptTypes(['.jpg,image/png'])),['image/jpeg','image/png']);
