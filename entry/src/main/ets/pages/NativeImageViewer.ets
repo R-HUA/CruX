@@ -111,13 +111,17 @@ export struct NativeImageViewer {
       return undefined;
     }
     try {
-      return new uiMaterial.ImmersiveMaterial({
-        style: uiMaterial.ImmersiveStyle.REGULAR,
-        interactive: true
-      });
+      if (canIUse('SystemCapability.ArkUI.ArkUI.Full') && uiMaterial.isImmersiveMaterialSupported()) {
+        return new uiMaterial.ImmersiveMaterial({
+          style: uiMaterial.ImmersiveStyle.REGULAR,
+          colorMode: ThemeColorMode.DARK,
+          interactive: true
+        });
+      }
     } catch (e) {
       return undefined;
     }
+    return undefined;
   }
 
   private currentFile(): MediaFile | undefined {
@@ -290,15 +294,17 @@ export struct NativeImageViewer {
   topBar() {
     Row() {
       Button({ type: ButtonType.Circle }) {
-        SymbolGlyph($r('sys.symbol.xmark')).fontSize(22)
+        SymbolGlyph($r('sys.symbol.xmark')).fontSize(20)
           .fontColor([Color.White])
       }
       .id('image-close')
       .width(40).height(40)
       .responseRegion({ x: -4, y: -4, width: TOUCH_TARGET, height: TOUCH_TARGET })
+      .backgroundColor(this.immersiveMaterial ? Color.Transparent : '#66000000')
+      .backgroundBlurStyle(!this.immersiveMaterial ? BlurStyle.COMPONENT_THICK : BlurStyle.NONE,
+        { colorMode: ThemeColorMode.DARK })
+      .border(!this.immersiveMaterial ? { width: 0.5, color: '#26FFFFFF' } : { width: 0, color: Color.Transparent })
       .systemMaterial(this.buttonMaterial())
-      .backgroundBlurStyle(!this.immersiveMaterial ? BlurStyle.Thin : BlurStyle.NONE)
-      .backgroundColor(Color.Transparent)
       .accessibilityText($r('app.string.media_close'))
       .accessibilityLevel('yes')
       .onClick(() => {
@@ -311,25 +317,29 @@ export struct NativeImageViewer {
       if (this.items.length > 1) {
         Text((this.index + 1) + ' / ' + this.items.length)
           .fontSize(13).fontFamily(FONT_FAMILY).fontWeight(FontWeight.Medium).fontColor(Color.White)
-          .padding({ left: S12, right: S12, top: 6, bottom: 6 })
-          .systemMaterial(this.buttonMaterial())
-          .backgroundBlurStyle(!this.immersiveMaterial ? BlurStyle.Thin : BlurStyle.NONE)
-          .backgroundColor(Color.Transparent)
+          .padding({ left: S12, right: S12, top: 8, bottom: 8 })
           .borderRadius(16)
+          .backgroundColor(this.immersiveMaterial ? Color.Transparent : '#66000000')
+          .backgroundBlurStyle(!this.immersiveMaterial ? BlurStyle.COMPONENT_THICK : BlurStyle.NONE,
+            { colorMode: ThemeColorMode.DARK })
+          .border(!this.immersiveMaterial ? { width: 0.5, color: '#26FFFFFF' } : { width: 0, color: Color.Transparent })
+          .systemMaterial(this.buttonMaterial())
       }
 
       Blank()
 
       Button({ type: ButtonType.Circle }) {
-        SymbolGlyph($r('sys.symbol.more')).fontSize(22)
+        SymbolGlyph($r('sys.symbol.more')).fontSize(20)
           .fontColor([Color.White])
       }
       .id('image-more')
       .width(40).height(40)
       .responseRegion({ x: -4, y: -4, width: TOUCH_TARGET, height: TOUCH_TARGET })
+      .backgroundColor(this.immersiveMaterial ? Color.Transparent : '#66000000')
+      .backgroundBlurStyle(!this.immersiveMaterial ? BlurStyle.COMPONENT_THICK : BlurStyle.NONE,
+        { colorMode: ThemeColorMode.DARK })
+      .border(!this.immersiveMaterial ? { width: 0.5, color: '#26FFFFFF' } : { width: 0, color: Color.Transparent })
       .systemMaterial(this.buttonMaterial())
-      .backgroundBlurStyle(!this.immersiveMaterial ? BlurStyle.Thin : BlurStyle.NONE)
-      .backgroundColor(Color.Transparent)
       .accessibilityText($r('app.string.media_more'))
       .accessibilityLevel('yes')
       .onClick(() => {
@@ -384,8 +394,21 @@ export struct NativeImageViewer {
         }, (item: MediaAddress) => item.id)
       }
       .index(this.index).loop(false).indicator(false)
+      .cachedCount(1)
+      .duration(260)
+      .curve(Curve.Friction)
       .disableSwipe(this.zoomed || this.busy || this.analyzerSelecting)
       .width('100%').height('100%')
+      .onAnimationStart((_index: number, targetIndex: number) => {
+        if (this.analyzerSelecting) {
+          this.cancelAnalyzer();
+        }
+        if (targetIndex !== this.index) {
+          this.zoomed = false;
+          this.detailsVisible = false;
+          this.moreOpen = false;
+        }
+      })
       .onChange((index: number) => {
         if (this.analyzerSelecting) {
           this.cancelAnalyzer();
@@ -483,6 +506,7 @@ struct ZoomImage {
   private visibilityCallback: ((visibility: visionImageAnalyzer.ImageAnalyzerVisibility) => void) | undefined = undefined;
   private textChangeCallback: ((text: string) => void) | undefined = undefined;
   private subjectChangeCallback: ((subjects: visionImageAnalyzer.Subject[]) => void) | undefined = undefined;
+  private failedCallback: (() => void) | undefined = undefined;
 
   aboutToAppear(): void {
     if (this.active) {
@@ -515,6 +539,7 @@ struct ZoomImage {
     if (this.selecting && this.aiController) {
       try {
         if (canIUse('SystemCapability.AI.VisionImageAnalyzer')) {
+          this.aiController.cancelSelected();
           this.aiController.setImageAnalyzerVisibility(visionImageAnalyzer.ImageAnalyzerVisibility.HIDDEN);
         }
       } catch (e) {
@@ -533,7 +558,7 @@ struct ZoomImage {
 
   private setupAnalyzer(): void {
     this.teardownAnalyzer();
-    if (!this.active || this.isGif || this.source === '') {
+    if (!this.active || this.isGif || this.source === '' || this.displayFailed) {
       return;
     }
     const currentGen = ++this.generation;
@@ -572,11 +597,17 @@ struct ZoomImage {
       if (gen !== this.generation || !this.active) { return; }
       this.updateSelecting(subjects.length > 0);
     };
+    this.failedCallback = () => {
+      if (gen !== this.generation || !this.active) { return; }
+      this.updateSelecting(false);
+      this.analyzerEnabled = false;
+    };
 
     try {
       controller.on('imageAnalyzerVisibilityChange', this.visibilityCallback);
       controller.on('selectedTextChange', this.textChangeCallback);
       controller.on('selectedSubjectsChange', this.subjectChangeCallback);
+      controller.on('analyzerFailed', this.failedCallback);
     } catch (e) {
       hilog.warn(0x0A11, 'OpenTwit', 'event=analyzer_listener_bind_failed error=%{public}s', JSON.stringify(e));
     }
@@ -601,6 +632,11 @@ struct ZoomImage {
             this.aiController.off('selectedSubjectsChange', this.subjectChangeCallback);
             this.subjectChangeCallback = undefined;
           }
+          if (this.failedCallback) {
+            this.aiController.off('analyzerFailed', this.failedCallback);
+            this.failedCallback = undefined;
+          }
+          this.aiController.cancelSelected();
           this.aiController.setImageAnalyzerVisibility(visionImageAnalyzer.ImageAnalyzerVisibility.HIDDEN);
         }
       } catch (e) {
@@ -671,12 +707,14 @@ struct ZoomImage {
             .width('100%').height('100%').objectFit(ImageFit.Contain)
             .scale({ x: this.scaleValue, y: this.scaleValue }).translate({ x: this.x, y: this.y })
             .draggable(false)
+            .autoResize(!this.isGif)
             .enableAnalyzer(this.analyzerEnabled)
             .onComplete(() => {
               this.displayFailed = false;
             })
             .onError((_err: ImageError) => {
               hilog.error(0x0A11, 'OpenTwit', 'event=image_display_failed source=%{public}s', this.source);
+              this.teardownAnalyzer();
               this.displayFailed = true;
             })
         } else {
@@ -685,12 +723,14 @@ struct ZoomImage {
             .width('100%').height('100%').objectFit(ImageFit.Contain)
             .scale({ x: this.scaleValue, y: this.scaleValue }).translate({ x: this.x, y: this.y })
             .draggable(false)
+            .autoResize(!this.isGif)
             .enableAnalyzer(false)
             .onComplete(() => {
               this.displayFailed = false;
             })
             .onError((_err: ImageError) => {
               hilog.error(0x0A11, 'OpenTwit', 'event=image_display_failed source=%{public}s', this.source);
+              this.teardownAnalyzer();
               this.displayFailed = true;
             })
         }
@@ -701,6 +741,9 @@ struct ZoomImage {
           Button($r('app.string.retry')).onClick(() => {
             this.displayFailed = false;
             this.imageKey++;
+            if (this.active) {
+              this.setupAnalyzer();
+            }
           })
         }
         .width('100%').height('100%')

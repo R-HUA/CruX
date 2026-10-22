@@ -2982,34 +2982,39 @@ struct MainTabs {
       return undefined;
     }
     try {
-      if (this.profileBannerButtons()) {
+      if (canIUse('SystemCapability.ArkUI.ArkUI.Full') && uiMaterial.isImmersiveMaterialSupported()) {
+        if (this.profileBannerButtons()) {
+          return new uiMaterial.ImmersiveMaterial({
+            style: uiMaterial.ImmersiveStyle.REGULAR,
+            interactive: true
+          });
+        }
         return new uiMaterial.ImmersiveMaterial({
-          style: uiMaterial.ImmersiveStyle.REGULAR,
+          style: uiMaterial.ImmersiveStyle.ULTRA_THIN,
           interactive: true
         });
       }
-      return new uiMaterial.ImmersiveMaterial({
-        style: uiMaterial.ImmersiveStyle.ULTRA_THIN,
-        interactive: true
-      });
     } catch (e) {
       return undefined;
     }
+    return undefined;
   }
 
   @Builder
   headerIconButton(symbol: Resource, label: Resource, action: () => void) {
     Button({ type: ButtonType.Circle }) {
       SymbolGlyph(symbol)
-        .fontSize(22)
+        .fontSize(20)
         .fontColor([this.profileBannerButtons() ? Color.White : $r('sys.color.ohos_id_color_text_primary')])
     }
     .width(40)
     .height(40)
     .responseRegion({ x: -4, y: -4, width: TOUCH_TARGET, height: TOUCH_TARGET })
+    .backgroundColor(this.profileBannerButtons() ? (this.immersiveMaterial ? Color.Transparent : '#59000000') :
+      (this.immersiveMaterial ? Color.Transparent : $r('sys.color.comp_background_tertiary')))
+    .backgroundBlurStyle(!this.immersiveMaterial && this.profileBannerButtons() ? BlurStyle.COMPONENT_THICK : BlurStyle.NONE,
+      { colorMode: ThemeColorMode.DARK })
     .systemMaterial(this.headerButtonMaterial())
-    .backgroundBlurStyle(!this.immersiveMaterial && this.profileBannerButtons() ? BlurStyle.Thin : BlurStyle.NONE)
-    .backgroundColor(Color.Transparent)
     .accessibilityText(label)
     .accessibilityLevel('yes')
     .onClick(action)
@@ -3692,13 +3697,17 @@ struct MainTabs {
       return undefined;
     }
     try {
-      return new uiMaterial.ImmersiveMaterial({
-        style: uiMaterial.ImmersiveStyle.REGULAR,
-        interactive: true
-      });
+      if (canIUse('SystemCapability.ArkUI.ArkUI.Full') && uiMaterial.isImmersiveMaterialSupported()) {
+        return new uiMaterial.ImmersiveMaterial({
+          style: uiMaterial.ImmersiveStyle.REGULAR,
+          colorMode: ThemeColorMode.DARK,
+          interactive: true
+        });
+      }
     } catch (e) {
       return undefined;
     }
+    return undefined;
   }
 
   @Builder
@@ -3768,11 +3777,12 @@ struct MainTabs {
       .height(FLOATING_BAR_HEIGHT)
       .padding({ left: S8, right: S8 })
       .borderRadius(FLOATING_BAR_HEIGHT / 2)
-      .systemMaterial(this.imageViewerBarMaterial())
-      .backgroundBlurStyle(!this.immersiveMaterial ? BlurStyle.COMPONENT_THICK : BlurStyle.NONE)
       .backgroundColor(this.immersiveMaterial ? Color.Transparent : '#66000000')
-      .shadow({ radius: 16, color: '#24000000', offsetY: 4 })
-      .border({ width: 0.5, color: '#26FFFFFF' })
+      .backgroundBlurStyle(!this.immersiveMaterial ? BlurStyle.COMPONENT_THICK : BlurStyle.NONE,
+        { colorMode: ThemeColorMode.DARK })
+      .shadow(!this.immersiveMaterial ? { radius: 16, color: '#24000000', offsetY: 4 } : { radius: 0, color: Color.Transparent })
+      .border(!this.immersiveMaterial ? { width: 0.5, color: '#26FFFFFF' } : { width: 0, color: Color.Transparent })
+      .systemMaterial(this.imageViewerBarMaterial())
       .hitTestBehavior(HitTestMode.Default)
     }
     .width('100%')

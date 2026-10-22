@@ -1,6 +1,7 @@
 import { S8, S12, S16 } from '../common/Theme';
 import { ALL_TAB_IDS, PLATFORM_SETTINGS } from '../common/ClientSettings';
 import { TWITTER_BOOKMARKS, pathOf } from '../common/WebConfig';
+import { uiMaterial } from '@kit.ArkUI';
 
 /** 设置页只呈现客户端配置；平台项目点击后交给原网页处理。 */
 @Component
@@ -147,6 +148,17 @@ export struct NativeSettingsPage {
     return 0;
   }
 
+  private emptyMaterial(): uiMaterial.Material | undefined {
+    try {
+      if (canIUse('SystemCapability.ArkUI.ArkUI.Full')) {
+        return uiMaterial.Material.empty;
+      }
+    } catch (e) {
+      // ignore
+    }
+    return undefined;
+  }
+
   @Builder
   themeRow() {
     ListItem({ style: ListItemStyle.CARD }) {
@@ -161,7 +173,7 @@ export struct NativeSettingsPage {
           .optionFont({ size: 14 })
           .backgroundColor(Color.Transparent)
           .backgroundBlurStyle(BlurStyle.NONE)
-          .systemMaterial(undefined)
+          .systemMaterial(this.emptyMaterial())
           .shadow({ radius: 0, color: Color.Transparent })
           .borderWidth(0)
           .borderRadius(0)
@@ -193,7 +205,7 @@ export struct NativeSettingsPage {
           .optionFont({ size: 14 })
           .backgroundColor(Color.Transparent)
           .backgroundBlurStyle(BlurStyle.NONE)
-          .systemMaterial(undefined)
+          .systemMaterial(this.emptyMaterial())
           .shadow({ radius: 0, color: Color.Transparent })
           .borderWidth(0)
           .borderRadius(0)
