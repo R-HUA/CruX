@@ -103,7 +103,7 @@ assert.match(viewer, /needsRecovery\(\)/);
 console.log('PASS: editor fallback, durable handoff, restart barrier, explicit recovery and local-only image display');
 
 // Real startup reaches its final mount state even when optional material/window APIs fail.
-const extraMethods = ['aboutToAppear', 'closeWebDrawer', 'openOwnProfile', 'cancelProfileNavigation', 'isHomeRoot', 'syncLauncherBadge', 'recoverMediaWeb'];
+const extraMethods = ['aboutToAppear', 'closeWebDrawer', 'openOwnProfile', 'cancelProfileNavigation', 'isHomeRoot', 'syncLauncherBadge', 'recoverMediaWeb', 'reloadCurrent'];
 const extra = Object.fromEntries(extraMethods.map(name => {
   const code = method(name).replace(/^  (?:private )?/, '');
   return [name, code];
@@ -154,6 +154,48 @@ for (const transition of ['blocked', 'rebuilt']) {
   await ExtraPage.prototype.aboutToAppear.call(failedContext);
   assert.equal(failedContext.preferencesReady, true);
 }
+// 错误页重试重新应用网络策略，并用失败地址重建页面；应用仍失败时不能放行。
+for (const scenario of ['page_failed', 'apply_recovered', 'apply_failed']) {
+  const p = page();
+  let applies = 0, refreshes = 0;
+  Object.assign(p, { avatarAlive: true, ownHandle: '',
+    bridge: Object.fromEntries(['setImageHandler','setProfileHandler','setThemeHandler','setHandler','setModalHandler'].map(name => [name, () => {}])),
+    applyBreakpoints() {}, armFirstLoadTimeout() {}, armBadgeRefresh() {}, syncChromeInsets() {},
+    recoverMediaWeb: ExtraPage.prototype.recoverMediaWeb });
+  await ExtraPage.prototype.aboutToAppear.call(p);
+  Object.assign(p, { hasError: true, webNetworkReady: scenario === 'page_failed', webSession: 0,
+    currentUrl: 'https://x.com/home', webSource: 'https://x.com/home',
+    failedWebUrl: 'https://x.com/alice/status/123', rawWeb: false,
+    controller: { refresh() { refreshes++; } } });
+  net.refresh = () => {
+    applies++;
+    networkListener({ generation: 1, mode: 'secure_only', suspended: false, applyError: scenario === 'apply_failed' });
+  };
+  ExtraPage.prototype.reloadCurrent.call(p);
+  assert.equal(applies, 1);
+  assert.equal(refreshes, 0, '错误页不能重复刷新失败控制器或刷新尚未绑定的新控制器');
+  if (scenario === 'apply_failed') {
+    assert.equal(p.webSession, 0);
+    assert.equal(p.hasError, true);
+    assert.equal(p.webNetworkReady, false);
+    net.refresh = () => networkListener({ generation: 1, mode: 'secure_only', suspended: false, applyError: false });
+    ExtraPage.prototype.reloadCurrent.call(p);
+  }
+  assert.equal(p.webSession, 1, '策略恢复订阅和重试入口只能重建一次');
+  assert.equal(p.webSource, 'https://x.com/alice/status/123');
+  assert.equal(p.hasError, false);
+  assert.equal(p.webNetworkReady, true);
+}
+{
+  const p = page(); let refreshes = 0;
+  net.refresh = () => { throw Error('正常刷新不重配网络'); };
+  Object.assign(p, { hasError: false, webNetworkReady: true, avatarReadRequest: 0,
+    avatarFailedUrl: '', clearAvatarRetry() {}, controller: { refresh() { refreshes++; } } });
+  ExtraPage.prototype.reloadCurrent.call(p);
+  assert.equal(refreshes, 1);
+}
+console.log('PASS: error-page retry reapplies DoH, preserves failed URL, rebuilds once, and keeps strict-mode failures blocked');
+
 // 当前页面直接确认账号，不为个人资料固定绕回首页；取消后的身份读取不能导航。
 {
   const p = page(), accepted = [];

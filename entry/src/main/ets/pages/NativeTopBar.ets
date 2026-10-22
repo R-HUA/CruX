@@ -25,6 +25,7 @@ export struct NativeTopBar {
         if (this.bannerButtons) {
           return new uiMaterial.ImmersiveMaterial({
             style: uiMaterial.ImmersiveStyle.REGULAR,
+            materialColor: '#59000000',
             interactive: true
           });
         }
@@ -49,9 +50,8 @@ export struct NativeTopBar {
         .width(40).height(40)
         .margin({ right: S8 })
         .responseRegion({ x: -4, y: -4, width: TOUCH_TARGET, height: TOUCH_TARGET })
-        .backgroundColor(this.bannerButtons ? (this.immersiveMaterial ? Color.Transparent : '#59000000') :
-          (this.immersiveMaterial ? Color.Transparent : $r('sys.color.comp_background_tertiary')))
-        .backgroundBlurStyle(!this.immersiveMaterial && this.bannerButtons ? BlurStyle.COMPONENT_THICK : BlurStyle.NONE,
+        .backgroundColor(this.bannerButtons ? '#59000000' : $r('sys.color.comp_background_tertiary'))
+        .backgroundBlurStyle(this.bannerButtons ? BlurStyle.COMPONENT_THICK : BlurStyle.NONE,
           { colorMode: ThemeColorMode.DARK })
         .systemMaterial(this.buttonMaterial())
         .accessibilityText($r('app.string.back')).accessibilityLevel('yes').onClick(this.onBack)

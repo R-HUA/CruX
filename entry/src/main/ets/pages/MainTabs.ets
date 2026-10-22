@@ -288,6 +288,7 @@ struct MainTabs {
   @State webSession: number = 0;
   @State webNetworkReady: boolean = true;
   private webSource: string = TWITTER_ROUTES[0];
+  private failedWebUrl: string = '';
   @State composeReady: boolean = false;
   private composeSyncTimer: number = -1;
   private composeRevision: number = 0;
@@ -1469,7 +1470,14 @@ struct MainTabs {
   }
 
   private reloadCurrent(): void {
-    if (!this.webNetworkReady) { NetworkConfig.getInstance().refresh(); return; }
+    if (this.hasError || !this.webNetworkReady) {
+      const session = this.webSession;
+      NetworkConfig.getInstance().refresh();
+      // 应用成功的订阅回调可能已重建页面，不能再刷新尚未绑定的新控制器。
+      if (!this.webNetworkReady || this.webSession !== session) { return; }
+      this.recoverMediaWeb(this.rawWeb, false);
+      return;
+    }
     // A retry replaces the error surface with the normal progress UI.
     this.hasError = false;
     this.avatarReadRequest++;
@@ -1492,7 +1500,7 @@ struct MainTabs {
     this.cancelProfileNavigation();
     this.imageViewerOpen = false;
     this.rawWeb = showWeb;
-    this.webSource = this.currentUrl || TWITTER_ROUTES[0];
+    this.webSource = (this.hasError ? this.failedWebUrl : '') || this.currentUrl || this.webSource;
     this.webImages?.close().catch((error: Error) => {
       hilog.error(DOMAIN, TAG, 'event=web_image_close_failed error=%{public}s', error.message);
       this.toast($r('app.string.operation_failed'));
@@ -2986,6 +2994,7 @@ struct MainTabs {
         if (this.profileBannerButtons()) {
           return new uiMaterial.ImmersiveMaterial({
             style: uiMaterial.ImmersiveStyle.REGULAR,
+            materialColor: '#59000000',
             interactive: true
           });
         }
@@ -3010,9 +3019,8 @@ struct MainTabs {
     .width(40)
     .height(40)
     .responseRegion({ x: -4, y: -4, width: TOUCH_TARGET, height: TOUCH_TARGET })
-    .backgroundColor(this.profileBannerButtons() ? (this.immersiveMaterial ? Color.Transparent : '#59000000') :
-      (this.immersiveMaterial ? Color.Transparent : $r('sys.color.comp_background_tertiary')))
-    .backgroundBlurStyle(!this.immersiveMaterial && this.profileBannerButtons() ? BlurStyle.COMPONENT_THICK : BlurStyle.NONE,
+    .backgroundColor(this.profileBannerButtons() ? '#59000000' : $r('sys.color.comp_background_tertiary'))
+    .backgroundBlurStyle(this.profileBannerButtons() ? BlurStyle.COMPONENT_THICK : BlurStyle.NONE,
       { colorMode: ThemeColorMode.DARK })
     .systemMaterial(this.headerButtonMaterial())
     .accessibilityText(label)
@@ -3310,6 +3318,7 @@ struct MainTabs {
       })
       .onPageBegin(() => {
         if (!this.webNetworkReady) { return; }
+        this.failedWebUrl = '';
         this.updateWebModal(false);
         this.documentLoading = true;
         this.armFirstLoadTimeout();
@@ -3361,6 +3370,7 @@ struct MainTabs {
           // 页面内跳转取消旧请求，不代表当前页面加载失败。
           if (event && event.error.getErrorCode() === -3) { return; }
           if (event) {
+            this.failedWebUrl = event.request.getRequestUrl();
             hilog.error(DOMAIN, TAG, 'event=main_frame_failed code=%{public}d', event.error.getErrorCode());
           }
         } catch (err) {
@@ -3700,6 +3710,7 @@ struct MainTabs {
       if (canIUse('SystemCapability.ArkUI.ArkUI.Full') && uiMaterial.isImmersiveMaterialSupported()) {
         return new uiMaterial.ImmersiveMaterial({
           style: uiMaterial.ImmersiveStyle.REGULAR,
+          materialColor: '#66000000',
           interactive: true
         });
       }
@@ -3776,11 +3787,10 @@ struct MainTabs {
       .height(FLOATING_BAR_HEIGHT)
       .padding({ left: S8, right: S8 })
       .borderRadius(FLOATING_BAR_HEIGHT / 2)
-      .backgroundColor(this.immersiveMaterial ? Color.Transparent : '#66000000')
-      .backgroundBlurStyle(!this.immersiveMaterial ? BlurStyle.COMPONENT_THICK : BlurStyle.NONE,
-        { colorMode: ThemeColorMode.DARK })
-      .shadow(!this.immersiveMaterial ? { radius: 16, color: '#24000000', offsetY: 4 } : { radius: 0, color: Color.Transparent })
-      .border(!this.immersiveMaterial ? { width: 0.5, color: '#26FFFFFF' } : { width: 0, color: Color.Transparent })
+      .backgroundColor('#66000000')
+      .backgroundBlurStyle(BlurStyle.COMPONENT_THICK, { colorMode: ThemeColorMode.DARK })
+      .shadow({ radius: 16, color: '#24000000', offsetY: 4 })
+      .border({ width: 0.5, color: '#26FFFFFF' })
       .systemMaterial(this.imageViewerBarMaterial())
       .hitTestBehavior(HitTestMode.Default)
     }

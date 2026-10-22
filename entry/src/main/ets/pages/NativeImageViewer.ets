@@ -114,6 +114,7 @@ export struct NativeImageViewer {
       if (canIUse('SystemCapability.ArkUI.ArkUI.Full') && uiMaterial.isImmersiveMaterialSupported()) {
         return new uiMaterial.ImmersiveMaterial({
           style: uiMaterial.ImmersiveStyle.REGULAR,
+          materialColor: '#66000000',
           interactive: true
         });
       }
@@ -299,10 +300,9 @@ export struct NativeImageViewer {
       .id('image-close')
       .width(40).height(40)
       .responseRegion({ x: -4, y: -4, width: TOUCH_TARGET, height: TOUCH_TARGET })
-      .backgroundColor(this.immersiveMaterial ? Color.Transparent : '#66000000')
-      .backgroundBlurStyle(!this.immersiveMaterial ? BlurStyle.COMPONENT_THICK : BlurStyle.NONE,
-        { colorMode: ThemeColorMode.DARK })
-      .border(!this.immersiveMaterial ? { width: 0.5, color: '#26FFFFFF' } : { width: 0, color: Color.Transparent })
+      .backgroundColor('#66000000')
+      .backgroundBlurStyle(BlurStyle.COMPONENT_THICK, { colorMode: ThemeColorMode.DARK })
+      .border({ width: 0.5, color: '#26FFFFFF' })
       .systemMaterial(this.buttonMaterial())
       .accessibilityText($r('app.string.media_close'))
       .accessibilityLevel('yes')
@@ -318,10 +318,9 @@ export struct NativeImageViewer {
           .fontSize(13).fontFamily(FONT_FAMILY).fontWeight(FontWeight.Medium).fontColor(Color.White)
           .padding({ left: S12, right: S12, top: 8, bottom: 8 })
           .borderRadius(16)
-          .backgroundColor(this.immersiveMaterial ? Color.Transparent : '#66000000')
-          .backgroundBlurStyle(!this.immersiveMaterial ? BlurStyle.COMPONENT_THICK : BlurStyle.NONE,
-            { colorMode: ThemeColorMode.DARK })
-          .border(!this.immersiveMaterial ? { width: 0.5, color: '#26FFFFFF' } : { width: 0, color: Color.Transparent })
+          .backgroundColor('#66000000')
+          .backgroundBlurStyle(BlurStyle.COMPONENT_THICK, { colorMode: ThemeColorMode.DARK })
+          .border({ width: 0.5, color: '#26FFFFFF' })
           .systemMaterial(this.buttonMaterial())
       }
 
@@ -334,10 +333,9 @@ export struct NativeImageViewer {
       .id('image-more')
       .width(40).height(40)
       .responseRegion({ x: -4, y: -4, width: TOUCH_TARGET, height: TOUCH_TARGET })
-      .backgroundColor(this.immersiveMaterial ? Color.Transparent : '#66000000')
-      .backgroundBlurStyle(!this.immersiveMaterial ? BlurStyle.COMPONENT_THICK : BlurStyle.NONE,
-        { colorMode: ThemeColorMode.DARK })
-      .border(!this.immersiveMaterial ? { width: 0.5, color: '#26FFFFFF' } : { width: 0, color: Color.Transparent })
+      .backgroundColor('#66000000')
+      .backgroundBlurStyle(BlurStyle.COMPONENT_THICK, { colorMode: ThemeColorMode.DARK })
+      .border({ width: 0.5, color: '#26FFFFFF' })
       .systemMaterial(this.buttonMaterial())
       .accessibilityText($r('app.string.media_more'))
       .accessibilityLevel('yes')
