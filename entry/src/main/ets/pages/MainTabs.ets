@@ -3700,7 +3700,6 @@ struct MainTabs {
       if (canIUse('SystemCapability.ArkUI.ArkUI.Full') && uiMaterial.isImmersiveMaterialSupported()) {
         return new uiMaterial.ImmersiveMaterial({
           style: uiMaterial.ImmersiveStyle.REGULAR,
-          colorMode: ThemeColorMode.DARK,
           interactive: true
         });
       }

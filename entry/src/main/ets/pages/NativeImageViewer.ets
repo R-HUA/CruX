@@ -114,7 +114,6 @@ export struct NativeImageViewer {
       if (canIUse('SystemCapability.ArkUI.ArkUI.Full') && uiMaterial.isImmersiveMaterialSupported()) {
         return new uiMaterial.ImmersiveMaterial({
           style: uiMaterial.ImmersiveStyle.REGULAR,
-          colorMode: ThemeColorMode.DARK,
           interactive: true
         });
       }
@@ -539,7 +538,6 @@ struct ZoomImage {
     if (this.selecting && this.aiController) {
       try {
         if (canIUse('SystemCapability.AI.VisionImageAnalyzer')) {
-          this.aiController.cancelSelected();
           this.aiController.setImageAnalyzerVisibility(visionImageAnalyzer.ImageAnalyzerVisibility.HIDDEN);
         }
       } catch (e) {
@@ -636,7 +634,6 @@ struct ZoomImage {
             this.aiController.off('analyzerFailed', this.failedCallback);
             this.failedCallback = undefined;
           }
-          this.aiController.cancelSelected();
           this.aiController.setImageAnalyzerVisibility(visionImageAnalyzer.ImageAnalyzerVisibility.HIDDEN);
         }
       } catch (e) {
