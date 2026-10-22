@@ -1,9 +1,9 @@
 import { FONT_FAMILY, S4, S8, S12, S16 } from '../common/Theme';
 
-/** 编辑状态由页面持有，面板只呈现输入和操作，避免持久化与布局相互耦合。 */
+/** 编辑状态由会话持有，面板只呈现输入和操作，避免持久化与布局相互耦合。 */
 @Component
 export struct ComposerPanel {
-  @Link draft: string;
+  @Prop draft: string = '';
   @Prop ready: boolean = false;
   @Prop posting: boolean = false;
   @Prop uncertain: boolean = false;
@@ -15,7 +15,7 @@ export struct ComposerPanel {
   onPost: () => void = () => {};
   onMore: () => void = () => {};
   onVerify: () => void = () => {};
-  onDraftChange: () => void = () => {};
+  onDraftChange: (value: string) => void = () => {};
   onComposeKey: (event: KeyEvent) => boolean = () => false;
 
   build() {
@@ -50,7 +50,7 @@ export struct ComposerPanel {
       if (this.message !== '') { Text(this.message).fontSize(14).padding(S12) }
       if (this.preparing || this.loading) { LoadingProgress().width(28).height(28).margin(S12) }
       if (this.uncertain) { Button($r('app.string.post_verify')).onClick(this.onVerify) }
-      TextArea({ text: $$this.draft, placeholder: $r('app.string.compose_placeholder') })
+      TextArea({ text: this.draft, placeholder: $r('app.string.compose_placeholder') })
         .width('100%').layoutWeight(1).fontFamily(FONT_FAMILY).fontSize(18)
         .backgroundColor(Color.Transparent).padding({ left: S16, right: S16, top: S12 })
         .enabled(!this.posting && !this.uncertain && !this.preparing && this.hasOwner)

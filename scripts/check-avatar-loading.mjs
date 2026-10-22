@@ -4,25 +4,29 @@ import { stripTypeScriptTypes } from 'node:module';
 import vm from 'node:vm';
 
 const main = readFileSync(new URL('../entry/src/main/ets/pages/MainTabs.ets', import.meta.url), 'utf8');
+const accountSource = readFileSync(new URL('../entry/src/main/ets/common/AccountSession.ets', import.meta.url), 'utf8')
+  .replace(/^import[\s\S]*?;\r?\n/gm, '').replace(/^@Observed\r?\n/m, '').replace(/^export /gm, '');
 const media = readFileSync(new URL('../entry/src/main/ets/common/MediaFiles.ets', import.meta.url), 'utf8')
   .replace(/^import .*;\r?\n/gm, '').replace(/^export /gm, '');
-const method = name => {
+const mainMethod = name => {
   const found = main.match(new RegExp('^  (?:private )?(?:static )?(?:async )?' + name + '\\([\\s\\S]*?^  \\}', 'm'));
   assert.ok(found, 'Missing production method: ' + name);
   return found[0];
 };
-const prefix = main.slice(main.indexOf('struct MainTabs {'), main.indexOf('  onWillApplyTheme('));
-const fields = prefix.split('\n').filter(line =>
-  /^\s+(?:@State )?(?:private )?(?:avatar\w*|retiredAvatarFiles|ownHandle|rawWeb|authenticationPage|currentUrl|hasError|progress|refreshing)\s*:/.test(line))
-  .map(line => line.replace('@State ', '')).join('\n');
-const methods = ['unquote', 'loadAvatar', 'resetAvatar', 'avatarImageFailed', 'closeAvatarFiles',
-  'closeRetiredAvatarFiles', 'retireAvatarFiles', 'readAvatar', 'restoreAvatar', 'saveAvatar',
-  'acceptHandle', 'reloadCurrent', 'aboutToDisappear', 'applyPageChrome', 'updateChromeFlag', 'logChromeResult',
-  'retryAvatarRead', 'clearAvatarRetry'];
-const cleanup = main.match(/^class AvatarCleanupFrame extends FrameCallback \{[\s\S]*?^\}/m)[0];
-// Execute the production methods and real MediaFiles downloader; only platform I/O is substituted.
-const code = stripTypeScriptTypes(media + '\n' + cleanup + '\nclass MainTabs {\n' + fields + '\n' +
-  methods.map(method).join('\n') + '\n}\n;MainTabs');
+const accountMethod = name => {
+  const found = accountSource.match(new RegExp('^  (?:private )?(?:static )?(?:async )?' + name + '\\([\\s\\S]*?^  \\}', 'm'));
+  assert.ok(found, 'Missing production account method: ' + name);
+  return found[0];
+};
+const accountMethods = ['activate', 'setBackground', 'dispose', 'initialize', 'authenticationRequired',
+  'retryFailedAvatar', 'readProfileDetails', 'saveOwnHandle', 'saveAvatar', 'restoreAvatar', 'loadAvatar',
+  'resetAvatar', 'avatarImageFailed', 'closeAvatarFiles', 'closeRetiredAvatarFiles', 'retireAvatarFiles',
+  'parseHandle', 'discoverOwnProfile', 'closeWebDrawer', 'cancelProfileNavigation', 'acceptHandle',
+  'finishDiscover', 'readSettingsAccount', 'readAvatar', 'retryAvatarRead', 'clearAvatarRetry', 'confirmCurrentAccount'];
+const mainMethods = ['unquote', 'reloadCurrent', 'aboutToDisappear', 'applyPageChrome', 'updateChromeFlag', 'logChromeResult'];
+// Execute the production account session, page lifecycle/chrome methods, and real MediaFiles downloader;
+// only platform I/O is substituted.
+const mainCode = stripTypeScriptTypes('class MainTabs {\n' + mainMethods.map(mainMethod).join('\n') + '\n}\n;MainTabs');
 const png = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 1, 2]).buffer;
 const ok = () => ({ responseCode: 200, result: png });
 const deferred = () => {
@@ -41,11 +45,17 @@ const prefs = {
   put: async (key, value) => { cache.set(key, value); puts.push([key, value]); },
   flush: async () => {}
 };
+const decodeSource = readFileSync(new URL('../entry/src/main/ets/common/WebChrome.ets',import.meta.url),'utf8')
+  .match(/export function unquoteScriptResult[\s\S]*?^}/m)[0].replace('export ', '');
 const runtime = {
+  unquoteScriptResult: vm.runInNewContext(stripTypeScriptTypes(decodeSource) + ';unquoteScriptResult'),
   ...vm.runInNewContext(stripTypeScriptTypes(readFileSync(new URL('../entry/src/main/ets/common/WebMedia.ets',import.meta.url),'utf8'))
     .replace(/^export /gm,'')+';({resolveMedia})'),
   ArrayBuffer, Uint8Array, Map, Promise, Date, FrameCallback: class {},
   DOMAIN: 0x0A11, TAG: 'OpenTwit', PREFS_NAME: 'opentwit_web', AVATAR_KEY: 'own_avatar',
+  OWN_HANDLE_SCRIPT: 'owner', profileBootstrapScript: () => 'bootstrap',
+  profileUrl: handle => 'https://x.com/' + handle, pathOf: url => new URL(url).pathname,
+  isSiteUrl: url => /^https:\/\/x\.com\//.test(url), accountDetailsScript: handle => 'account:' + handle,
   setTimeout: callback => { const id = ++timerId; timers.set(id, callback); return id; },
   clearTimeout: id => timers.delete(id), clearInterval,
   AVATAR_RETRY_MS: 1200, AVATAR_RETRY_LIMIT: 6,
@@ -76,16 +86,47 @@ const runtime = {
   hilog: Object.fromEntries(['debug', 'info', 'warn', 'error'].map(level =>
     [level, (...args) => logs.push({ level, args })]))
 };
-const MainTabs = vm.runInNewContext(code, runtime);
+runtime.MediaFiles = vm.runInNewContext(stripTypeScriptTypes(media) + ';MediaFiles', runtime);
+runtime.AccountSession = vm.runInNewContext(stripTypeScriptTypes(accountSource) + ';AccountSession', runtime);
+const MainTabs = vm.runInNewContext(mainCode + ';MainTabs', runtime);
 const context = { cacheDir: '/cache' };
 const makePage = () => {
   const page = new MainTabs();
-  Object.assign(page, { avatarAlive: true, ownHandle: 'alice', currentUrl: 'https://x.com/home',
-    webNetworkReady: true, profileNavigation: 0, cancelProfileNavigation() {},
+  Object.assign(page, { rawWeb: false, authenticationPage: false, webNetworkReady: true, currentIndex: 0,
+    incomingControllerReady: false, settingsOpen: false, pageAlive: true, appBackground: false,
+    webSession: 0, refreshing: false, imageViewerOpen: false, failedWebUrl: '', webSource: 'https://x.com/home',
+    networkReloadTimer: -1, firstLoadTimer: -1, pageStateTimer: -1, networkUnsubscribe: undefined,
+    shellWindow: undefined, wideListener: undefined, avoidChanged() {},
+    navigation: { currentUrl: 'https://x.com/home', navigationGeneration: 0, hasError: false, progress: 0 },
+    composer: { sheetOpen: false, dispose() {} }, unread: { dispose() {}, stop() {} },
     getUIContext: () => ({ getHostContext: () => context, postFrameCallback: frame => frames.push(frame) }),
-    saveOwnHandle() {}, finishDiscover() {}, stopPostCheck() {}, stopBackgroundWork() {}, clearComposeSync() {}, clearNetworkBadgeCounts() {}, syncChromeInsets() {},
-    toast() {}, refreshes: 0, networkReloadTimer: -1, firstLoadTimer: -1, badgeTimer: -1,
-    badgeRetryTimer: -1, draftSaveTimer: -1 });
+    stopBackgroundWork() {}, recoverMediaWeb() {}, syncChromeInsets() {}, toast() {}, refreshes: 0,
+    webImages: undefined });
+  page.account = new runtime.AccountSession({
+    getUIContext: () => page.getUIContext(), controller: () => page.controller,
+    url: () => page.navigation.currentUrl, isAuthenticationPage: () => page.authenticationPage,
+    isRawWeb: () => page.rawWeb, webImages: () => page.webImages, currentIndex: () => page.currentIndex,
+    isControllerReady: () => page.incomingControllerReady, isSettingsOpen: () => page.settingsOpen,
+    isComposerOpen: () => page.composer.sheetOpen, accountChanged: () => {},
+    loadWeb: (url, keepProfile, allowDocumentLoad, direct) =>
+      page.navigation.loaded.push([url, keepProfile, allowDocumentLoad, direct]),
+    toast: message => page.toast(message)
+  });
+  page.navigation.loaded = [];
+  page.account.ownHandle = 'alice';
+  page.account.activate(false);
+  for (const field of ['ownHandle', 'avatarUrl', 'avatarPath', 'avatarFailedUrl', 'avatarGeneration',
+    'avatarReadRequest', 'avatarRetryTimer', 'avatarRetries', 'avatarFiles', 'retiredAvatarFiles']) {
+    Object.defineProperty(page, field, {
+      get() { return this.account[field]; }, set(value) { this.account[field] = value; }
+    });
+  }
+  Object.defineProperty(page, 'currentUrl', {
+    get() { return this.navigation.currentUrl; }, set(value) { this.navigation.currentUrl = value; }
+  });
+  for (const name of accountMethods.filter(name => name !== 'parseHandle')) {
+    page[name] = (...args) => page.account[name](...args);
+  }
   page.controller = {
     runJavaScript(script) {
       if (script === 'diag') { return Promise.resolve('"[]"'); }
@@ -275,9 +316,10 @@ assert.ok(logs.some(log => log.level === 'warn' && log.args.includes('TypeError'
 assert.ok(!JSON.stringify(logs).includes('secret-message'));
 assert.ok(!JSON.stringify(logs).includes(urlA));
 assert.match(main, /accountPicture\(\$\$: AccountPictureState\)[\s\S]*?Image\(\$\$\.path\)/);
-assert.equal((main.match(/this\.accountPicture\(\{ path: this\.avatarPath \}\)/g) || []).length, 2);
-assert.ok(method('acceptHandle').includes('this.resetAvatar()'));
-assert.ok(method('openCompose').includes('this.acceptHandle(handle, false)'));
+assert.equal((main.match(/this\.accountPicture\(\{ path: this\.account\.avatarPath \}\)/g) || []).length, 2);
+assert.ok(accountMethod('acceptHandle').includes('this.resetAvatar()'));
+const composerSource = readFileSync(new URL('../entry/src/main/ets/common/ComposerSession.ets',import.meta.url),'utf8');
+assert.ok(composerSource.includes('this.host.acceptHandle(handle, false)'));
 assert.equal(responses.length, 0); assert.equal(jsResults.length, 0);
 await flushFrames();
 console.log('Avatar production loading, DNS reuse, cache, refresh retry, lifecycle, races and private diagnostics passed.');

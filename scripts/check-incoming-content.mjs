@@ -82,9 +82,9 @@ const consume=vm.runInNewContext(stripTypeScriptTypes('(function(){'+consumeBody
 });
 const opened=[],notices=[];
 const state={incomingContent:{kind:'compose',value:'文字'},incomingControllerReady:false,incomingPageReady:false,
-  modalBlocksNetworkReload:()=>false,fullScreen:false,openingCompose:false,
-  openCompose:value=>opened.push(value),toast:value=>notices.push(value),
-  loadWeb(value,keepProfile,allowDocumentLoad){assert.equal(keepProfile,false);assert.equal(allowDocumentLoad,true);opened.push(value);},
+  modalBlocksNetworkReload:()=>false,fullScreen:false,
+  composer:{openingCompose:false,openCompose:value=>opened.push(value)},toast:value=>notices.push(value),
+  navigation:{loadWeb(value,keepProfile,allowDocumentLoad){assert.equal(keepProfile,false);assert.equal(allowDocumentLoad,true);opened.push(value);}},
   controller:{loadUrl(){throw Error('必须先尝试页内导航');}}};
 consume.call(state);assert.equal(state.incomingContent.value,'文字');
 state.incomingControllerReady=true;consume.call(state);assert.equal(opened.length,0);
@@ -97,7 +97,8 @@ state.incomingContent={kind:'link',value:'https://x.com/alice'};
 consume.call(state);assert.equal(state.incomingContent.kind,'link','冷启动链接等待网页路由就绪');
 state.incomingPageReady=true;consume.call(state);assert.equal(opened.at(-1),'https://x.com/alice');
 
-const composeBody=main.match(/private async openCompose\(sharedText: string = ''\): Promise<void> \{([\s\S]*?)\n  \}/)[1];
+const sessionSource=readFileSync(new URL('../entry/src/main/ets/common/ComposerSession.ets',import.meta.url),'utf8');
+const composeBody=sessionSource.match(/async openCompose\(sharedText: string = ''\): Promise<void> \{([\s\S]*?)\n  \}/)[1];
 let existingDraft='',uncertain=false,dialog,saved=[];
 const compose=vm.runInNewContext(stripTypeScriptTypes('(async function(sharedText){'+composeBody+'})'),{
   $r:key=>key,hilog:{error(){}},DOMAIN:0,TAG:'test',TWITTER_COMPOSE:'https://x.com/compose/post',
@@ -105,11 +106,10 @@ const compose=vm.runInNewContext(stripTypeScriptTypes('(async function(sharedTex
   preferences:{getPreferences:async()=>({get:async key=>key.startsWith('post_pending:')?uncertain:
     key.startsWith('compose_handoff:')?'':existingDraft})}
 });
-const composerState=()=>({openingCompose:false,sheetOpen:false,legacyDraft:'',confirmCurrentAccount:async()=>'alice',
+const composerState=()=>({openingCompose:false,sheetOpen:false,legacyDraft:'',host:{confirmCurrentAccount:async()=>'alice',
   getUIContext:()=>({getHostContext:()=>({}),showAlertDialog:value=>{dialog=value;}}),
-  acceptHandle(){},clearComposeSync(){},scheduleComposeSync(){},
-  async persistDraft(){saved.push(this.draft);},saveDraft(){saved.push(this.draft);},
-  toast:value=>notices.push(value)});
+  acceptHandle(){},toast:value=>notices.push(value)},clearComposeSync(){},scheduleComposeSync(){},
+  async persistDraft(){saved.push(this.draft);},saveDraft(){saved.push(this.draft);}});
 let composer=composerState();await compose.call(composer,'外部文字');
 assert.equal(composer.draft,'外部文字');assert.deepEqual(saved,['外部文字']);
 existingDraft='旧草稿';saved=[];composer=composerState();await compose.call(composer,'新分享');

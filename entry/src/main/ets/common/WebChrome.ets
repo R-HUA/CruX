@@ -705,3 +705,22 @@ export function profileBootstrapScript(navigate: boolean): string {
   'return "armed";' +
   '}catch(e){window.__otBoot="";return "err";}})(' + navigate + ')';
 }
+
+/** ArkWeb 返回字符串可能带 JSON 引号，统一保留既有解码语义。 */
+export function unquoteScriptResult(raw: string): string {
+  if (!raw) {
+    return '';
+  }
+  const first: string = raw.charAt(0);
+  if (first === '"' && raw.length >= 2) {
+    try {
+      return JSON.parse(raw) as string;
+    } catch (err) {
+      return raw.substring(1, raw.length - 1);
+    }
+  }
+  if (raw === 'undefined' || raw === 'null') {
+    return '';
+  }
+  return raw;
+}

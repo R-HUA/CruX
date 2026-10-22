@@ -1,43 +1,45 @@
 import web_webview from '@ohos.web.webview';
 import mediaquery from '@ohos.mediaquery';
 import { MediaAddress, MediaPostState, MediaActionResult, resolveMedia, MEDIA_CLICK_SCRIPT, mediaActionScript } from '../common/WebMedia';
-import { MediaFile, MediaFiles } from '../common/MediaFiles';
+import { MediaFile } from '../common/MediaFiles';
 import { WebImageDownloads } from '../common/WebImageDownloads';
 import { IncomingContent } from '../common/IncomingContent';
 import { NativeImageViewer } from './NativeImageViewer';
 import { NetworkSettingsSheet } from './NetworkSettingsSheet';
 import { ComposerPanel } from './ComposerPanel';
+import { ComposerSession } from '../common/ComposerSession';
+import { UnreadSession } from '../common/UnreadSession';
+import { AccountSession } from '../common/AccountSession';
+import { WebNavigation } from '../common/WebNavigation';
 import { NativeBottomBar } from './NativeBottomBar';
 import { NativeTopBar } from './NativeTopBar';
 import { NativeSettingsPage } from './NativeSettingsPage';
-import { DEFAULT_TABS, ALL_TAB_IDS, REQUIRED_TAB_IDS, appearanceScript, accountDetailsScript } from '../common/ClientSettings';
+import { DEFAULT_TABS, ALL_TAB_IDS, REQUIRED_TAB_IDS, appearanceScript } from '../common/ClientSettings';
 import { NetworkConfig, NetworkSnapshot } from '../common/NetworkConfig';
 import { preferences } from '@kit.ArkData';
 import { isSiteUrl, isAuthUrl, mediaAcceptTypes, chooseMedia, installDownloads, removeExpiredDownloads } from '../common/WebSystem';
 import { abilityAccessCtrl, common, ConfigurationConstant, PermissionRequestResult, Permissions } from '@kit.AbilityKit';
-import { BusinessError, deviceInfo, pasteboard } from '@kit.BasicServicesKit';
-import { notificationManager } from '@kit.NotificationKit';
+import { BusinessError, deviceInfo } from '@kit.BasicServicesKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
-import { ColorMetrics, FrameCallback, LengthMetrics, uiMaterial, window } from '@kit.ArkUI';
+import { ColorMetrics, LengthMetrics, uiMaterial, window } from '@kit.ArkUI';
 import { HdsNavigation, HdsNavigationTitleMode, HdsTabs, hdsMaterial,
   HdsTabsController, HdsAnimationMode, BlurStrategy, ScrollEffectType } from '@kit.UIDesignKit';
-import { KeyCode } from '@kit.InputKit';
 import { vibrator } from '@kit.SensorServiceKit';
 import {
   BAR_HEIGHT, FONT_FAMILY, PROGRESS_HEIGHT, RAIL_WIDTH, RADIUS, S12, S16, S4, S8, TOUCH_TARGET,
   WIDE_BREAKPOINT
 } from '../common/Theme';
 import {
-  TWITTER_BASE, TWITTER_ROUTES, TWITTER_COMPOSE, TWITTER_UA,
+  TWITTER_BASE, TWITTER_ROUTES, TWITTER_UA,
   TWITTER_NOTIF_SETTINGS, TWITTER_EDIT_PROFILE,
   profileUrl, pathOf, routeIndexForUrl, profileHandleForUrl,
   isTabRootPath, isPostDetailUrl, isSecondaryUrl, usesNativeNavigation, usesNativeHeader, userAgentFor
 } from '../common/WebConfig';
 import {
   OWN_HANDLE_SCRIPT, chromeScript, chromeFlagScript, chromeInsetsScript, chromeDocumentStartScript, chromeActiveScript, scrollToTopScript,
-  CLICK_POST_BUTTON_SCRIPT, POST_RESULT_SCRIPT, profileBootstrapScript, clickRouteScript, fillComposerScript,
-  HOME_TAB_SCRIPT, selectHomeTabScript, accountAvatarScript, accountAvatarDiagScript, UNREAD_COUNTS_SCRIPT,
-  ACCOUNT_SWITCH_SCRIPT, COMPOSER_READY_SCRIPT, UNREAD_RESPONSE_SCRIPT
+  unquoteScriptResult,
+  HOME_TAB_SCRIPT, selectHomeTabScript,
+  ACCOUNT_SWITCH_SCRIPT, UNREAD_RESPONSE_SCRIPT
 } from '../common/WebChrome';
 
 // 原生层提供导航、纯文字编辑与系统交互，网页保留搜索及会话交互。
@@ -47,8 +49,6 @@ const DOMAIN: number = 0x0A11;
 const TAG: string = 'OpenTwit';
 
 const PREFS_NAME: string = 'opentwit_web';
-const OWN_HANDLE_KEY: string = 'own_handle';
-const AVATAR_KEY: string = 'own_avatar';
 const DESKTOP_MODE_KEY: string = 'desktop_site';
 const FLOATING_BAR_KEY: string = 'floating_bar';
 const AUTO_HIDE_BAR_KEY: string = 'auto_hide_bar';
@@ -60,31 +60,10 @@ const HEADER_BLUR_DISTANCE: number = 32;
 // 标题栏内容整体上移，给摄像头的上下留出更均匀的呼吸空间。
 const HEADER_CONTENT_LIFT: number = 4;
 const FLOATING_BAR_HEIGHT: number = 58;
-// The composer's text, kept in ArkData preferences so a draft survives the
-// sheet closing and the app being killed.
-const COMPOSE_DRAFT_KEY: string = 'compose_draft';
-const NOTIFICATION_ASKED_KEY: string = 'notification_asked';
 const LOCATION_PERMISSIONS: Permissions[] = ['ohos.permission.LOCATION'];
 const FIRST_LOAD_TIMEOUT_MS: number = 15000;
 // The page's title and history only settle a moment after it navigates.
 const PAGE_STATE_DELAY_MS: number = 700;
-// How often the shell re-reads the unread counters from the page. x.com counts
-// arrive over its own streaming connection, so a poll is what keeps the tab
-// badges and the launcher badge in step with the account.
-const BADGE_REFRESH_MS: number = 30000;
-// A page that is mid-load has no navigation to read yet, so the first answer
-// can be "not yet" (see UNREAD_COUNTS_SCRIPT). Ask again a few times instead of
-// leaving the badges blank until the next tick.
-const BADGE_RETRY_MS: number = 1200;
-const BADGE_RETRY_LIMIT: number = 6;
-const AVATAR_RETRY_MS: number = 1200;
-const AVATAR_RETRY_LIMIT: number = 6;
-// After the notification prompt, keep watching for a while in case the user
-// allows it from Settings rather than in the dialog.
-const NOTIFICATION_POLL_MS: number = 5000;
-const NOTIFICATION_POLL_LIMIT: number = 6;
-// The composer writes its draft a moment after the last keystroke.
-const DRAFT_SAVE_DEBOUNCE_MS: number = 700;
 
 // Bridge exposed to the page as window.otNative. x.com is a single-page app, so
 // its navigations never fire the Web component's load callbacks; the injected
@@ -128,12 +107,6 @@ interface ImagePayload {
   reposted?: boolean;
 }
 
-interface AccountDetails {
-  handle: string;
-  name: string;
-  bio: string;
-}
-
 /** 网页边界使用 CSS 像素，接收时按实际视口统一换算为 vp。 */
 interface ProfileLayout {
   url: string;
@@ -161,19 +134,6 @@ interface ChromeDiagnostics {
   error?: string;
 }
 
-class AvatarCleanupFrame extends FrameCallback {
-  private cleanup: () => void;
-
-  constructor(cleanup: () => void) {
-    super();
-    this.cleanup = cleanup;
-  }
-
-  onIdle(_timeLeftInNano: number): void {
-    this.cleanup();
-  }
-}
-
 @Entry
 @Component
 struct MainTabs {
@@ -199,11 +159,6 @@ struct MainTabs {
   private settingsOrigin: number = 0;
   private settingsOriginUrl: string = TWITTER_ROUTES[0];
   private settingsWebRoot: string = '';
-  private settingsReadGeneration: number = 0;
-  @State accountName: string = '';
-  @State accountBio: string = '';
-  @State accountLoading: boolean = false;
-  @State accountError: boolean = false;
   @State themeMode: string = 'system';
   @State fontScale: number = 100;
   @State originalImages: boolean = true;
@@ -212,28 +167,11 @@ struct MainTabs {
   @State materialLevel: string = 'adaptive';
   @State tabToggleGeneration: number = 0;
   @State customUa: string = '';
-  @State progress: number = 0;
-  @State hasError: boolean = false;
-  @State ownHandle: string = '';
-  // 从当前账号控件读取真实头像，缓存按已确认的账号隔离。
-  @State avatarUrl: string = '';
-  @State avatarPath: string = '';
-  @State avatarFailedUrl: string = '';
-  private avatarFiles: MediaFiles | undefined = undefined;
-  private avatarGeneration: number = 0;
-  private avatarReadRequest: number = 0;
-  private avatarAlive: boolean = false;
-  private avatarRetryTimer: number = -1;
-  private avatarRetries: number = 0;
-  private retiredAvatarFiles: MediaFiles[] = [];
-  private avatarCleanupScheduled: boolean = false;
+  private pageAlive: boolean = false;
   // Which Home timeline the native switcher has selected: 0 = For you,
   // 1 = Following. Mirrors x.com's own tab row.
   @State homeTabIndex: number = 0;
   @State homeTabsHeight: number = 32;
-  @State viewingHandle: string = '';
-  @State currentPath: string = '';
-  @State currentUrl: string = '';
   @State isWide: boolean = false;
   @State floatingBar: boolean = true;
   @State autoHideBar: boolean = true;
@@ -272,28 +210,43 @@ struct MainTabs {
   @State firstLoadDone: boolean = false;
   @State documentLoading: boolean = false;
   @State webModalOpen: boolean = false;
-  @State sheetOpen: boolean = false;
-  // Native composer state. "webComposer" is the escape hatch: when the page's
-  // own composer cannot be driven (or the post needs media/GIF/poll), the sheet
-  // reveals the real x.com composer instead of failing.
-  @State draft: string = '';
-  @State webComposer: boolean = false;
-  @State composeUrl: string = TWITTER_COMPOSE;
-  @State composeLoading: boolean = true;
-  @State composePreparing: boolean = false;
-  @State posting: boolean = false;
+  @State navigation: WebNavigation = new WebNavigation({
+    controller: () => this.controller, isNetworkReady: () => this.webNetworkReady,
+    cancelProfileNavigation: () => this.account.cancelProfileNavigation(),
+    toast: (message: ResourceStr) => this.toast(message)
+  });
+  @State account: AccountSession = new AccountSession({
+    getUIContext: () => this.getUIContext(), controller: () => this.controller,
+    url: () => this.navigation.currentUrl, isAuthenticationPage: () => this.authenticationPage,
+    isRawWeb: () => this.rawWeb, webImages: () => this.webImages, currentIndex: () => this.currentIndex,
+    isControllerReady: () => this.incomingControllerReady, isSettingsOpen: () => this.settingsOpen,
+    isComposerOpen: () => this.composer.sheetOpen, accountChanged: () => this.unread.resetAccount(),
+    loadWeb: (url: string, keepProfile: boolean, allowDocumentLoad: boolean, direct: boolean) =>
+      this.navigation.loadWeb(url, keepProfile, allowDocumentLoad, direct),
+    toast: (message: ResourceStr) => this.toast(message)
+  });
+  @State unread: UnreadSession = new UnreadSession({
+    controller: () => this.controller, owner: () => this.account.ownHandle, url: () => this.navigation.currentUrl,
+    isRawWeb: () => this.rawWeb, getUIContext: () => this.getUIContext(),
+    putPreference: (key: string, value: preferences.ValueType) => this.putPreference(key, value)
+  });
+  @State composer: ComposerSession = new ComposerSession({
+    getUIContext: () => this.getUIContext(),
+    confirmCurrentAccount: () => this.account.confirmCurrentAccount(),
+    acceptHandle: (handle: string, navigate: boolean) => this.account.acceptHandle(handle, navigate),
+    putPreference: (key: string, value: preferences.ValueType) => this.putPreference(key, value),
+    toast: (message: ResourceStr) => this.toast(message)
+  });
   @State rawWeb: boolean = false;
   @State desktopMode: boolean = false;
   @State preferencesReady: boolean = false;
   @State webSession: number = 0;
   @State webNetworkReady: boolean = true;
   private webSource: string = TWITTER_ROUTES[0];
+  // 新文档尚未提交时，控制器仍可能返回上一页地址。
+  private loadingWebUrl: string = '';
   private failedWebUrl: string = '';
-  @State composeReady: boolean = false;
-  private composeSyncTimer: number = -1;
-  private composeRevision: number = 0;
   private pageStateTimer: number = -1;
-  private notificationTimer: number = -1;
   @State authenticationPage: boolean = false;
   @State fullScreen: boolean = false;
   @StorageLink('appBackground') @Watch('onBackgroundChanged') appBackground: boolean = false;
@@ -308,47 +261,16 @@ struct MainTabs {
   private downloadDelegate: web_webview.WebDownloadDelegate | undefined = undefined;
   private webImages: WebImageDownloads | undefined = undefined;
   private composeDownloadDelegate: web_webview.WebDownloadDelegate | undefined = undefined;
-  @State postUncertain: boolean = false;
-  private composeHandoff: boolean = false;
-  @State composeMessage: ResourceStr = '';
-  private composeOwner: string = '';
-  private legacyDraft: string = '';
-  private postTimer: number = -1;
-  private postChecks: number = 0;
-  private draftWrite: Promise<void> = Promise.resolve();
-  private openingCompose: boolean = false;
-  // True while the shell is reading the signed-in handle behind a native panel.
-  @State discovering: boolean = false;
   // The page's own title (x.com's " / X" suffix stripped) and whether there is
   // web history to go back to. The shell draws the header for every page, so
   // these are what the native title bar shows.
   @State refreshing: boolean = false;
-  // Unread items, read from the page's own navigation entries. Both the tab bar
-  // and the launcher icon show them, so the count does not depend on the web UI
-  // being on screen.
-  @State unreadNotifications: number = 0;
-  @State unreadMessages: number = 0;
   @State pageTitle: string = '';
   @State canGoBack: boolean = false;
   private controller: web_webview.WebviewController = new web_webview.WebviewController();
-  private composeController: web_webview.WebviewController = new web_webview.WebviewController();
   private wideListener: mediaquery.MediaQueryListener | undefined = undefined;
   private bridge: PageBridge = new PageBridge();
   private firstLoadTimer: number = -1;
-  private badgeTimer: number = -1;
-  private badgeRetryTimer: number = -1;
-  private badgeRetries: number = 0;
-  private draftSaveTimer: number = -1;
-  // Whether the notification prompt (the one that lets the icon carry a badge)
-  // has been shown, so a decline is respected and never repeated.
-  private notificationAsked: boolean = false;
-  // 只缓存系统已接受的角标计数，失败不能阻止后续同步。
-  private badgeShown: number = -1;
-  private badgeSyncing: boolean = false;
-  private badgeSyncTarget: string = '';
-  private badgeSyncFailures: number = 0;
-  private profileNavigation: number = 0;
-  private navigationGeneration: number = 0;
   private networkUnsubscribe: (() => void) | undefined = undefined;
   private networkGeneration: number = 0;
   private networkPendingReload: boolean = false;
@@ -361,7 +283,10 @@ struct MainTabs {
   }
 
   async aboutToAppear(): Promise<void> {
-    this.avatarAlive = true;
+    this.composer.activate(this.appBackground);
+    this.unread.activate(this.appBackground);
+    this.pageAlive = true;
+    this.account.activate(this.appBackground);
     try {
       const shellContext = this.getUIContext().getHostContext() as common.UIAbilityContext;
       try {
@@ -371,7 +296,7 @@ struct MainTabs {
       }
       try {
         this.shellWindow = await window.getLastWindow(shellContext);
-        if (!this.avatarAlive) { return; }
+        if (!this.pageAlive) { return; }
         // 状态栏透出页面底色，文字颜色继续由导航组件管理。
         await this.shellWindow.setWindowSystemBarProperties({ statusBarColor: '#00000000' });
         this.shellWindow.on('avoidAreaChange', this.avoidChanged);
@@ -379,24 +304,23 @@ struct MainTabs {
       } catch (error) {
         hilog.warn(DOMAIN, TAG, 'event=shell_window_unavailable error=%{public}s', JSON.stringify(error));
       }
-      if (!this.avatarAlive) { return; }
+      if (!this.pageAlive) { return; }
       const net = NetworkConfig.getInstance();
       net.ensureInitialized(shellContext);
       const netSnapshot: NetworkSnapshot = net.snapshot();
       this.webNetworkReady = !(netSnapshot.mode === 'secure_only' && !netSnapshot.suspended && netSnapshot.applyError);
-      if (!this.webNetworkReady) { this.hasError = true; }
+      if (!this.webNetworkReady) { this.navigation.hasError = true; }
       this.networkGeneration = netSnapshot.generation;
       this.networkUnsubscribe = net.subscribe((snapshot: NetworkSnapshot) => {
         const ready = !(snapshot.mode === 'secure_only' && !snapshot.suspended && snapshot.applyError);
         if (!ready) {
-          this.navigationGeneration++;
+          this.navigation.navigationGeneration++;
           this.webNetworkReady = false;
-          this.hasError = true;
+          this.navigation.hasError = true;
           this.incomingControllerReady = false;
           this.incomingPageReady = false;
-          this.cancelProfileNavigation();
-          this.clearComposeSync();
-          if (this.posting) { this.markPostUnknown(); }
+          this.account.cancelProfileNavigation();
+          this.composer.networkBlocked();
           this.webImages?.close().catch((error: Error) => {
             hilog.error(DOMAIN, TAG, 'event=web_image_close_failed error=%{public}s', error.message);
           });
@@ -404,7 +328,7 @@ struct MainTabs {
         } else if (!this.webNetworkReady) {
           this.webNetworkReady = true;
           this.recoverMediaWeb(this.rawWeb, false);
-          this.composeController = new web_webview.WebviewController();
+          this.composer.resetController();
         }
         if (snapshot.generation !== this.networkGeneration) {
           this.networkPendingReload = true;
@@ -435,7 +359,7 @@ struct MainTabs {
       });
       this.applyBreakpoints();
       this.armFirstLoadTimeout();
-      this.armBadgeRefresh();
+      this.unread.armBadgeRefresh();
       try { await removeExpiredDownloads(shellContext.cacheDir); } catch (error) {
         hilog.warn(DOMAIN, TAG, 'event=download_cleanup_failed error=%{public}s', JSON.stringify(error));
         this.toast($r('app.string.operation_failed'));
@@ -443,8 +367,8 @@ struct MainTabs {
       const ctx: common.Context | undefined = this.getUIContext().getHostContext();
       if (ctx !== undefined) {
         const prefs: preferences.Preferences = await preferences.getPreferences(ctx, PREFS_NAME);
-        this.legacyDraft = await prefs.get(COMPOSE_DRAFT_KEY, '') as string;
-        this.notificationAsked = await prefs.get(NOTIFICATION_ASKED_KEY, false) as boolean;
+        await this.composer.initialize(prefs);
+        await this.unread.initialize(prefs);
         this.floatingBar = await prefs.get(FLOATING_BAR_KEY, true) as boolean;
         this.autoHideBar = await prefs.get(AUTO_HIDE_BAR_KEY, true) as boolean;
         this.desktopMode = await prefs.get(DESKTOP_MODE_KEY, false) as boolean;
@@ -473,8 +397,7 @@ struct MainTabs {
           ThemeColorMode.LIGHT : ThemeColorMode.SYSTEM;
         if (this.incomingControllerReady) { this.controller.setCustomUserAgent(this.userAgent()); }
         // 上次账号只预热头像，不用于资料跳转或发帖身份确认。
-        const cachedHandle = await prefs.get(OWN_HANDLE_KEY, '') as string;
-        if (this.ownHandle === '' && cachedHandle !== '') { this.restoreAvatar(cachedHandle, true); }
+        await this.account.initialize(prefs);
         this.syncChromeInsets();
       }
     } catch (err) {
@@ -486,15 +409,15 @@ struct MainTabs {
   }
 
   aboutToDisappear(): void {
-    this.navigationGeneration++;
-    this.cancelProfileNavigation();
+    this.navigation.navigationGeneration++;
+    this.account.cancelProfileNavigation();
     this.incomingControllerReady = false;
     this.incomingPageReady = false;
-    this.avatarAlive = false;
+    this.pageAlive = false;
     this.stopBackgroundWork();
-    this.clearComposeSync();
-    this.resetAvatar();
-    this.closeRetiredAvatarFiles();
+    this.composer.dispose();
+    this.unread.dispose();
+    this.account.dispose();
     this.webImages?.close().catch((err: Error) => {
       hilog.warn(DOMAIN, TAG, 'event=web_image_close_failed code=%{public}d', (err as BusinessError).code);
     });
@@ -509,24 +432,9 @@ struct MainTabs {
       clearTimeout(this.networkReloadTimer);
       this.networkReloadTimer = -1;
     }
-    this.stopPostCheck();
     if (this.firstLoadTimer !== -1) {
       clearTimeout(this.firstLoadTimer);
       this.firstLoadTimer = -1;
-    }
-    if (this.badgeTimer !== -1) {
-      clearInterval(this.badgeTimer);
-      this.badgeTimer = -1;
-    }
-    if (this.badgeRetryTimer !== -1) {
-      clearTimeout(this.badgeRetryTimer);
-      this.badgeRetryTimer = -1;
-    }
-    if (this.draftSaveTimer !== -1) {
-      clearTimeout(this.draftSaveTimer);
-      this.draftSaveTimer = -1;
-      // Leaving the app is a good moment to make sure the draft is on disk.
-      this.saveDraft();
     }
     if (this.wideListener !== undefined) {
       try {
@@ -542,18 +450,15 @@ struct MainTabs {
   // (the page kept running in the background), so re-read them here as well as
   // on the timer.
   onBackgroundChanged(): void {
+    this.account.setBackground(this.appBackground);
+    this.composer.setBackground(this.appBackground);
+    this.unread.setBackground(this.appBackground);
     if (this.appBackground) {
-      this.cancelProfileNavigation();
+      this.account.cancelProfileNavigation();
       this.stopBackgroundWork();
-      this.clearAvatarRetry();
-      this.clearComposeSync();
       this.saveWebSession();
-    } else if (this.avatarAlive) {
-      this.armBadgeRefresh();
-      this.badgeRetries = 0;
+    } else if (this.pageAlive) {
       this.schedulePageStateRead();
-      if (this.sheetOpen && !this.webComposer && !this.posting) { this.scheduleComposeSync(); }
-      if (this.posting && this.postUncertain) { this.checkPostResult(); }
       this.flushNetworkReload();
     }
     if (this.incomingControllerReady && !this.rawWeb) {
@@ -561,16 +466,12 @@ struct MainTabs {
         hilog.warn(DOMAIN, TAG, 'event=chrome_lifecycle_failed code=%{public}d', err.code);
       });
     }
-    if (this.appBackground && this.composeOwner !== '' && !this.posting && !this.webComposer) { this.saveDraft(); }
   }
 
   /** 只停止可恢复的界面轮询，正在进行的发布仍保留待确认标志。 */
   private stopBackgroundWork(): void {
-    if (this.badgeTimer !== -1) { clearInterval(this.badgeTimer); this.badgeTimer = -1; }
-    if (this.badgeRetryTimer !== -1) { clearTimeout(this.badgeRetryTimer); this.badgeRetryTimer = -1; }
+    this.unread.stop();
     if (this.pageStateTimer !== -1) { clearTimeout(this.pageStateTimer); this.pageStateTimer = -1; }
-    if (this.notificationTimer !== -1) { clearTimeout(this.notificationTimer); this.notificationTimer = -1; }
-    this.stopPostCheck();
   }
 
   /** 缩短登录 Cookie 等待周期落盘的窗口，避免突然退出时丢失尚未保存的会话。 */
@@ -586,7 +487,7 @@ struct MainTabs {
   }
 
   onPageShow(): void {
-    this.refreshBadges();
+    this.unread.refreshBadges();
     this.flushNetworkReload();
     this.onIncomingErrorChanged();
     this.onIncomingContentChanged();
@@ -604,15 +505,15 @@ struct MainTabs {
     const content = this.incomingContent;
     if (content.kind === '' || !this.incomingControllerReady || !this.incomingPageReady) { return; }
     this.incomingContent = { kind: '', value: '' };
-    if (this.modalBlocksNetworkReload() || this.fullScreen || this.openingCompose) {
+    if (this.modalBlocksNetworkReload() || this.fullScreen || this.composer.openingCompose) {
       this.toast($r('app.string.incoming_busy'));
       return;
     }
     if (content.kind === 'compose') {
-      this.openCompose(content.value);
+      this.composer.openCompose(content.value);
       return;
     }
-    this.loadWeb(content.value, false, true);
+    this.navigation.loadWeb(content.value, false, true);
   }
 
   // A page that never finishes loading must not leave the first-load spinner up
@@ -683,7 +584,7 @@ struct MainTabs {
   // Home tab, and only then let the system close the app (HarmonyOS UX
   // requirement — back must not drop the user out of a page they can leave).
   onBackPress(): boolean {
-    this.cancelProfileNavigation();
+    this.account.cancelProfileNavigation();
     if (this.imageViewerOpen) {
       if (this.cancelImageAnalyzer()) { return true; }
       if (!this.dismissImageDetails()) { this.imageViewerOpen = false; }
@@ -691,8 +592,8 @@ struct MainTabs {
     }
     if (this.networkOpen) { this.networkOpen = false; return true; }
     if (this.fullScreenHandler !== undefined) { this.fullScreenHandler.exitFullScreen(); return true; }
-    if (this.sheetOpen) {
-      this.closeCompose();
+    if (this.composer.sheetOpen) {
+      this.composer.closeCompose();
       return true;
     }
     if (this.settingsOpen) {
@@ -701,10 +602,10 @@ struct MainTabs {
       return true;
     }
     if (this.settingsWeb) {
-      if (this.hasError || this.currentUrl === this.settingsWebRoot || !this.controller.accessBackward()) {
+      if (this.navigation.hasError || this.navigation.currentUrl === this.settingsWebRoot || !this.controller.accessBackward()) {
         this.settingsWeb = false;
         this.settingsOpen = true;
-        this.hasError = false;
+        this.navigation.hasError = false;
         return true;
       }
       try {
@@ -716,7 +617,7 @@ struct MainTabs {
       }
       this.settingsWeb = false;
       this.settingsOpen = true;
-      this.hasError = false;
+      this.navigation.hasError = false;
       return true;
     }
     try {
@@ -748,296 +649,11 @@ struct MainTabs {
     return $r('app.string.tab_settings');
   }
 
-  private async saveOwnHandle(handle: string): Promise<void> {
-    try {
-      const ctx: common.Context | undefined = this.getUIContext().getHostContext();
-      if (ctx === undefined) {
-        return;
-      }
-      const prefs: preferences.Preferences = await preferences.getPreferences(ctx, PREFS_NAME);
-      await prefs.put(OWN_HANDLE_KEY, handle);
-      await prefs.flush();
-    } catch (err) {
-      hilog.warn(DOMAIN, TAG, 'own handle not persisted: %{public}s', JSON.stringify(err));
-    }
-  }
-
-  private async saveAvatar(handle: string, url: string): Promise<void> {
-    const generation: number = this.avatarGeneration;
-    try {
-      const ctx: common.Context | undefined = this.getUIContext().getHostContext();
-      if (ctx === undefined) {
-        return;
-      }
-      const prefs: preferences.Preferences = await preferences.getPreferences(ctx, PREFS_NAME);
-      if (!this.avatarAlive || generation !== this.avatarGeneration || this.avatarUrl !== url ||
-        this.ownHandle.toLowerCase() !== handle.toLowerCase()) { return; }
-      await prefs.put(AVATAR_KEY + ':' + handle.toLowerCase(), url);
-      await prefs.flush();
-    } catch (err) {
-      hilog.warn(DOMAIN, TAG, 'event=avatar_cache_write_failed code=%{public}d', (err as BusinessError).code);
-    }
-  }
-
-  private async restoreAvatar(handle: string, preview: boolean = false): Promise<void> {
-    const generation: number = this.avatarGeneration;
-    try {
-      const ctx: common.Context | undefined = this.getUIContext().getHostContext();
-      if (ctx === undefined) { return; }
-      const prefs: preferences.Preferences = await preferences.getPreferences(ctx, PREFS_NAME);
-      const url = await prefs.get(AVATAR_KEY + ':' + handle.toLowerCase(), '') as string;
-      if (this.avatarAlive && generation === this.avatarGeneration && !this.authenticationPage &&
-        (preview ? this.ownHandle === '' : this.ownHandle.toLowerCase() === handle.toLowerCase()) && this.avatarUrl === '' &&
-        /^https:\/\/(pbs|abs)\.twimg\.com\//i.test(url)) {
-        this.loadAvatar(url);
-      }
-    } catch (err) {
-      hilog.warn(DOMAIN, TAG, 'event=avatar_cache_read_failed code=%{public}d', (err as BusinessError).code);
-    }
-  }
-
-  /** 每个地址独占下载会话，复用真实图片下载器的 DoH 与回退策略。 */
-  private async loadAvatar(url: string, retry: boolean = false): Promise<void> {
-    if (!this.avatarAlive || this.rawWeb || this.authenticationPage || (!retry && this.avatarUrl === url)) { return; }
-    const generation: number = ++this.avatarGeneration;
-    const handle: string = this.ownHandle.toLowerCase();
-    const previous: MediaFiles | undefined = this.avatarFiles;
-    const wasDisplayed: boolean = this.avatarPath !== '';
-    const files: MediaFiles = new MediaFiles(this.webImages);
-    this.avatarFiles = files;
-    this.avatarUrl = url;
-    this.avatarPath = '';
-    this.avatarFailedUrl = '';
-    this.retireAvatarFiles(previous, wasDisplayed);
-    try {
-      const resolved = resolveMedia(url);
-      const address: MediaAddress = { id: 'avatar_' + generation.toString(), source: url,
-        candidates: resolved !== undefined ? resolved.candidates : [url] };
-      const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
-      const file: MediaFile = await files.load(address, context);
-      if (!this.avatarAlive || generation !== this.avatarGeneration || this.ownHandle.toLowerCase() !== handle ||
-        this.authenticationPage) { return; }
-      this.avatarPath = 'file://' + file.path;
-      if (this.avatarRetryTimer !== -1) { clearTimeout(this.avatarRetryTimer); }
-      this.avatarRetryTimer = -1;
-      if (handle !== '') { this.saveAvatar(handle, url); }
-      hilog.debug(DOMAIN, TAG, 'event=avatar_loaded');
-    } catch (err) {
-      if (!this.avatarAlive || generation !== this.avatarGeneration) { return; }
-      this.avatarFailedUrl = url;
-      this.avatarFiles = undefined;
-      this.retireAvatarFiles(files, false);
-      hilog.warn(DOMAIN, TAG, 'event=avatar_download_failed code=%{public}d', (err as BusinessError).code);
-      this.retryAvatarRead();
-    }
-  }
-
-  private resetAvatar(): void {
-    this.clearAvatarRetry();
-    this.avatarGeneration++;
-    this.avatarReadRequest++;
-    const files: MediaFiles | undefined = this.avatarFiles;
-    const wasDisplayed: boolean = this.avatarPath !== '';
-    this.avatarFiles = undefined;
-    this.avatarUrl = '';
-    this.avatarPath = '';
-    this.avatarFailedUrl = '';
-    this.retireAvatarFiles(files, wasDisplayed);
-  }
-
-  private avatarImageFailed(path: string): void {
-    if (!this.avatarAlive || path === '' || path !== this.avatarPath) { return; }
-    this.avatarFailedUrl = this.avatarUrl;
-    this.avatarPath = '';
-    const files: MediaFiles | undefined = this.avatarFiles;
-    this.avatarFiles = undefined;
-    this.retireAvatarFiles(files, true);
-    hilog.warn(DOMAIN, TAG, 'event=avatar_image_load_failed');
-    this.retryAvatarRead();
-  }
-
-  private closeAvatarFiles(files: MediaFiles): void {
-    files.close().catch((err: Error) => {
-      hilog.warn(DOMAIN, TAG, 'event=avatar_cleanup_failed code=%{public}d', (err as BusinessError).code);
-    });
-  }
-
-  private closeRetiredAvatarFiles(): void {
-    const retired: MediaFiles[] = this.retiredAvatarFiles;
-    this.retiredAvatarFiles = [];
-    this.avatarCleanupScheduled = false;
-    for (const files of retired) { this.closeAvatarFiles(files); }
-  }
-
-  /** 先撤下旧 Image，再在帧渲染结束后删除文件，避免异步解码仍读取旧路径。 */
-  private retireAvatarFiles(files: MediaFiles | undefined, wasDisplayed: boolean): void {
-    if (files === undefined) { return; }
-    if (!wasDisplayed || !this.avatarAlive) {
-      this.closeAvatarFiles(files);
-      return;
-    }
-    this.retiredAvatarFiles.push(files);
-    if (this.avatarCleanupScheduled) { return; }
-    this.avatarCleanupScheduled = true;
-    this.getUIContext().postFrameCallback(new AvatarCleanupFrame(() => this.closeRetiredAvatarFiles()));
-  }
-
   // WebviewController.runJavaScript answers with the evaluated result
   // JSON-encoded, so a JavaScript string arrives quoted. Every value the shell
   // reads back out of a page goes through here first.
   private static unquote(raw: string): string {
-    if (!raw) {
-      return '';
-    }
-    const first: string = raw.charAt(0);
-    if (first === '"' && raw.length >= 2) {
-      try {
-        return JSON.parse(raw) as string;
-      } catch (err) {
-        return raw.substring(1, raw.length - 1);
-      }
-    }
-    if (raw === 'undefined' || raw === 'null') {
-      return '';
-    }
-    return raw;
-  }
-
-  private static parseHandle(raw: string): string {
-    if (!raw) {
-      return '';
-    }
-    const slash: number = raw.indexOf('/');
-    if (slash < 0) {
-      return '';
-    }
-    let out: string = '';
-    for (let i: number = slash + 1; i < raw.length && out.length < 15; i++) {
-      const ch: string = raw.charAt(i);
-      if ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
-        (ch >= '0' && ch <= '9') || ch === '_') {
-        out += ch;
-      } else {
-        break;
-      }
-    }
-    // Case is kept: x.com treats handles case-insensitively but displays
-    // them as typed, and the shell mirrors the page in the title bar.
-    return out.length >= 1 ? out : '';
-  }
-
-  private async discoverOwnProfile(): Promise<void> {
-    if (this.rawWeb || this.discovering || this.sheetOpen) { return; }
-    const pageUrl = this.currentUrl;
-    const generation = this.profileNavigation;
-    try {
-      const raw = await this.controller.runJavaScript(OWN_HANDLE_SCRIPT);
-      if (!this.avatarAlive || this.currentUrl !== pageUrl || this.appBackground || generation !== this.profileNavigation) { return; }
-      const direct: string = MainTabs.parseHandle('/' + MainTabs.unquote(raw));
-      if (direct !== '') { this.acceptHandle(direct, false); }
-    } catch (error) {
-      hilog.warn(DOMAIN, TAG, 'event=account_read_failed code=%{public}d', (error as BusinessError).code);
-    }
-  }
-
-  private async closeWebDrawer(): Promise<void> {
-    if (this.incomingControllerReady) {
-      try {
-        await this.controller.runJavaScript('window.__otBootCancel&&window.__otBootCancel()');
-      } catch (error) {
-        hilog.warn(DOMAIN, TAG, 'event=account_read_cancel_failed code=%{public}d', (error as BusinessError).code);
-      }
-    }
-  }
-
-  /** 切换路由或生命周期后，旧资料读取不能再驱动导航。 */
-  private async cancelProfileNavigation(): Promise<void> {
-    this.profileNavigation++;
-    this.discovering = false;
-    await this.closeWebDrawer();
-  }
-
-  private acceptHandle(handle: string, navigate: boolean): void {
-    const changed: boolean = this.ownHandle.toLowerCase() !== handle.toLowerCase();
-    if (changed) {
-      this.accountName = '';
-      this.accountBio = '';
-      this.cancelProfileNavigation();
-      this.resetAvatar();
-      this.clearNetworkBadgeCounts();
-      this.unreadNotifications = 0;
-      this.unreadMessages = 0;
-      this.badgeShown = -1;
-    }
-    this.ownHandle = handle;
-    this.saveOwnHandle(handle);
-    if (changed) {
-      this.restoreAvatar(handle);
-      this.readAvatar();
-    }
-    this.finishDiscover(navigate);
-  }
-
-  // 无法确认本人入口时明确报错，避免误跳资料编辑页。
-  private finishDiscover(navigate: boolean): void {
-    if (!navigate) {
-      return;
-    }
-    if (this.ownHandle) {
-      this.loadWeb(profileUrl(this.ownHandle), false, true, true);
-      return;
-    }
-    this.toast($r('app.string.account_unconfirmed'));
-  }
-
-  /** 常规入口只触发网页路由；外部链接和故障恢复才允许建立新文档。直接模式复用 WebView 和会话直达目标网址。 */
-  private async loadWeb(url: string, keepProfile: boolean = false, allowDocumentLoad: boolean = false, direct: boolean = false): Promise<void> {
-    if (!this.webNetworkReady) { this.hasError = true; return; }
-    if (!keepProfile) { this.cancelProfileNavigation(); }
-    const generation = ++this.navigationGeneration;
-    const pageUrl = this.currentUrl;
-    if (direct) {
-      try {
-        this.hasError = false;
-        this.progress = 0;
-        this.controller.loadUrl(url);
-        return;
-      } catch (err) {
-        this.hasError = true;
-        hilog.error(DOMAIN, TAG, 'event=direct_navigation_failed error=%{public}s', JSON.stringify(err));
-        this.toast($r('app.string.operation_failed'));
-      }
-      return;
-    }
-    try {
-      const deadline = Date.now() + 3000;
-      while (generation === this.navigationGeneration && this.webNetworkReady) {
-        const result: string = MainTabs.unquote(await this.controller.runJavaScript(clickRouteScript(url)));
-        if (generation !== this.navigationGeneration || !this.webNetworkReady) { return; }
-        if (result === 'cancelled') { return; }
-        if (result === 'clicked' || result === 'same') { this.hasError = false; return; }
-        if (result !== 'pending' || Date.now() >= deadline) { break; }
-        await new Promise<void>((resolve) => { setTimeout(resolve, 100); });
-      }
-      if (generation !== this.navigationGeneration || !this.webNetworkReady) { return; }
-      await this.controller.runJavaScript('window.__otRouteCancel&&window.__otRouteCancel()');
-      hilog.warn(DOMAIN, TAG, 'event=page_route_unavailable');
-    } catch (err) {
-      hilog.warn(DOMAIN, TAG, 'event=page_route_script_failed error=%{public}s', JSON.stringify(err));
-    }
-    if (generation !== this.navigationGeneration || !this.webNetworkReady || this.currentUrl !== pageUrl) { return; }
-    if (allowDocumentLoad) {
-      try {
-        this.hasError = false;
-        this.progress = 0;
-        this.controller.loadUrl(url);
-        return;
-      } catch (err) {
-        this.hasError = true;
-        hilog.error(DOMAIN, TAG, 'event=document_navigation_failed error=%{public}s', JSON.stringify(err));
-      }
-    }
-    this.toast($r('app.string.operation_failed'));
+    return unquoteScriptResult(raw);
   }
 
   // A 2in1 window is a desktop, so it asks x.com for the desktop web app: a
@@ -1050,25 +666,23 @@ struct MainTabs {
   }
 
   private syncFromUrl(url: string): void {
-    if (this.discovering && url !== this.currentUrl && pathOf(url) !== '/home') { this.cancelProfileNavigation(); }
-    if (url !== this.currentUrl) { this.resetProfileLayout(); this.resetChromeScroll(); }
+    if (this.account.discovering && url !== this.navigation.currentUrl && pathOf(url) !== '/home') { this.account.cancelProfileNavigation(); }
+    if (url !== this.navigation.currentUrl) { this.resetProfileLayout(); this.resetChromeScroll(); }
     const idx: number = routeIndexForUrl(url);
     if (!this.settingsOpen && !this.settingsWeb && idx >= 0 && this.enabledTabs.includes(idx) && idx !== this.currentIndex) {
       this.currentIndex = idx;
     }
-    this.viewingHandle = profileHandleForUrl(url);
-    this.currentPath = pathOf(url);
-    this.currentUrl = url;
+    this.navigation.syncFromUrl(url);
   }
 
   /** 网页账号入口不修改会话；切换后重新确认身份和头像。 */
   private async openAccountSwitcher(): Promise<void> {
-    this.cancelProfileNavigation();
+    this.account.cancelProfileNavigation();
     try {
-      if (!this.isHomeRoot()) { await this.loadWeb(TWITTER_ROUTES[0]); }
-      const generation = this.navigationGeneration;
+      if (!this.isHomeRoot()) { await this.navigation.loadWeb(TWITTER_ROUTES[0]); }
+      const generation = this.navigation.navigationGeneration;
       const deadline = Date.now() + PROFILE_TIMEOUT_MS;
-      while (generation === this.navigationGeneration && this.avatarAlive && !this.appBackground) {
+      while (generation === this.navigation.navigationGeneration && this.pageAlive && !this.appBackground) {
         if (this.isHomeRoot()) {
           const result = MainTabs.unquote(await this.controller.runJavaScript(ACCOUNT_SWITCH_SCRIPT));
           if (result === 'opened') { return; }
@@ -1090,12 +704,12 @@ struct MainTabs {
     }
     const wasSettings = this.settingsOpen || this.settingsWeb;
     const previousIndex = this.currentIndex;
-    this.settingsReadGeneration++;
+    this.account.settingsReadGeneration++;
     this.settingsOpen = false;
     this.settingsWeb = false;
     this.currentIndex = index;
-    this.cancelProfileNavigation();
-    if (!wasSettings && index === previousIndex && isTabRootPath(this.currentPath)) {
+    this.account.cancelProfileNavigation();
+    if (!wasSettings && index === previousIndex && isTabRootPath(this.navigation.currentPath)) {
       // Tapping the active tab scrolls to top, like the stock app.
       try {
         this.controller.runJavaScript(scrollToTopScript());
@@ -1104,76 +718,39 @@ struct MainTabs {
       return;
     }
     this.tick();
-    this.loadWeb(index === 5 ? TWITTER_BASE + '/i/grok' : TWITTER_ROUTES[index]);
+    this.navigation.loadWeb(index === 5 ? TWITTER_BASE + '/i/grok' : TWITTER_ROUTES[index]);
   }
 
   /** 原生设置覆盖常驻网页，资料读取与用户离开共用代际取消。 */
   private openSettings(page: string = ''): void {
     if (!this.settingsOpen && !this.settingsWeb) {
       this.settingsOrigin = this.currentIndex;
-      this.settingsOriginUrl = this.currentUrl || TWITTER_ROUTES[0];
+      this.settingsOriginUrl = this.navigation.currentUrl || TWITTER_ROUTES[0];
     }
     this.currentIndex = 4;
     this.settingsPage = page;
     this.settingsOpen = true;
     this.settingsWeb = false;
     this.resetChromeScroll();
-    if (this.authenticationPage || !this.incomingPageReady) { this.accountError = true; }
+    if (this.authenticationPage || !this.incomingPageReady) { this.account.accountError = true; }
   }
 
   private leaveSettings(): void {
-    this.settingsReadGeneration++;
+    this.account.settingsReadGeneration++;
     this.settingsOpen = false;
     this.settingsWeb = false;
-    this.accountLoading = false;
+    this.account.accountLoading = false;
     this.currentIndex = this.settingsOrigin;
-    this.loadWeb(this.settingsOriginUrl);
+    this.navigation.loadWeb(this.settingsOriginUrl);
   }
 
   private openSettingsRoute(path: string): void {
-    this.settingsReadGeneration++;
+    this.account.settingsReadGeneration++;
     this.settingsOpen = false;
     this.settingsWeb = true;
-    this.accountLoading = false;
+    this.account.accountLoading = false;
     this.settingsWebRoot = TWITTER_BASE + path;
-    this.loadWeb(this.settingsWebRoot, false, true, true);
-  }
-
-  private async readSettingsAccount(): Promise<void> {
-    const generation = ++this.settingsReadGeneration;
-    this.accountLoading = true;
-    this.accountError = false;
-    try {
-      if (this.ownHandle === '') {
-        const handle = await this.confirmCurrentAccount();
-        await this.cancelProfileNavigation();
-        if (generation !== this.settingsReadGeneration || !this.settingsOpen) { return; }
-        if (handle !== '') {
-          this.acceptHandle(handle, false);
-        } else {
-          this.accountError = true;
-          return;
-        }
-      }
-      const handle = this.ownHandle;
-      if (handle !== '' && isSiteUrl(this.currentUrl) && pathOf(this.currentUrl).toLowerCase() === '/' + handle.toLowerCase()) {
-        const raw = MainTabs.unquote(await this.controller.runJavaScript(accountDetailsScript(handle)));
-        if (generation === this.settingsReadGeneration && raw !== '') {
-          const account = JSON.parse(raw) as AccountDetails;
-          if (account.handle.toLowerCase() === this.ownHandle.toLowerCase()) {
-            if (account.name) { this.accountName = account.name; }
-            if (account.bio) { this.accountBio = account.bio; }
-          }
-        }
-      }
-    } catch (error) {
-      if (generation === this.settingsReadGeneration) {
-        this.accountError = true;
-        hilog.error(DOMAIN, TAG, 'event=settings_account_failed error=%{public}s', JSON.stringify(error));
-      }
-    } finally {
-      if (generation === this.settingsReadGeneration) { this.accountLoading = false; }
-    }
+    this.navigation.loadWeb(this.settingsWebRoot, false, true, true);
   }
 
   private async saveClientSetting(key: string, value: preferences.ValueType): Promise<void> {
@@ -1187,7 +764,7 @@ struct MainTabs {
           ConfigurationConstant.ColorMode.COLOR_MODE_LIGHT : ConfigurationConstant.ColorMode.COLOR_MODE_NOT_SET);
         this.webColorMode = value === 'dark' ? ThemeColorMode.DARK : value === 'light' ? ThemeColorMode.LIGHT : ThemeColorMode.SYSTEM;
         if (this.incomingControllerReady) { await this.controller.runJavaScript(appearanceScript(this.themeMode)); }
-        if (this.composeReady) { await this.composeController.runJavaScript(appearanceScript(this.themeMode)); }
+        if (this.composer.composeReady) { await this.composer.composeController.runJavaScript(appearanceScript(this.themeMode)); }
       } else if (key === 'font_scale') {
         this.getUIContext().getHostContext()!.getApplicationContext().setFontSizeScale((value as number) / 100);
         this.fontScale = value as number;
@@ -1273,8 +850,8 @@ struct MainTabs {
 
   @Builder
   settingsContent() {
-    NativeSettingsPage({ page: $settingsPage, scroller: this.settingsScroller, handle: this.ownHandle, displayName: this.accountName,
-      bio: this.accountBio, avatar: this.avatarPath, accountError: this.accountError,
+    NativeSettingsPage({ page: $settingsPage, scroller: this.settingsScroller, handle: this.account.ownHandle, displayName: this.account.accountName,
+      bio: this.account.accountBio, avatar: this.account.avatarPath, accountError: this.account.accountError,
       themeMode: this.themeMode, materialLevel: this.materialLevel, fontScale: this.fontScale, floating: this.floatingBar, autoHide: this.autoHideBar,
       originalImages: this.originalImages, enabledTabs: this.enabledTabs, tabOrder: this.tabOrder, customUa: this.customUa,
       desktop: this.desktopMode, desktopLocked: deviceInfo.deviceType === '2in1', rawWeb: this.rawWeb,
@@ -1282,9 +859,9 @@ struct MainTabs {
       tabToggleGeneration: this.tabToggleGeneration,
       onScrollOffset: (offset: number) => { this.syncHeaderBlur(offset); },
       onProfile: () => { this.openOwnProfile(); },
-      onRetryAccount: () => { this.readSettingsAccount(); },
+      onRetryAccount: () => { this.account.readSettingsAccount(); },
       onSwitchAccount: () => {
-        this.settingsReadGeneration++;
+        this.account.settingsReadGeneration++;
         this.settingsOpen = false;
         this.settingsWeb = false;
         this.currentIndex = this.settingsOrigin;
@@ -1331,42 +908,42 @@ struct MainTabs {
   }
 
   private async openOwnProfile(): Promise<void> {
-    await this.cancelProfileNavigation();
+    await this.account.cancelProfileNavigation();
     const fromSettings = this.settingsOpen;
-    if (this.ownHandle) {
+    if (this.account.ownHandle) {
       if (fromSettings) {
         this.settingsWeb = true;
         this.settingsOpen = false;
-        this.settingsWebRoot = profileUrl(this.ownHandle);
+        this.settingsWebRoot = profileUrl(this.account.ownHandle);
       }
-      this.loadWeb(profileUrl(this.ownHandle), false, true, true);
+      this.navigation.loadWeb(profileUrl(this.account.ownHandle), false, true, true);
       return;
     }
-    const generation = this.profileNavigation;
-    this.discovering = true;
-    this.hasError = false;
+    const generation = this.account.profileNavigation;
+    this.account.discovering = true;
+    this.navigation.hasError = false;
     try {
       let handle = MainTabs.unquote(await this.controller.runJavaScript(OWN_HANDLE_SCRIPT));
-      if (generation !== this.profileNavigation || !this.avatarAlive || this.appBackground) {
+      if (generation !== this.account.profileNavigation || !this.pageAlive || this.appBackground) {
         return;
       }
       if (!/^[A-Za-z0-9_]{1,15}$/.test(handle)) {
-        if (!this.isHomeRoot()) { await this.loadWeb(TWITTER_ROUTES[0], true); }
+        if (!this.isHomeRoot()) { await this.navigation.loadWeb(TWITTER_ROUTES[0], true); }
         const deadline = Date.now() + PROFILE_TIMEOUT_MS;
         while (!this.isHomeRoot() && Date.now() < deadline) {
-          if (generation !== this.profileNavigation || !this.avatarAlive || this.appBackground) {
+          if (generation !== this.account.profileNavigation || !this.pageAlive || this.appBackground) {
             return;
           }
           await new Promise<void>((resolve) => { setTimeout(resolve, 100); });
         }
-        if (generation !== this.profileNavigation || !this.avatarAlive || this.appBackground) {
+        if (generation !== this.account.profileNavigation || !this.pageAlive || this.appBackground) {
           return;
         }
-        handle = this.isHomeRoot() ? await this.confirmCurrentAccount() : '';
+        handle = this.isHomeRoot() ? await this.account.confirmCurrentAccount() : '';
       }
-      if (generation !== this.profileNavigation || !this.avatarAlive || this.appBackground) { return; }
+      if (generation !== this.account.profileNavigation || !this.pageAlive || this.appBackground) { return; }
       if (handle === '') {
-        await this.closeWebDrawer();
+        await this.account.closeWebDrawer();
         this.toast($r('app.string.account_unconfirmed'));
         return;
       }
@@ -1375,20 +952,20 @@ struct MainTabs {
         this.settingsOpen = false;
         this.settingsWebRoot = profileUrl(handle);
       }
-      this.acceptHandle(handle, true);
+      this.account.acceptHandle(handle, true);
     } catch (error) {
       hilog.warn(DOMAIN, TAG, 'event=profile_navigation_failed error=%{public}s', JSON.stringify(error));
-      if (generation === this.profileNavigation) {
-        await this.closeWebDrawer();
+      if (generation === this.account.profileNavigation) {
+        await this.account.closeWebDrawer();
         this.toast($r('app.string.account_unconfirmed'));
       }
     } finally {
-      if (generation === this.profileNavigation) { this.discovering = false; }
+      if (generation === this.account.profileNavigation) { this.account.discovering = false; }
     }
   }
 
   private titleMain(): string {
-    if (this.viewingHandle !== '') {
+    if (this.navigation.viewingHandle !== '') {
       if (this.profileName !== '') { return this.profileName; }
       // The stock app titles a profile with the display name and puts the
       // handle underneath. x.com titles the page "Abhi (@Abhi_Flex) / X".
@@ -1398,7 +975,7 @@ struct MainTabs {
       }
       return '@' + this.profileHandle();
     }
-    if (isTabRootPath(this.currentPath)) {
+    if (isTabRootPath(this.navigation.currentPath)) {
       return '';
     }
     return this.pageTitle;
@@ -1409,7 +986,7 @@ struct MainTabs {
   private profileHandle(): string {
     if (this.measuredHandle !== '') { return this.measuredHandle; }
     const fromTitle: string = MainTabs.handleInTitle(this.pageTitle);
-    return fromTitle !== '' ? fromTitle : this.viewingHandle;
+    return fromTitle !== '' ? fromTitle : this.navigation.viewingHandle;
   }
 
   private static nameInTitle(title: string): string {
@@ -1452,25 +1029,25 @@ struct MainTabs {
   // Second line of the header: a profile shows its handle, a post shows what
   // kind of page it is. Tab roots and everything else show nothing — no URLs.
   private subtitleMain(): string {
-    if (isPostDetailUrl(this.currentUrl)) { return ''; }
-    if (this.viewingHandle !== '') {
+    if (isPostDetailUrl(this.navigation.currentUrl)) { return ''; }
+    if (this.navigation.viewingHandle !== '') {
       return '@' + this.profileHandle();
     }
-    if (isTabRootPath(this.currentPath)) {
+    if (isTabRootPath(this.navigation.currentPath)) {
       return '';
     }
-    const handle: string = profileHandleForUrl(this.currentUrl);
+    const handle: string = profileHandleForUrl(this.navigation.currentUrl);
     if (handle !== '') {
       return '@' + handle;
     }
-    if (this.currentPath.indexOf('/status/') >= 0) {
+    if (this.navigation.currentPath.indexOf('/status/') >= 0) {
       return this.localized($r('app.string.post'));
     }
     return '';
   }
 
   private reloadCurrent(): void {
-    if (this.hasError || !this.webNetworkReady) {
+    if (this.navigation.hasError || !this.webNetworkReady) {
       const session = this.webSession;
       NetworkConfig.getInstance().refresh();
       // 应用成功的订阅回调可能已重建页面，不能再刷新尚未绑定的新控制器。
@@ -1479,16 +1056,14 @@ struct MainTabs {
       return;
     }
     // A retry replaces the error surface with the normal progress UI.
-    this.hasError = false;
-    this.avatarReadRequest++;
-    this.clearAvatarRetry();
-    if (this.avatarFailedUrl !== '' && this.avatarUrl !== '') { this.loadAvatar(this.avatarUrl, true); }
-    this.progress = 0;
+    this.navigation.hasError = false;
+    this.account.retryFailedAvatar();
+    this.navigation.progress = 0;
     this.refreshing = true;
     try {
       this.controller.refresh();
     } catch (err) {
-      this.hasError = true;
+      this.navigation.hasError = true;
       this.refreshing = false;
       hilog.error(DOMAIN, TAG, 'event=refresh_failed error=%{public}s', JSON.stringify(err));
     }
@@ -1496,11 +1071,13 @@ struct MainTabs {
 
   /** 重建所属 Web 隔离无 GUID 的旧下载；保留共享登录会话和当前站内地址。 */
   private recoverMediaWeb(showWeb: boolean, notify: boolean = true): void {
-    this.navigationGeneration++;
-    this.cancelProfileNavigation();
+    this.webSession++;
+    this.navigation.navigationGeneration++;
+    this.account.cancelProfileNavigation();
     this.imageViewerOpen = false;
     this.rawWeb = showWeb;
-    this.webSource = (this.hasError ? this.failedWebUrl : '') || this.currentUrl || this.webSource;
+    this.webSource = (this.navigation.hasError ? this.failedWebUrl : '') || this.navigation.currentUrl || this.webSource;
+    this.loadingWebUrl = this.webSource;
     this.webImages?.close().catch((error: Error) => {
       hilog.error(DOMAIN, TAG, 'event=web_image_close_failed error=%{public}s', error.message);
       this.toast($r('app.string.operation_failed'));
@@ -1510,9 +1087,8 @@ struct MainTabs {
     this.incomingPageReady = false;
     this.webModalOpen = false;
     this.controller = new web_webview.WebviewController();
-    this.hasError = false;
-    this.progress = 0;
-    this.webSession++;
+    this.navigation.hasError = false;
+    this.navigation.progress = 0;
     if (notify && !showWeb) { this.toast($r('app.string.media_reopen')); }
   }
 
@@ -1520,18 +1096,18 @@ struct MainTabs {
   private showsNativeNavigation(): boolean {
     if (this.settingsOpen || this.imageViewerOpen) { return true; }
     return !this.rawWeb && !this.fullScreen && !this.authenticationPage &&
-      usesNativeNavigation(this.currentUrl);
+      usesNativeNavigation(this.navigation.currentUrl);
   }
 
   /** 私信使用固定视口和底部输入框，保留原生栏占位而不覆盖网页。 */
   private overlaysWeb(): boolean {
-    return this.showsNativeNavigation() && (isPostDetailUrl(this.currentUrl) || routeIndexForUrl(this.currentUrl) !== 3);
+    return this.showsNativeNavigation() && (isPostDetailUrl(this.navigation.currentUrl) || routeIndexForUrl(this.navigation.currentUrl) !== 3);
   }
 
   private bottomChromeHeight(): number {
     if (this.imageViewerOpen) { return this.imageChromeVisible && !this.imageDragging ? FLOATING_BAR_HEIGHT + this.bottomInset : 0; }
     if (this.settingsOpen) { return this.isWide ? 0 : (this.floatingBar ? FLOATING_BAR_HEIGHT : BAR_HEIGHT) + this.bottomInset; }
-    return this.webModalOpen || !this.showsNativeNavigation() || isSecondaryUrl(this.currentUrl) || (this.isWide && !isPostDetailUrl(this.currentUrl)) ? 0 :
+    return this.webModalOpen || !this.showsNativeNavigation() || isSecondaryUrl(this.navigation.currentUrl) || (this.isWide && !isPostDetailUrl(this.navigation.currentUrl)) ? 0 :
       (this.floatingBar ? FLOATING_BAR_HEIGHT : BAR_HEIGHT) + this.bottomInset;
   }
 
@@ -1565,14 +1141,14 @@ struct MainTabs {
   private topChromeHeight(): number {
     if (this.imageViewerOpen) { return 0; }
     if (this.settingsOpen || this.settingsWeb) { return HEADER_HEIGHT; }
-    if (this.hasError) { return HEADER_HEIGHT; }
-    return this.showsNativeNavigation() && usesNativeHeader(this.currentUrl) ? HEADER_HEIGHT : 0;
+    if (this.navigation.hasError) { return HEADER_HEIGHT; }
+    return this.showsNativeNavigation() && usesNativeHeader(this.navigation.currentUrl) ? HEADER_HEIGHT : 0;
   }
 
   /** 网页媒体查看器固定使用黑色画布，系统栏需随页面而非系统主题配色。 */
   private isMediaViewer(): boolean {
-    return isSiteUrl(this.currentUrl) &&
-      /^\/[a-z0-9_]{1,15}\/status\/\d+\/(mediaviewer|(?:video|photo)\/[1-4])$/.test(this.currentPath);
+    return isSiteUrl(this.navigation.currentUrl) &&
+      /^\/[a-z0-9_]{1,15}\/status\/\d+\/(mediaviewer|(?:video|photo)\/[1-4])$/.test(this.navigation.currentPath);
   }
 
   private resetHeaderBlur(): void {
@@ -1604,15 +1180,15 @@ struct MainTabs {
       hilog.error(DOMAIN, TAG, 'event=profile_layout_invalid error=%{public}s', String(error));
       return;
     }
-    if (!layout || typeof layout.ready !== 'boolean' || !this.avatarAlive || this.appBackground || this.rawWeb ||
-      this.settingsOpen || this.imageViewerOpen || this.viewingHandle === '' ||
-      layout.url !== this.currentUrl || layout.url !== this.controller.getUrl() ||
+    if (!layout || typeof layout.ready !== 'boolean' || !this.pageAlive || this.appBackground || this.rawWeb ||
+      this.settingsOpen || this.imageViewerOpen || this.navigation.viewingHandle === '' ||
+      layout.url !== this.navigation.currentUrl || layout.url !== this.controller.getUrl() ||
       layout.viewWidth !== this.webWidth) { return; }
     if (!layout.ready) { this.resetProfileLayout(); return; }
     if (typeof layout.hasBanner !== 'boolean' || !(layout.width > 0) || !Number.isFinite(layout.width) || !Number.isFinite(layout.scrollY) ||
       !Number.isFinite(layout.bannerBottom) || !Number.isFinite(layout.identityBottom) ||
       layout.bannerBottom <= 0 || layout.identityBottom <= 0 || typeof layout.name !== 'string' ||
-      typeof layout.handle !== 'string' || layout.handle.toLowerCase() !== this.viewingHandle.toLowerCase()) { return; }
+      typeof layout.handle !== 'string' || layout.handle.toLowerCase() !== this.navigation.viewingHandle.toLowerCase()) { return; }
     this.profileLayout = layout;
     this.profileHasBanner = layout.hasBanner;
     this.profileName = layout.name;
@@ -1622,14 +1198,14 @@ struct MainTabs {
   }
 
   private profileBannerButtons(): boolean {
-    return !this.settingsOpen && !this.imageViewerOpen && this.viewingHandle !== '' &&
+    return !this.settingsOpen && !this.imageViewerOpen && this.navigation.viewingHandle !== '' &&
       this.profileHasBanner && this.profileBlurProgress < 0.5;
   }
 
   /** 把网页滚动位置镜像给 HDS，顶栏在顶部保持全透明，随滚动逐渐模糊。 */
   private syncHeaderBlur(yOffset: number): void {
     let position: number = yOffset;
-    if (!this.settingsOpen && this.viewingHandle !== '') {
+    if (!this.settingsOpen && this.navigation.viewingHandle !== '') {
       const layout = this.profileLayout;
       if (layout === undefined) { return; }
       const scale: number = this.webWidth / layout.width;
@@ -1713,7 +1289,7 @@ struct MainTabs {
     this.lastScrollY = y;
     this.lastWebScrollTime = now;
     this.syncHeaderBlur(y);
-    if (!this.overlaysWeb() || isPostDetailUrl(this.currentUrl) || !this.autoHideBar || this.isWide || y < 48) {
+    if (!this.overlaysWeb() || isPostDetailUrl(this.navigation.currentUrl) || !this.autoHideBar || this.isWide || y < 48) {
       this.setBarsCollapsed(false);
       this.scrollDistance = 0;
       this.webCollapseInertia = false;
@@ -1737,8 +1313,8 @@ struct MainTabs {
   }
 
   private syncChromeInsets(): void {
-    if (this.rawWeb || !isSiteUrl(this.currentUrl) || this.webWidth <= 0) { return; }
-    if (this.viewingHandle !== '') { this.syncHeaderBlur(this.lastScrollY); }
+    if (this.rawWeb || !isSiteUrl(this.navigation.currentUrl) || this.webWidth <= 0) { return; }
+    if (this.navigation.viewingHandle !== '') { this.syncHeaderBlur(this.lastScrollY); }
     this.controller.runJavaScript(chromeInsetsScript(
       this.overlayTopInset(),
       this.overlaysWeb() ? this.bottomChromeHeight() : 0, this.webWidth
@@ -1750,7 +1326,7 @@ struct MainTabs {
 
   private overlayTopInset(): number {
     if (!this.overlaysWeb() || this.topChromeHeight() === 0) { return 0; }
-    if (this.viewingHandle !== '') { return 0; }
+    if (this.navigation.viewingHandle !== '') { return 0; }
     // 首页滚动内容紧接下划线底缘，保留帖子自身的内边距，不累计标题栏的空白下半区。
     const height: number = this.isHomeRoot()
       ? Math.min(HEADER_HEIGHT, (HEADER_HEIGHT + this.homeTabsHeight) / 2 - HEADER_CONTENT_LIFT)
@@ -1783,8 +1359,8 @@ struct MainTabs {
   }
 
   private settingsPillVisible(): boolean {
-    if (this.fullScreen || this.imageViewerOpen || this.sheetOpen || this.networkOpen ||
-      this.settingsOpen || this.discovering || this.isMediaViewer()) {
+    if (this.navigation.hasError || this.fullScreen || this.imageViewerOpen || this.composer.sheetOpen || this.networkOpen ||
+      this.settingsOpen || this.account.discovering || this.isMediaViewer()) {
       return false;
     }
     if (this.rawWeb) { return true; }
@@ -1792,19 +1368,19 @@ struct MainTabs {
     if (this.showsNativeNavigation()) {
       return false;
     }
-    // 首屏加载与错误页没有其他设置入口。
-    if (!this.firstLoadDone || this.hasError) {
+    // 首屏尚未呈现网页入口时保留设置胶囊。
+    if (!this.firstLoadDone) {
       return true;
     }
     // 已加载的普通网页（含账号信息页）保留网页自己的入口。
-    return isSiteUrl(this.currentUrl) &&
-      (this.currentPath === '/' || this.currentPath === '/login' || this.currentPath === '/signup' ||
-        this.currentPath === '/i/flow/login' || this.currentPath === '/i/flow/signup');
+    return isSiteUrl(this.navigation.currentUrl) &&
+      (this.navigation.currentPath === '/' || this.navigation.currentPath === '/login' || this.navigation.currentPath === '/signup' ||
+        this.navigation.currentPath === '/i/flow/login' || this.navigation.currentPath === '/i/flow/signup');
   }
 
   private openNetworkSettings(): void {
-    if (this.imageViewerOpen || this.sheetOpen || this.fullScreen ||
-      this.discovering) {
+    if (this.imageViewerOpen || this.composer.sheetOpen || this.fullScreen ||
+      this.account.discovering) {
       return;
     }
     this.networkOpen = true;
@@ -1817,8 +1393,8 @@ struct MainTabs {
   }
 
   private modalBlocksNetworkReload(): boolean {
-    return this.webModalOpen || this.imageViewerOpen || this.sheetOpen || this.networkOpen ||
-      this.discovering;
+    return this.webModalOpen || this.imageViewerOpen || this.composer.sheetOpen || this.networkOpen ||
+      this.account.discovering;
   }
 
   /** DoH changes apply to new resolutions; reload once after the panel closes. */
@@ -1852,8 +1428,8 @@ struct MainTabs {
       }
       this.armFirstLoadTimeout();
     }
-    if (this.currentUrl.length === 0) {
-      this.loadWeb(TWITTER_ROUTES[0], false, true);
+    if (this.navigation.currentUrl.length === 0) {
+      this.navigation.loadWeb(TWITTER_ROUTES[0], false, true);
     } else {
       this.reloadCurrent();
     }
@@ -1930,170 +1506,6 @@ struct MainTabs {
   // navigation has not hydrated), so the previous value stands and the read is
   // retried. Moving between tabs used to wipe the badges because a mid-reload
   // read came back empty and was taken at face value.
-  private refreshBadges(): void {
-    if (this.rawWeb || this.appBackground || !this.avatarAlive) { return; }
-    const owner = this.ownHandle;
-    const pageUrl = this.currentUrl;
-    try {
-      this.controller.runJavaScript(UNREAD_COUNTS_SCRIPT).then((raw: string) => {
-        if (this.appBackground || !this.avatarAlive || this.ownHandle !== owner || this.currentUrl !== pageUrl) { return; }
-        this.applyBadgeCounts(MainTabs.unquote(raw));
-      }, (err: BusinessError) => {
-        hilog.debug(DOMAIN, TAG, 'badge read failed: %{public}d %{public}s', err.code, err.message);
-        this.retryBadgeRead();
-      });
-    } catch (err) {
-      this.retryBadgeRead();
-    }
-  }
-
-  /** 账号变化后忽略前一会话仍在途的计数响应。 */
-  private clearNetworkBadgeCounts(): void {
-    this.controller.runJavaScript('window.__otBadgeEpoch=(window.__otBadgeEpoch||0)+1;window.__otBadgeCounts=null;')
-      .catch((err: BusinessError) => {
-        hilog.warn(DOMAIN, TAG, 'event=badge_reset_failed code=%{public}d', err.code);
-      });
-  }
-
-  private applyBadgeCounts(counts: string): void {
-    const cut: number = counts.indexOf('/');
-    if (cut <= 0) {
-      this.retryBadgeRead();
-      return;
-    }
-    const notifications: number = Number.parseInt(counts.substring(0, cut), 10);
-    const messages: number = Number.parseInt(counts.substring(cut + 1), 10);
-    if (Number.isNaN(notifications) || Number.isNaN(messages)) {
-      this.retryBadgeRead();
-      return;
-    }
-    if (notifications >= 0) {
-      this.unreadNotifications = notifications;
-    }
-    if (messages >= 0) {
-      this.unreadMessages = messages;
-    }
-    if (notifications < 0 || messages < 0) {
-      this.retryBadgeRead();
-    } else {
-      this.badgeRetries = 0;
-    }
-    this.syncLauncherBadge();
-  }
-
-  // Ask again shortly — bounded, and only while the page still owes an answer.
-  private retryBadgeRead(): void {
-    if (this.appBackground || !this.avatarAlive || this.badgeRetryTimer !== -1 || this.badgeRetries >= BADGE_RETRY_LIMIT) {
-      return;
-    }
-    this.badgeRetries++;
-    this.badgeRetryTimer = setTimeout(() => {
-      this.badgeRetryTimer = -1;
-      this.refreshBadges();
-    }, BADGE_RETRY_MS);
-  }
-
-  // Keep the launcher icon's own badge in step with what the tab bar shows, so
-  // the count is visible without opening the app (HarmonyOS draws the badge on
-  // the desktop icon or the folder the icon sits in).
-  private async syncLauncherBadge(): Promise<void> {
-    const total: number = this.unreadNotifications + this.unreadMessages;
-    const target = this.ownHandle + ':' + total;
-    if (target !== this.badgeSyncTarget) { this.badgeSyncTarget = target; this.badgeSyncFailures = 0; }
-    if (this.badgeSyncFailures >= BADGE_RETRY_LIMIT) { return; }
-    if (this.badgeSyncing || total === this.badgeShown) {
-      return;
-    }
-    if (total > 0 && !this.notificationsAllowed()) {
-      // HarmonyOS treats the app-icon badge as a notification surface — its own
-      // permission dialog lists "角标 / badge" among the reminder modes — so
-      // nothing lands on the icon until the account allows notifications.
-      this.askForNotificationsOnce();
-      return;
-    }
-    const owner = this.ownHandle;
-    this.badgeSyncing = true;
-    hilog.info(DOMAIN, TAG, 'launcher badge -> %{public}d', total);
-    try {
-      await notificationManager.setBadgeNumber(total);
-      if (owner === this.ownHandle) { this.badgeShown = total; }
-      this.badgeSyncFailures = 0;
-      hilog.info(DOMAIN, TAG, 'event=launcher_badge_applied total=%{public}d', total);
-    } catch (err) {
-      hilog.warn(DOMAIN, TAG, 'event=launcher_badge_failed error=%{public}s', JSON.stringify(err));
-      this.badgeSyncFailures++;
-      if (this.badgeSyncFailures < BADGE_RETRY_LIMIT) { this.retryBadgeRead(); }
-    } finally {
-      this.badgeSyncing = false;
-      if (owner !== this.ownHandle || total !== this.unreadNotifications + this.unreadMessages) { this.syncLauncherBadge(); }
-    }
-  }
-
-  private notificationsAllowed(): boolean {
-    try {
-      return notificationManager.isNotificationEnabledSync();
-    } catch (err) {
-      return false;
-    }
-  }
-
-  // Asked once, in context — when there is finally something to badge — and
-  // never again after a decline. The tab bar badges do not depend on it, so
-  // saying no only costs the launcher icon.
-  private askForNotificationsOnce(): void {
-    if (this.notificationAsked) {
-      return;
-    }
-    this.notificationAsked = true;
-    this.saveNotificationAsked();
-    this.retryLauncherBadgeWhenAllowed(0);
-    const host: common.Context | undefined = this.getUIContext().getHostContext();
-    if (host === undefined) {
-      return;
-    }
-    try {
-      notificationManager.requestEnableNotification(host as common.UIAbilityContext)
-        .then(() => {
-          hilog.info(DOMAIN, TAG, '%{public}s', 'notifications allowed for the icon badge');
-          this.badgeShown = -1;
-          this.syncLauncherBadge();
-        })
-        .catch((err: BusinessError) => {
-          hilog.info(DOMAIN, TAG, 'notifications declined (%{public}d): icon badge stays off', err.code);
-        });
-    } catch (err) {
-      hilog.warn(DOMAIN, TAG, 'notification request failed: %{public}s', JSON.stringify(err));
-    }
-  }
-
-  // The user may allow notifications in Settings instead of in our dialog. Keep
-  // checking for a while so the icon picks the count up without a relaunch.
-  private retryLauncherBadgeWhenAllowed(attempt: number): void {
-    if (this.appBackground || !this.avatarAlive || attempt >= NOTIFICATION_POLL_LIMIT) {
-      return;
-    }
-    this.notificationTimer = setTimeout(() => {
-      this.notificationTimer = -1;
-      if (this.notificationsAllowed()) {
-        this.badgeShown = -1;
-        this.syncLauncherBadge();
-        return;
-      }
-      this.retryLauncherBadgeWhenAllowed(attempt + 1);
-    }, NOTIFICATION_POLL_MS);
-  }
-
-  private armBadgeRefresh(): void {
-    if (this.appBackground) { return; }
-    if (this.badgeTimer !== -1) {
-      clearInterval(this.badgeTimer);
-    }
-    this.badgeTimer = setInterval(() => {
-      this.badgeRetries = 0;
-      this.refreshBadges();
-    }, BADGE_REFRESH_MS);
-  }
-
   private static stripSiteSuffix(raw: string): string {
     let title: string = MainTabs.unquote(raw);
     const suffix: string = ' / X';
@@ -2114,31 +1526,21 @@ struct MainTabs {
   // x.com's own header is removed on every page, so the shell takes the page
   // name from the document title instead (e.g. "Abhi (@Abhi_Flex) / X").
   private readPageState(): void {
-    const pageUrl = this.currentUrl;
+    const pageUrl = this.navigation.currentUrl;
     try {
       this.controller.runJavaScript('Boolean(document.querySelector(\'input[autocomplete="username"],input[autocomplete="current-password"],input[autocomplete="one-time-code"]\'))')
         .then((raw: string) => {
-          if (!this.avatarAlive || this.currentUrl !== pageUrl || this.appBackground) { return; }
+          if (!this.pageAlive || this.navigation.currentUrl !== pageUrl || this.appBackground) { return; }
           this.authenticationPage = raw === 'true';
           if (this.authenticationPage) {
-            this.clearNetworkBadgeCounts();
-            this.ownHandle = '';
-            this.saveOwnHandle('');
-            this.settingsReadGeneration++;
-            this.profileNavigation++;
-            this.accountName = '';
-            this.accountBio = '';
-            this.accountLoading = false;
-            this.accountError = true;
-            this.resetAvatar();
-            this.unreadNotifications = 0;
-            this.unreadMessages = 0;
-          } else { this.discoverOwnProfile(); }
+            this.unread.resetAccount(false);
+            this.account.authenticationRequired();
+          } else { this.account.discoverOwnProfile(); }
         }).catch((err: Error) => {
           hilog.warn(DOMAIN, TAG, 'event=auth_page_read_failed error=%{public}s', err.message);
         });
       this.controller.runJavaScript('document.title').then((raw: string) => {
-        if (!this.avatarAlive || this.currentUrl !== pageUrl || this.appBackground) { return; }
+        if (!this.pageAlive || this.navigation.currentUrl !== pageUrl || this.appBackground) { return; }
         const title: string = MainTabs.unquote(raw);
         this.pageTitle = MainTabs.stripSiteSuffix(title);
       }).catch((err: BusinessError) => { hilog.warn(DOMAIN, TAG, 'event=page_title_failed code=%{public}d', err.code); });
@@ -2146,23 +1548,9 @@ struct MainTabs {
       hilog.warn(DOMAIN, TAG, 'event=page_state_failed code=%{public}d', (err as BusinessError).code);
     }
     this.readHomeTab();
-    this.readAvatar();
+    this.account.readAvatar();
     if (this.isOwnProfile()) {
-      const handle = this.ownHandle;
-      const generation = this.settingsReadGeneration;
-      this.controller.runJavaScript(accountDetailsScript(handle)).then((raw: string) => {
-        if (!this.avatarAlive || this.ownHandle.toLowerCase() !== handle.toLowerCase() || generation !== this.settingsReadGeneration) { return; }
-        const clean = MainTabs.unquote(raw);
-        if (clean !== '') {
-          try {
-            const account = JSON.parse(clean) as AccountDetails;
-            if (account.handle.toLowerCase() === this.ownHandle.toLowerCase()) {
-              if (account.name) { this.accountName = account.name; }
-              if (account.bio) { this.accountBio = account.bio; }
-            }
-          } catch (err) {}
-        }
-      }).catch((_err: BusinessError) => {});
+      this.account.readProfileDetails();
     }
     try {
       this.canGoBack = this.controller.accessBackward();
@@ -2174,10 +1562,10 @@ struct MainTabs {
   // Keep the native Home switcher in step with whatever the page selected last
   // (the row is hidden, so this is the only place the state can come from).
   private readHomeTab(): void {
-    const pageUrl = this.currentUrl;
+    const pageUrl = this.navigation.currentUrl;
     try {
       this.controller.runJavaScript(HOME_TAB_SCRIPT).then((raw: string) => {
-        if (!this.avatarAlive || this.currentUrl !== pageUrl || this.appBackground) { return; }
+        if (!this.pageAlive || this.navigation.currentUrl !== pageUrl || this.appBackground) { return; }
         const index: number = Number.parseInt(MainTabs.unquote(raw), 10);
         if (!Number.isNaN(index) && index >= 0) {
           this.homeTabIndex = index;
@@ -2188,75 +1576,16 @@ struct MainTabs {
     }
   }
 
-  // 首页即可读取账号控件；资料页仅使用已确认本人的头像链接作为补充。
-  private readAvatar(retryFailed: boolean = false): void {
-    if (!this.avatarAlive || this.rawWeb || this.authenticationPage) { return; }
-    const handle: string = this.ownHandle;
-    const pageUrl: string = this.currentUrl;
-    const request: number = ++this.avatarReadRequest;
-    try {
-      this.controller.runJavaScript(accountAvatarScript(handle)).then((raw: string) => {
-        if (!this.avatarAlive || request !== this.avatarReadRequest || this.authenticationPage ||
-          this.rawWeb || this.currentUrl !== pageUrl || this.ownHandle.toLowerCase() !== handle.toLowerCase()) { return; }
-        const url: string = MainTabs.unquote(raw);
-        if (/^https:\/\/(pbs|abs)\.twimg\.com\//i.test(url)) {
-          const failed: boolean = this.avatarFailedUrl === url;
-          if (url !== this.avatarUrl || (failed && retryFailed)) {
-            hilog.info(DOMAIN, TAG, 'event=avatar_url_matched retry=%{public}s', String(failed));
-            this.loadAvatar(url, failed);
-          } else if (failed) {
-            this.retryAvatarRead();
-          }
-        } else if (this.avatarPath === '') {
-          hilog.info(DOMAIN, TAG, 'event=avatar_read_empty tab=%{public}d hasHandle=%{public}s attempt=%{public}d',
-            this.currentIndex, String(handle !== ''), this.avatarRetries);
-          if (this.avatarRetries === 0) {
-            this.controller.runJavaScript(accountAvatarDiagScript()).then((diagnostics: string) => {
-              hilog.info(DOMAIN, TAG, 'event=avatar_dom_diagnostics data=%{public}s', MainTabs.unquote(diagnostics));
-            }).catch((err: BusinessError) => {
-              hilog.warn(DOMAIN, TAG, 'event=avatar_diagnostics_failed code=%{public}d', err.code);
-            });
-          }
-          this.retryAvatarRead();
-        }
-      }).catch((err: Error) => {
-        hilog.debug(DOMAIN, TAG, 'event=avatar_read_failed code=%{public}d', (err as BusinessError).code);
-        this.retryAvatarRead();
-      });
-    } catch (err) {
-      hilog.debug(DOMAIN, TAG, 'event=avatar_read_failed code=%{public}d', (err as BusinessError).code);
-      this.retryAvatarRead();
-    }
-  }
-
-  /** 水合和下载失败共用有限重试，避免一次失败长期停在占位头像。 */
-  private retryAvatarRead(): void {
-    if (!this.avatarAlive || this.appBackground || this.rawWeb || this.authenticationPage || this.avatarPath !== '' ||
-      this.avatarRetryTimer !== -1 || this.avatarRetries >= AVATAR_RETRY_LIMIT) { return; }
-    this.avatarRetries++;
-    this.avatarRetryTimer = setTimeout(() => {
-      this.avatarRetryTimer = -1;
-      this.readAvatar(true);
-    }, AVATAR_RETRY_MS);
-  }
-
-  private clearAvatarRetry(): void {
-    if (this.avatarRetryTimer !== -1) { clearTimeout(this.avatarRetryTimer); }
-    this.avatarRetryTimer = -1;
-    this.avatarRetries = 0;
-  }
-
   private schedulePageStateRead(): void {
     if (this.pageStateTimer !== -1) { clearTimeout(this.pageStateTimer); }
-    if (this.rawWeb || this.appBackground || !this.avatarAlive) { return; }
+    if (this.rawWeb || this.appBackground || !this.pageAlive) { return; }
     this.pageStateTimer = setTimeout(() => {
       this.pageStateTimer = -1;
-      if (this.rawWeb || this.appBackground || !this.avatarAlive) { return; }
+      if (this.rawWeb || this.appBackground || !this.pageAlive) { return; }
       this.readPageState();
-      this.refreshBadges();
+      this.unread.refreshBadges();
     }, PAGE_STATE_DELAY_MS);
   }
-
 
   private goBack(): void {
     this.onBackPress();
@@ -2377,240 +1706,6 @@ struct MainTabs {
   }
 
   /** 账号必须由当前网页确认，缓存不能决定草稿归属。 */
-  private async confirmCurrentAccount(): Promise<string> {
-    const pageUrl = this.currentUrl;
-    const generation = this.profileNavigation;
-    const direct = MainTabs.unquote(await this.controller.runJavaScript(OWN_HANDLE_SCRIPT));
-    if (pageUrl !== this.currentUrl || generation !== this.profileNavigation) { return ''; }
-    if (/^[A-Za-z0-9_]{1,15}$/.test(direct)) { return direct; }
-    const result = MainTabs.unquote(await this.controller.runJavaScript(profileBootstrapScript(false)));
-    if (result !== 'armed') { return ''; }
-    const deadline = Date.now() + PROFILE_TIMEOUT_MS;
-    while (Date.now() < deadline && this.avatarAlive && !this.appBackground &&
-      pageUrl === this.currentUrl && generation === this.profileNavigation) {
-      const handle = MainTabs.unquote(await this.controller.runJavaScript('window.__otBoot||""'));
-      if (pageUrl !== this.currentUrl || generation !== this.profileNavigation) { return ''; }
-      if (/^[A-Za-z0-9_]{1,15}$/.test(handle)) { return handle; }
-      await new Promise<void>((resolve) => { setTimeout(resolve, 100); });
-    }
-    return '';
-  }
-
-  /** 当前账号确认后才读取其草稿，旧草稿需要用户确认归属。 */
-  private async openCompose(sharedText: string = ''): Promise<void> {
-    if (this.openingCompose || this.sheetOpen) { return; }
-    this.openingCompose = true;
-    this.composePreparing = true;
-    this.composeOwner = '';
-    this.draft = sharedText;
-    this.postUncertain = false;
-    this.composeHandoff = false;
-    this.composeMessage = '';
-    this.composeController = new web_webview.WebviewController();
-    this.composeUrl = TWITTER_COMPOSE;
-    this.composeLoading = true;
-    this.webComposer = false;
-    this.posting = false;
-    this.clearComposeSync();
-    this.sheetOpen = true;
-    try {
-      const handle: string = await this.confirmCurrentAccount();
-      if (!this.sheetOpen) { return; }
-      if (!/^[A-Za-z0-9_]{1,15}$/.test(handle)) {
-        this.composeMessage = $r('app.string.account_unconfirmed');
-        return;
-      }
-      const owner: string = handle.toLowerCase();
-      const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
-      const prefs = await preferences.getPreferences(ctx, PREFS_NAME);
-      const draft = await prefs.get(COMPOSE_DRAFT_KEY + ':' + owner, '') as string;
-      const uncertain = await prefs.get('post_pending:' + owner, false) as boolean;
-      const handoff = await prefs.get('compose_handoff:' + owner, '') as string;
-      if (!this.sheetOpen) { return; }
-      this.composeOwner = owner;
-      this.acceptHandle(handle, false);
-      this.draft = draft;
-      this.composeHandoff = handoff !== '';
-      this.postUncertain = uncertain || this.composeHandoff;
-      this.composeMessage = this.composeHandoff ? $r('app.string.compose_handoff') :
-        this.postUncertain ? $r('app.string.post_unknown') : '';
-      if (sharedText !== '') {
-        if (this.postUncertain) {
-          this.toast($r('app.string.incoming_busy'));
-        } else if (draft === '') {
-          this.draft = sharedText;
-          await this.persistDraft();
-        } else {
-          this.getUIContext().showAlertDialog({
-            title: $r('app.string.incoming_draft_title'),
-            message: $r('app.string.incoming_draft_message'),
-            primaryButton: { value: $r('app.string.compose_cancel'), action: () => {} },
-            secondaryButton: { value: $r('app.string.incoming_append'), action: () => {
-              this.draft = this.draft + '\n' + sharedText;
-              this.saveDraft();
-            } }
-          });
-        }
-      } else if (this.legacyDraft !== '' && this.draft === '') {
-        this.getUIContext().showAlertDialog({
-          title: $r('app.string.legacy_draft_title'),
-          message: $r('app.string.legacy_draft_message'),
-          primaryButton: { value: $r('app.string.compose_cancel'), action: () => {} },
-          secondaryButton: { value: $r('app.string.use_draft'), action: () => { this.adoptLegacyDraft(); } }
-        });
-      }
-    } catch (err) {
-      hilog.error(DOMAIN, TAG, 'event=compose_open_failed error=%{public}s', JSON.stringify(err));
-      this.composeMessage = $r('app.string.draft_read_failed');
-    } finally {
-      this.composePreparing = false;
-      this.openingCompose = false;
-      this.scheduleComposeSync();
-    }
-  }
-
-  private async adoptLegacyDraft(): Promise<void> {
-    this.draft = this.legacyDraft;
-    try {
-      await this.persistDraft();
-      await this.putPreference(COMPOSE_DRAFT_KEY, '');
-      this.legacyDraft = '';
-      this.scheduleComposeSync();
-    } catch (err) {
-      this.toast($r('app.string.draft_save_failed'));
-    }
-  }
-
-  private persistDraft(): Promise<void> {
-    if (this.composeOwner === '') { return Promise.resolve(); }
-    const key = COMPOSE_DRAFT_KEY + ':' + this.composeOwner;
-    const value = this.draft;
-    // 顺序写入防止较早的防抖任务覆盖后续草稿；每次失败仍由调用方显示。
-    const save = (): Promise<void> => this.putPreference(key, value);
-    this.draftWrite = this.draftWrite.then(save, save);
-    return this.draftWrite;
-  }
-
-  private closeCompose(): void {
-    if (this.posting) { return; }
-    if (this.webComposer) {
-      this.getUIContext().showAlertDialog({
-        title: $r('app.string.compose_cancel'),
-        message: $r('app.string.close_web_draft'),
-        primaryButton: { value: $r('app.string.keep_editing'), action: () => {} },
-        secondaryButton: { value: $r('app.string.close_editor'), action: () => { this.saveAndClose(); } }
-      });
-      return;
-    }
-    this.saveAndClose();
-  }
-
-  private async saveAndClose(): Promise<void> {
-    try {
-      await this.persistDraft();
-      this.stopPostCheck();
-      this.clearComposeSync();
-      this.sheetOpen = false;
-    } catch (err) {
-      this.toast($r('app.string.draft_save_failed'));
-    }
-  }
-
-  private stopPostCheck(): void {
-    if (this.postTimer !== -1) { clearTimeout(this.postTimer); this.postTimer = -1; }
-  }
-
-  // Drafts are saved as you type, so closing the sheet — or the app — cannot
-  // lose what was written.
-  private scheduleDraftSave(): void {
-    this.scheduleComposeSync();
-    if (this.draftSaveTimer !== -1) {
-      clearTimeout(this.draftSaveTimer);
-    }
-    this.draftSaveTimer = setTimeout(() => {
-      this.draftSaveTimer = -1;
-      this.saveDraft();
-    }, DRAFT_SAVE_DEBOUNCE_MS);
-  }
-
-  private clearComposeSync(): void {
-    this.composeRevision++;
-    this.composeReady = false;
-    if (this.composeSyncTimer !== -1) { clearTimeout(this.composeSyncTimer); this.composeSyncTimer = -1; }
-  }
-
-  /** 编辑停止后交给网页校验，过期异步结果不能启用下一份草稿的发布按钮。 */
-  private scheduleComposeSync(): void {
-    this.clearComposeSync();
-    if (this.appBackground || !this.sheetOpen || this.webComposer || this.composeLoading || this.composePreparing ||
-      this.posting || this.postUncertain || this.draft.trim() === '' || this.composeOwner === '') { return; }
-    const revision = this.composeRevision;
-    const text = this.draft;
-    this.composeSyncTimer = setTimeout(async () => {
-      this.composeSyncTimer = -1;
-      try {
-        const filled = MainTabs.unquote(await this.composeController.runJavaScript(fillComposerScript(text)));
-        if (revision !== this.composeRevision || !this.sheetOpen || this.webComposer || this.posting) { return; }
-        if (filled !== 'ok') { this.composeMessage = $r('app.string.compose_fill_failed'); return; }
-        const ready = await this.composeController.runJavaScript(COMPOSER_READY_SCRIPT);
-        if (revision === this.composeRevision) {
-          this.composeReady = ready === 'true';
-          this.composeMessage = this.composeReady ? '' : $r('app.string.compose_submit_unavailable');
-        }
-      } catch (err) {
-        hilog.warn(DOMAIN, TAG, 'event=compose_validation_failed code=%{public}d', (err as BusinessError).code);
-        if (revision === this.composeRevision) { this.composeMessage = $r('app.string.compose_fill_failed'); }
-      }
-    }, DRAFT_SAVE_DEBOUNCE_MS);
-  }
-
-  private saveDraft(): void {
-    this.scheduleComposeSync();
-    this.persistDraft().catch((err: Error) => {
-      hilog.error(DOMAIN, TAG, 'event=draft_save_failed error=%{public}s', err.message);
-      this.toast($r('app.string.draft_save_failed'));
-    });
-  }
-
-  private saveNotificationAsked(): void {
-    this.putPreference(NOTIFICATION_ASKED_KEY, true).catch((err: Error) => {
-      hilog.warn(DOMAIN, TAG, 'event=preference_save_failed error=%{public}s', err.message);
-    });
-  }
-
-  // Desktop keyboards: Escape leaves the composer and Ctrl/Cmd+Enter posts —
-  // the two shortcuts every client of this kind has, and on a 2in1 they are
-  // faster than reaching for the sheet's buttons. Returns true when the key is
-  // consumed so it does not also reach the editor.
-  private composeKey(event: KeyEvent): boolean {
-    if (event.type !== KeyType.Down) {
-      return false;
-    }
-    if (event.keyCode === KeyCode.KEYCODE_ESCAPE) {
-      this.closeCompose();
-      return true;
-    }
-    if (event.keyCode !== KeyCode.KEYCODE_ENTER) {
-      return false;
-    }
-    if (event.metaKey === 1 || MainTabs.ctrlDown(event)) {
-      this.postFromSheet();
-      return true;
-    }
-    return false;
-  }
-
-  private static ctrlDown(event: KeyEvent): boolean {
-    try {
-      // Optional on the type: it is absent on older devices and under a stylus.
-      if (event.getModifierKeyState === undefined) {
-        return false;
-      }
-      return event.getModifierKeyState(['Ctrl']);
-    } catch (err) {
-      return false;
-    }
-  }
 
   private async putPreference(key: string, value: preferences.ValueType): Promise<void> {
     try {
@@ -2622,165 +1717,6 @@ struct MainTabs {
     } catch (err) {
       hilog.error(DOMAIN, TAG, 'event=preference_write_failed error=%{public}s', JSON.stringify(err));
       throw err as Error;
-    }
-  }
-
-  /** 先保存提交意图；未知结果不得自动重发或清空草稿。 */
-  private async postFromSheet(): Promise<void> {
-    if (!this.composeReady || this.draft.trim() === '' || this.posting || this.postUncertain || this.webComposer ||
-      this.composePreparing || this.composeLoading || this.composeOwner === '') { return; }
-    this.posting = true;
-    this.clearComposeSync();
-    this.composeMessage = '';
-    if (this.draftSaveTimer !== -1) { clearTimeout(this.draftSaveTimer); this.draftSaveTimer = -1; }
-    try {
-      await this.persistDraft();
-      const account = await this.confirmCurrentAccount();
-      if (account.toLowerCase() !== this.composeOwner) {
-        this.composeMessage = $r('app.string.account_changed');
-        this.posting = false;
-        return;
-      }
-      const filled = MainTabs.unquote(await this.composeController.runJavaScript(fillComposerScript(this.draft)));
-      if (filled !== 'ok') {
-        this.composeMessage = $r('app.string.compose_fill_failed');
-        this.posting = false;
-        return;
-      }
-      await this.putPreference('post_pending:' + this.composeOwner, true);
-      this.postUncertain = true;
-      const result = MainTabs.unquote(await this.composeController.runJavaScript(CLICK_POST_BUTTON_SCRIPT));
-      if (result === 'missing' || result === 'disabled') {
-        await this.putPreference('post_pending:' + this.composeOwner, false);
-        this.postUncertain = false;
-        this.posting = false;
-        this.composeMessage = $r('app.string.compose_submit_unavailable');
-        return;
-      }
-      if (result !== 'submitted') { this.markPostUnknown(); return; }
-      this.postChecks = 0;
-      this.checkPostResult();
-    } catch (err) {
-      hilog.error(DOMAIN, TAG, 'event=post_failed error=%{public}s', JSON.stringify(err));
-      this.posting = false;
-      this.composeMessage = this.postUncertain ? $r('app.string.post_unknown') : $r('app.string.operation_failed');
-    } finally {
-      if (!this.posting && !this.postUncertain) { this.scheduleComposeSync(); }
-    }
-  }
-
-  private async checkPostResult(): Promise<void> {
-    if (this.appBackground || !this.avatarAlive) { return; }
-    try {
-      const result = MainTabs.unquote(await this.composeController.runJavaScript(POST_RESULT_SCRIPT));
-      if (result === 'confirmed') {
-        // 先落盘清除草稿，再解除待确认标记，避免进程退出后重复发送。
-        await this.draftWrite;
-        await this.putPreference(COMPOSE_DRAFT_KEY + ':' + this.composeOwner, '');
-        await this.putPreference('post_pending:' + this.composeOwner, false);
-        if (this.draftSaveTimer !== -1) { clearTimeout(this.draftSaveTimer); this.draftSaveTimer = -1; }
-        this.draft = '';
-        this.postUncertain = false;
-        this.posting = false;
-        this.sheetOpen = false;
-        this.toast($r('app.string.compose_post_sent'));
-        return;
-      }
-      if (result === 'unknown' || ++this.postChecks >= 16) { this.markPostUnknown(); return; }
-      if (!this.appBackground && this.avatarAlive) { this.postTimer = setTimeout(() => { this.checkPostResult(); }, 1000); }
-    } catch (err) {
-      hilog.warn(DOMAIN, TAG, 'event=post_result_unknown error=%{public}s', JSON.stringify(err));
-      this.markPostUnknown();
-    }
-  }
-
-  private markPostUnknown(): void {
-    this.stopPostCheck();
-    this.posting = false;
-    this.postUncertain = true;
-    this.composeMessage = $r('app.string.post_unknown');
-  }
-
-  private async resolveUnknownPost(): Promise<void> {
-    if (this.composeHandoff) {
-      this.getUIContext().showAlertDialog({
-        title: $r('app.string.compose_handoff_title'), message: $r('app.string.compose_handoff_message'),
-        buttons: [
-          { value: $r('app.string.compose_cancel'), action: () => {} },
-          { value: $r('app.string.post_checked'), action: () => { this.clearPendingPost(); } },
-          { value: $r('app.string.compose_handoff_clear'), action: () => { this.clearHandoffDraft(); } }
-        ]
-      });
-      return;
-    }
-    this.getUIContext().showAlertDialog({
-      title: $r('app.string.post_unknown_title'),
-      message: $r('app.string.post_check_message'),
-      primaryButton: { value: $r('app.string.compose_cancel'), action: () => {} },
-      secondaryButton: { value: $r('app.string.post_checked'), action: () => { this.clearPendingPost(); } }
-    });
-  }
-
-  private async clearPendingPost(): Promise<void> {
-    try {
-      await this.putPreference('post_pending:' + this.composeOwner, false);
-      await this.putPreference('compose_handoff:' + this.composeOwner, '');
-      this.composeHandoff = false;
-      this.postUncertain = false;
-      this.composeMessage = '';
-      this.composeController.loadUrl(TWITTER_COMPOSE);
-    } catch (err) { this.toast($r('app.string.operation_failed')); }
-  }
-
-  /** 只有用户确认发布或放弃后删除移交快照，先删正文再解除发布限制。 */
-  private async clearHandoffDraft(): Promise<void> {
-    try {
-      await this.draftWrite;
-      await this.putPreference(COMPOSE_DRAFT_KEY + ':' + this.composeOwner, '');
-      await this.putPreference('post_pending:' + this.composeOwner, false);
-      await this.putPreference('compose_handoff:' + this.composeOwner, '');
-      this.draft = '';
-      this.composeHandoff = false;
-      this.postUncertain = false;
-      this.composeMessage = '';
-      this.composeController.loadUrl(TWITTER_COMPOSE);
-    } catch (error) { this.toast($r('app.string.draft_save_failed')); }
-  }
-
-  private async copyComposeDraft(): Promise<void> {
-    try {
-      await pasteboard.getSystemPasteboard().setData(pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, this.draft));
-      this.toast($r('app.string.media_copied'));
-    } catch (error) {
-      hilog.error(DOMAIN, TAG, 'event=draft_copy_failed error=%{public}s', JSON.stringify(error));
-      this.toast($r('app.string.operation_failed'));
-    }
-  }
-
-  private async openWebComposer(): Promise<void> {
-    if (this.posting || this.postUncertain) { return; }
-    this.posting = true;
-    this.clearComposeSync();
-    if (this.draftSaveTimer !== -1) { clearTimeout(this.draftSaveTimer); this.draftSaveTimer = -1; }
-    try {
-      await this.persistDraft();
-      if (this.draft !== '' && this.composeOwner !== '') {
-        // 账号键关联正文，移交标识区分同一账号后续新建的草稿；恢复时必须由用户确认。
-        await this.putPreference('compose_handoff:' + this.composeOwner, Date.now().toString() + '-' + this.composeRevision);
-        this.composeHandoff = true;
-        this.postUncertain = true;
-        const account = await this.confirmCurrentAccount();
-        if (account.toLowerCase() !== this.composeOwner) { throw new Error('Compose account unconfirmed'); }
-        const result = MainTabs.unquote(await this.composeController.runJavaScript(fillComposerScript(this.draft)));
-        if (result !== 'ok') { throw new Error('Compose text transfer failed'); }
-      }
-    } catch (err) {
-      hilog.warn(DOMAIN, TAG, 'event=compose_handoff_failed error=%{public}s', JSON.stringify(err));
-      this.toast($r('app.string.compose_manual_transfer'));
-    } finally {
-      // 自动填充失败仍允许用户进入真实网页；恢复副本不因显示网页而删除。
-      this.webComposer = true;
-      this.posting = false;
     }
   }
 
@@ -2796,7 +1732,7 @@ struct MainTabs {
       this.homeTitleBar()
     } else {
       NativeTopBar({ title: this.headerTitle(), subtitle: this.subtitleMain(), showBack: this.showBack(),
-        titleOpacity: this.viewingHandle !== '' ? this.profileTitleOpacity : 1,
+        titleOpacity: this.navigation.viewingHandle !== '' ? this.profileTitleOpacity : 1,
         bannerButtons: this.profileBannerButtons(),
         immersiveMaterial: this.immersiveMaterial,
         onBack: () => {
@@ -2834,21 +1770,21 @@ struct MainTabs {
   // Back only exists where there is history to walk and the page is not one of
   // the five tab roots.
   private showBack(): boolean {
-    return this.settingsWeb || this.viewingHandle !== '' || isPostDetailUrl(this.currentUrl) || isSecondaryUrl(this.currentUrl) || (this.canGoBack && !this.isTabRoot());
+    return this.settingsWeb || this.navigation.viewingHandle !== '' || isPostDetailUrl(this.navigation.currentUrl) || isSecondaryUrl(this.navigation.currentUrl) || (this.canGoBack && !this.isTabRoot());
   }
 
   // A profile is a tab root too: /<handle> is what the Profile tab loads, so
   // the shell must not offer a back arrow there even though the web history has
   // an entry behind it.
   private isTabRoot(): boolean {
-    if (isTabRootPath(this.currentPath)) {
+    if (isTabRootPath(this.navigation.currentPath)) {
       return true;
     }
     return false;
   }
 
   private isHomeRoot(): boolean {
-    return this.currentPath === '/' || this.currentPath === '/home';
+    return this.navigation.currentPath === '/' || this.navigation.currentPath === '/home';
   }
 
   @Builder
@@ -2861,9 +1797,9 @@ struct MainTabs {
         Image($$.path)
           .width(32).height(32).borderRadius(16).objectFit(ImageFit.Cover)
           .onComplete(() => {
-            if ($$.path === this.avatarPath) { this.clearAvatarRetry(); }
+            if ($$.path === this.account.avatarPath) { this.account.clearAvatarRetry(); }
           })
-          .onError(() => this.avatarImageFailed($$.path))
+          .onError(() => this.account.avatarImageFailed($$.path))
       }
     }
     .width(32).height(32)
@@ -2873,7 +1809,7 @@ struct MainTabs {
   @Builder
   accountAvatar() {
     Row() {
-      this.accountPicture({ path: this.avatarPath })
+      this.accountPicture({ path: this.account.avatarPath })
     }
     .width(TOUCH_TARGET)
     .height(32)
@@ -2946,7 +1882,7 @@ struct MainTabs {
   }
 
   private headerTitle(): string {
-    if (isPostDetailUrl(this.currentUrl)) { return this.localized($r('app.string.post')); }
+    if (isPostDetailUrl(this.navigation.currentUrl)) { return this.localized($r('app.string.post')); }
     const title: string = this.titleMain();
     // "X" is x.com's own site name and what it titles unknown pages with, so it
     // is not a page name: fall back to the tab the user is on.
@@ -2964,13 +1900,13 @@ struct MainTabs {
     // Actions belong to a tab's own root screen. On a page pushed from there
     // (notification settings, a chat, another account) the only control is the
     // back arrow the bar already draws.
-    if (this.currentIndex === 2 && this.currentPath === '/notifications') {
+    if (this.currentIndex === 2 && this.navigation.currentPath === '/notifications') {
       this.headerIconButton($r('sys.symbol.gearshape'), $r('app.string.menu_notification_settings'),
         () => {
-          this.loadWeb(TWITTER_NOTIF_SETTINGS);
+          this.navigation.loadWeb(TWITTER_NOTIF_SETTINGS);
         })
     } else if (this.currentIndex === 3 &&
-      (this.currentPath === '/messages' || this.currentPath === '/i/chat')) {
+      (this.navigation.currentPath === '/messages' || this.navigation.currentPath === '/i/chat')) {
       // x.com has no separate direct-message settings page any more (its
       // /settings/messages route is gone), so this opens the settings root the
       // stock app's gear leads to as well.
@@ -2981,8 +1917,8 @@ struct MainTabs {
   }
 
   private isOwnProfile(): boolean {
-    return this.ownHandle !== '' &&
-      this.viewingHandle.toLowerCase() === this.ownHandle.toLowerCase();
+    return this.account.ownHandle !== '' &&
+      this.navigation.viewingHandle.toLowerCase() === this.account.ownHandle.toLowerCase();
   }
 
   private headerButtonMaterial(): uiMaterial.Material | undefined {
@@ -3030,8 +1966,8 @@ struct MainTabs {
 
   @Builder
   nativeTabs() {
-    NativeBottomBar({ currentIndex: this.currentIndex, notifications: this.unreadNotifications,
-      messages: this.unreadMessages, wide: this.isWide,
+    NativeBottomBar({ currentIndex: this.currentIndex, notifications: this.unread.unreadNotifications,
+      messages: this.unread.unreadMessages, wide: this.isWide,
       labels: [this.tabLabel(0), this.tabLabel(1), this.tabLabel(2), this.tabLabel(3), this.tabLabel(4), this.tabLabel(5)],
       enabledTabs: this.enabledTabs,
       onSelect: (index: number) => { this.resetChromeScroll(); this.goRoute(index); }
@@ -3068,7 +2004,7 @@ struct MainTabs {
       .width('100%')
       .height('100%')
       .padding({ left: 4, right: 4 })
-    } else if (isPostDetailUrl(this.currentUrl)) {
+    } else if (isPostDetailUrl(this.navigation.currentUrl)) {
       this.replyBar()
     } else {
       Row() {
@@ -3082,23 +2018,14 @@ struct MainTabs {
 
   /** 面板立即显示，网页回复上下文在面板内加载，不再等待详情页恢复原帖。 */
   private replyToPost(): void {
-    if (this.openingCompose || this.sheetOpen) { return; }
-    const postId: string = this.currentPath.substring(this.currentPath.lastIndexOf('/') + 1);
-    this.composeOwner = '';
-    this.composeController = new web_webview.WebviewController();
-    this.composeUrl = TWITTER_BASE + '/intent/tweet?in_reply_to=' + postId;
-    this.composeLoading = true;
-    this.composePreparing = false;
-    this.composeMessage = '';
-    this.webComposer = true;
-    this.posting = false;
-    this.sheetOpen = true;
+    const postId: string = this.navigation.currentPath.substring(this.navigation.currentPath.lastIndexOf('/') + 1);
+    this.composer.openReply(postId);
   }
 
   @Builder
   replyBar() {
     Row({ space: S12 }) {
-      this.accountPicture({ path: this.avatarPath })
+      this.accountPicture({ path: this.account.avatarPath })
       Text($r('app.string.reply_prompt'))
         .fontSize(16).fontFamily(FONT_FAMILY).layoutWeight(1)
         .fontColor($r('sys.color.ohos_id_color_text_secondary'))
@@ -3130,7 +2057,7 @@ struct MainTabs {
     .hitTestBehavior(this.barsCollapsed ? HitTestMode.None : HitTestMode.Default)
     .accessibilityText($r('app.string.compose_title'))
     .accessibilityLevel('yes')
-    .onClick(() => { this.openCompose(); })
+    .onClick(() => { this.composer.openCompose(); })
   }
 
   @Builder
@@ -3209,7 +2136,7 @@ struct MainTabs {
           .onClick(() => {
             this.settingsWeb = false;
             this.settingsOpen = true;
-            this.hasError = false;
+            this.navigation.hasError = false;
           })
       }
       Button($r('app.string.network_open_settings'))
@@ -3230,12 +2157,12 @@ struct MainTabs {
   }
 
   @Builder
-  webView() {
+  webView(session: number) {
     Web({ src: this.webSource, controller: this.controller, renderMode: RenderMode.ASYNC_RENDER })
       .width('100%')
       .height('100%')
       // 网页遮罩和背景延伸至手势区，交互元素由网页安全区样式避让。
-      .expandSafeArea([SafeAreaType.SYSTEM], this.viewingHandle !== '' && this.showsNativeNavigation()
+      .expandSafeArea([SafeAreaType.SYSTEM], this.navigation.viewingHandle !== '' && this.showsNativeNavigation()
         ? [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM] : [SafeAreaEdge.BOTTOM])
       // Injected at document start, so the page's history hook always finds it.
       .javaScriptProxy({
@@ -3245,6 +2172,7 @@ struct MainTabs {
         controller: this.controller
       })
       .onControllerAttached(() => {
+        if (session !== this.webSession || !this.webNetworkReady) { return; }
         // userAgent() on the attribute is deprecated; the controller API is the
         // supported way and can only run once the controller is bound.
         try {
@@ -3266,7 +2194,7 @@ struct MainTabs {
       .onWindowNew((event: OnWindowNewEvent) => {
         event.handler.setWebController(null);
         if (isSiteUrl(event.targetUrl) || isAuthUrl(event.targetUrl)) {
-          this.loadWeb(event.targetUrl, false, true);
+          this.navigation.loadWeb(event.targetUrl, false, true);
         } else if (/^https?:\/\//i.test(event.targetUrl)) {
           this.openExternal(event.targetUrl);
         } else { this.toast($r('app.string.operation_failed')); }
@@ -3312,24 +2240,33 @@ struct MainTabs {
         this.syncChromeInsets();
       })
       .onProgressChange((event) => {
+        if (session !== this.webSession || !this.webNetworkReady) { return; }
         if (event) {
-          this.progress = event.newProgress;
+          this.navigation.progress = event.newProgress;
         }
       })
-      .onPageBegin(() => {
-        if (!this.webNetworkReady) { return; }
+      .onPageBegin((event) => {
+        if (session !== this.webSession || !this.webNetworkReady) { return; }
+        this.loadingWebUrl = event.url;
         this.failedWebUrl = '';
         this.updateWebModal(false);
         this.documentLoading = true;
         this.armFirstLoadTimeout();
         this.resetProfileLayout();
         this.incomingPageReady = false;
-        this.hasError = false;
+        this.navigation.hasError = false;
       })
       .onPageEnd((event) => {
-        if (!this.webNetworkReady) { return; }
+        if (session !== this.webSession || !this.webNetworkReady) { return; }
+        if (this.loadingWebUrl !== '' && event.url.split('#')[0] !== this.loadingWebUrl.split('#')[0]) { return; }
         if (event && this.controller.getUrl() !== event.url) { return; }
         this.documentLoading = false;
+        this.loadingWebUrl = '';
+        this.navigation.progress = 100;
+        this.refreshing = false;
+        this.finishFirstLoad();
+        // 加载失败也会结束文档加载，不能据此启动账号发现或消费待处理链接。
+        if (this.navigation.hasError) { return; }
         if (!this.rawWeb && event && isSiteUrl(event.url)) {
           this.controller.runJavaScript(MEDIA_CLICK_SCRIPT).catch((error: Error) => {
             hilog.error(DOMAIN, TAG, 'event=image_bridge_failed error=%{public}s', error.message);
@@ -3337,9 +2274,6 @@ struct MainTabs {
           });
         }
         this.saveWebSession();
-        this.progress = 100;
-        this.refreshing = false;
-        this.finishFirstLoad();
         if (event && event.url) {
           this.syncFromUrl(event.url);
           this.applyPageChrome(event.url);
@@ -3356,27 +2290,25 @@ struct MainTabs {
         }
         if (this.rawWeb) { return; }
         this.schedulePageStateRead();
-        if (this.ownHandle === '') {
-          this.discoverOwnProfile();
+        if (this.account.ownHandle === '') {
+          this.account.discoverOwnProfile();
         }
       })
       .onErrorReceive((event) => {
-        // Subresource failures (images, analytics) are normal on x.com — only
-        // treat main-frame failures as fatal.
-        try {
-          if (event && event.request && !event.request.isMainFrame()) {
-            return;
-          }
-          // 页面内跳转取消旧请求，不代表当前页面加载失败。
-          if (event && event.error.getErrorCode() === -3) { return; }
-          if (event) {
-            this.failedWebUrl = event.request.getRequestUrl();
-            hilog.error(DOMAIN, TAG, 'event=main_frame_failed code=%{public}d', event.error.getErrorCode());
-          }
-        } catch (err) {
+        if (session !== this.webSession || !this.webNetworkReady) { return; }
+        const code = event.error.getErrorCode();
+        if (!event.request.isMainFrame() || code === -3) { return; }
+        const failedUrl = event.request.getRequestUrl();
+        const pageUrl = this.loadingWebUrl || this.controller.getUrl() || this.webSource;
+        // 图片下载与旧页面错误不能覆盖当前文档，也不能成为整页重试地址。
+        if (failedUrl.split('#')[0] !== pageUrl.split('#')[0]) {
+          hilog.debug(DOMAIN, TAG, 'event=web_error_ignored reason=other_document code=%{public}d', code);
+          return;
         }
-        this.hasError = true;
-        this.progress = 100;
+        this.failedWebUrl = failedUrl;
+        hilog.error(DOMAIN, TAG, 'event=main_frame_failed code=%{public}d session=%{public}d', code, session);
+        this.navigation.hasError = true;
+        this.navigation.progress = 100;
         this.refreshing = false;
         this.finishFirstLoad();
         if (this.incomingContent.kind !== '') {
@@ -3385,8 +2317,9 @@ struct MainTabs {
         }
       })
       .onRenderExited((event) => {
+        if (session !== this.webSession || !this.webNetworkReady) { return; }
         hilog.error(DOMAIN, TAG, 'event=render_exit detail=%{public}s', JSON.stringify(event));
-        this.hasError = true;
+        this.navigation.hasError = true;
         this.finishFirstLoad();
       })
       .onGeolocationShow((event) => {
@@ -3403,8 +2336,8 @@ struct MainTabs {
   webArea() {
     Stack({ alignContent: Alignment.BottomEnd }) {
       Column({ space: 0 }) {
-        if (this.progress < 100 && !this.hasError) {
-          Progress({ value: this.progress, total: 100, type: ProgressType.Linear })
+        if (this.navigation.progress < 100 && !this.navigation.hasError) {
+          Progress({ value: this.navigation.progress, total: 100, type: ProgressType.Linear })
             .width('100%')
             .height(PROGRESS_HEIGHT)
             .color($r('sys.color.ohos_id_color_emphasize'))
@@ -3418,14 +2351,14 @@ struct MainTabs {
             Refresh({ refreshing: $$this.refreshing }) {
               Column() {
                 if (this.preferencesReady && this.webNetworkReady) {
-                  ForEach([this.webSession], () => { this.webView() }, (session: number) => session.toString())
+                  ForEach([this.webSession], (session: number) => { this.webView(session) }, (session: number) => session.toString())
                 }
               }.width('100%').height('100%')
             }
             .width('100%')
             .height('100%')
             // Web 位于刷新容器内，两者须使用相同的绘制扩展边界。
-            .expandSafeArea([SafeAreaType.SYSTEM], this.viewingHandle !== '' && this.showsNativeNavigation()
+            .expandSafeArea([SafeAreaType.SYSTEM], this.navigation.viewingHandle !== '' && this.showsNativeNavigation()
               ? [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM] : [SafeAreaEdge.BOTTOM])
             .pullToRefresh(true)
             .onRefreshing(() => {
@@ -3440,9 +2373,9 @@ struct MainTabs {
       .height('100%')
       .backgroundColor($r('sys.color.ohos_id_color_background'))
 
-      if (this.hasError) { this.errorState() }
+      if (this.navigation.hasError) { this.errorState() }
 
-      if ((!this.firstLoadDone || this.documentLoading) && !this.hasError) {
+      if ((!this.firstLoadDone || this.documentLoading) && !this.navigation.hasError) {
         Column() {
           LoadingProgress()
             .width(48)
@@ -3458,7 +2391,7 @@ struct MainTabs {
 
       // Reading the signed-in handle briefly opens the page's account menu.
       // This native panel is what the user sees while that happens.
-      if (this.discovering) {
+      if (this.account.discovering) {
         Column() {
           LoadingProgress()
             .width(48)
@@ -3473,7 +2406,7 @@ struct MainTabs {
       }
 
       // 发帖入口只属于首页，不能随上一次选中的标签泄漏到其他页面。
-      if (this.showsNativeNavigation() && this.isHomeRoot() && !this.hasError && this.firstLoadDone) {
+      if (this.showsNativeNavigation() && this.isHomeRoot() && !this.navigation.hasError && this.firstLoadDone) {
         this.composeFab()
       }
     }
@@ -3482,7 +2415,7 @@ struct MainTabs {
     .flexGrow(1)
     .flexShrink(1)
     // 资料横幅及其遮罩一起延伸至状态栏；其他页面沿用底部扩展边界。
-    .expandSafeArea([SafeAreaType.SYSTEM], this.viewingHandle !== '' && this.showsNativeNavigation()
+    .expandSafeArea([SafeAreaType.SYSTEM], this.navigation.viewingHandle !== '' && this.showsNativeNavigation()
       ? [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM] : [SafeAreaEdge.BOTTOM])
     .backgroundColor($r('sys.color.ohos_id_color_background'))
   }
@@ -3490,12 +2423,12 @@ struct MainTabs {
   @Builder
   composeSheet() {
     Column({ space: 0 }) {
-    if (this.webComposer) {
+    if (this.composer.webComposer) {
       Row() {
-        Button($r('app.string.close_editor')).onClick(() => { this.closeCompose(); })
+        Button($r('app.string.close_editor')).onClick(() => { this.composer.closeCompose(); })
         Blank()
-        if (this.draft !== '') {
-          Button($r('app.string.compose_copy_draft')).onClick(() => { this.copyComposeDraft(); })
+        if (this.composer.draft !== '') {
+          Button($r('app.string.compose_copy_draft')).onClick(() => { this.composer.copyComposeDraft(); })
         }
       }.width('100%').padding(S8)
     }
@@ -3505,37 +2438,34 @@ struct MainTabs {
       // if it has to surface (media, polls, threads, or an undrivable editor)
       // it is revealed and the native panel steps aside.
       if (this.webNetworkReady) {
-      Web({ src: this.composeUrl, controller: this.composeController })
+      Web({ src: this.composer.composeUrl, controller: this.composer.composeController })
         .width('100%')
         .height('100%')
-        .opacity(this.webComposer ? 1 : 0)
+        .opacity(this.composer.webComposer ? 1 : 0)
         .onControllerAttached(() => {
           try {
-            this.composeController.setCustomUserAgent(this.userAgent());
-            this.composeDownloadDelegate = installDownloads(this.composeController,
+            this.composer.composeController.setCustomUserAgent(this.userAgent());
+            this.composeDownloadDelegate = installDownloads(this.composer.composeController,
               this.getUIContext().getHostContext() as common.UIAbilityContext,
               (result: string) => { this.reportDownload(result); });
           } catch (err) {
             hilog.error(DOMAIN, TAG, 'event=compose_controller_failed code=%{public}d', (err as BusinessError).code);
-            this.composeMessage = $r('app.string.editor_failed');
+            this.composer.controllerFailed();
           }
         })
         .onLoadIntercept((event) => this.interceptExternal(event))
-        .onPageBegin(() => { this.composeLoading = true; this.clearComposeSync(); })
+        .onPageBegin(() => { this.composer.pageStarted(); })
         .onPageEnd(() => {
-          this.composeLoading = false;
-          this.composeController.runJavaScript(appearanceScript(this.themeMode)).catch((error: Error) => {
+          this.composer.composeController.runJavaScript(appearanceScript(this.themeMode)).catch((error: Error) => {
             hilog.error(DOMAIN, TAG, 'event=compose_appearance_failed error=%{public}s', error.message);
             this.toast($r('app.string.operation_failed'));
           });
-          this.scheduleComposeSync();
+          this.composer.pageFinished();
         })
         .onFullScreenEnter((event) => { this.enterFullScreen(event.handler); })
         .onFullScreenExit(() => { this.exitFullScreen(); })
         .onRenderExited(() => {
-          this.composeLoading = false;
-          if (this.posting) { this.markPostUnknown(); }
-          this.composeMessage = $r('app.string.editor_failed');
+          this.composer.renderExited();
         })
         .javaScriptAccess(true)
         .domStorageAccess(true)
@@ -3552,14 +2482,14 @@ struct MainTabs {
         })
       }
 
-      ComposerPanel({ draft: $draft, ready: this.composeReady, posting: this.posting,
-        uncertain: this.postUncertain, preparing: this.composePreparing, loading: this.composeLoading,
-        hasOwner: this.composeOwner !== '', message: this.composeMessage,
-        onClose: () => { this.closeCompose(); }, onPost: () => { this.postFromSheet(); },
-        onMore: () => { this.openWebComposer(); }, onVerify: () => { this.resolveUnknownPost(); },
-        onDraftChange: () => { this.scheduleDraftSave(); }, onComposeKey: (event: KeyEvent) => this.composeKey(event) })
-      .visibility(this.webComposer ? Visibility.Hidden : Visibility.Visible)
-      if (this.webComposer && this.composeLoading) {
+      ComposerPanel({ draft: this.composer.draft, ready: this.composer.composeReady, posting: this.composer.posting,
+        uncertain: this.composer.postUncertain, preparing: this.composer.composePreparing, loading: this.composer.composeLoading,
+        hasOwner: this.composer.composeOwner !== '', message: this.composer.composeMessage,
+        onClose: () => { this.composer.closeCompose(); }, onPost: () => { this.composer.postFromSheet(); },
+        onMore: () => { this.composer.openWebComposer(); }, onVerify: () => { this.composer.resolveUnknownPost(); },
+        onDraftChange: (value: string) => { this.composer.changeDraft(value); }, onComposeKey: (event: KeyEvent) => this.composer.composeKey(event) })
+      .visibility(this.composer.webComposer ? Visibility.Hidden : Visibility.Visible)
+      if (this.composer.webComposer && this.composer.composeLoading) {
         LoadingProgress().width(32).height(32).margin(S16)
       }
     }
@@ -3572,12 +2502,12 @@ struct MainTabs {
     .clip(true)
     .backgroundColor($r('sys.color.ohos_id_color_background'))
     // Escape works from anywhere in the sheet, not only from the editor.
-    .onKeyEvent((event: KeyEvent) => this.composeKey(event))
+    .onKeyEvent((event: KeyEvent) => this.composer.composeKey(event))
   }
 
   /** 桥接数据属于网页输入，完整校验通过后才接管当前点击。 */
   private openImages(payload: string): boolean {
-    if (this.rawWeb || this.imageViewerOpen || this.sheetOpen || this.fullScreen || !isSiteUrl(this.controller.getUrl())) { return false; }
+    if (this.rawWeb || this.imageViewerOpen || this.composer.sheetOpen || this.fullScreen || !isSiteUrl(this.controller.getUrl())) { return false; }
     try {
       const data = JSON.parse(payload) as ImagePayload;
       if (!Array.isArray(data.urls) || data.urls.length < 1 || data.urls.length > 4 ||
@@ -3614,19 +2544,19 @@ struct MainTabs {
   private async imagePostAction(action: string): Promise<MediaActionResult> {
     const id = ++this.imageActionSequence;
     const postId = this.imagePost.postId;
-    const owner = this.ownHandle;
-    const generation = this.navigationGeneration;
-    const url = this.currentUrl;
+    const owner = this.account.ownHandle;
+    const generation = this.navigation.navigationGeneration;
+    const url = this.navigation.currentUrl;
     const deadline = Date.now() + PROFILE_TIMEOUT_MS;
     let start = true;
-    while (this.imageViewerOpen && this.avatarAlive && !this.appBackground && this.ownHandle === owner &&
-      this.navigationGeneration === generation && this.currentUrl === url && this.imagePost.postId === postId) {
+    while (this.imageViewerOpen && this.pageAlive && !this.appBackground && this.account.ownHandle === owner &&
+      this.navigation.navigationGeneration === generation && this.navigation.currentUrl === url && this.imagePost.postId === postId) {
       const raw = MainTabs.unquote(await this.controller.runJavaScript(mediaActionScript(postId, id, action, start)));
       const result = JSON.parse(raw) as MediaActionResult;
       if (result.requestId !== id || result.postId !== postId) { throw new Error('Image action response mismatch'); }
       if (result.status === 'unavailable' || result.status === 'failed') { throw new Error('Post action ' + result.status); }
       if (result.status === 'done') {
-        if (!this.imageViewerOpen || this.ownHandle !== owner || this.currentUrl !== url) { throw new Error('Post context changed'); }
+        if (!this.imageViewerOpen || this.account.ownHandle !== owner || this.navigation.currentUrl !== url) { throw new Error('Post context changed'); }
         hilog.info(DOMAIN, TAG, 'event=image_post_action_confirmed action=%{public}s', action);
         return result;
       }
@@ -3635,12 +2565,7 @@ struct MainTabs {
         if (!quoteUrl || !isSiteUrl(quoteUrl) || pathOf(quoteUrl) !== '/compose/post') { throw new Error('Quote route unavailable'); }
         await this.controller.runJavaScript('document.dispatchEvent(new KeyboardEvent("keydown",{key:"Escape",bubbles:true}))');
         this.imageViewerOpen = false;
-        this.composeOwner = owner;
-        this.composeController = new web_webview.WebviewController();
-        this.composeUrl = quoteUrl;
-        this.composeLoading = true;
-        this.webComposer = true;
-        this.sheetOpen = true;
+        this.composer.openQuote(quoteUrl, owner);
         return result;
       }
       if (Date.now() >= deadline) { throw new Error('Post action confirmation timed out'); }
@@ -3833,7 +2758,7 @@ struct MainTabs {
         .accessibilityLevel('no-hide-descendants')
 
         Row() {
-          if (!this.imageViewerOpen && this.isWide && this.showsNativeNavigation() && (this.settingsOpen || (!isPostDetailUrl(this.currentUrl) && !isSecondaryUrl(this.currentUrl)))) { this.navBar() }
+          if (!this.imageViewerOpen && this.isWide && this.showsNativeNavigation() && (this.settingsOpen || (!isPostDetailUrl(this.navigation.currentUrl) && !isSecondaryUrl(this.navigation.currentUrl)))) { this.navBar() }
           HdsTabs({ barPosition: BarPosition.End, controller: this.tabsController }) {
             // 五个入口均路由到同一网页会话，内容节点常驻，避免页签切换重建 Web。
             TabContent() {
@@ -3879,7 +2804,6 @@ struct MainTabs {
         .width('100%')
         .height(LayoutPolicy.matchParent)
         .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM])
-
 
         if (this.settingsPillVisible()) {
           this.settingsPill()
@@ -3945,12 +2869,12 @@ struct MainTabs {
     .mode(NavigationMode.Stack)
     .hideBackButton(true)
     .backgroundColor(this.imageViewerOpen || this.isMediaViewer() ? Color.Black : $r('sys.color.ohos_id_color_background'))
-    .bindSheet($$this.sheetOpen, this.composeSheet(), {
+    .bindSheet($$this.composer.sheetOpen, this.composeSheet(), {
       height: SheetSize.LARGE,
       width: this.isWide ? 640 : '100%',
       dragBar: true,
-      showClose: this.webComposer,
-      shouldDismiss: (() => { this.closeCompose(); }),
+      showClose: this.composer.webComposer,
+      shouldDismiss: (() => { this.composer.closeCompose(); }),
       blurStyle: BlurStyle.COMPONENT_ULTRA_THICK
     })
     }

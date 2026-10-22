@@ -123,20 +123,45 @@ for (const path of ['/home','/explore','/search','/notifications','/messages','/
 }
 // 回复直接使用当前详情的帖子编号，原帖是否被虚拟列表回收不影响面板显示。
 const mainSource=readFileSync(new URL('../entry/src/main/ets/pages/MainTabs.ets',import.meta.url),'utf8');
+const accountSource=readFileSync(new URL('../entry/src/main/ets/common/AccountSession.ets',import.meta.url),'utf8');
+const unreadSource=readFileSync(new URL('../entry/src/main/ets/common/UnreadSession.ets',import.meta.url),'utf8');
+const navigationSource=readFileSync(new URL('../entry/src/main/ets/common/WebNavigation.ets',import.meta.url),'utf8');
+const accountMethod=name=>accountSource.match(new RegExp('^  (?:private )?(?:async )?'+name+'\\([\\s\\S]*?^  \\}', 'm'))[0];
+const unreadMethod=name=>unreadSource.match(new RegExp('^  (?:private )?(?:async )?'+name+'\\([\\s\\S]*?^  \\}', 'm'))[0];
+const navigationMethod=name=>navigationSource.match(new RegExp('^  (?:private )?(?:async )?'+name+'\\([\\s\\S]*?^  \\}', 'm'))[0];
+const NavigationPage=vm.runInNewContext(stripTypeScriptTypes('class NavigationPage{'+
+  ['loadWeb','syncFromUrl'].map(navigationMethod).join('\n')+'};NavigationPage'),{
+  clickRouteScript:scripts.clickRouteScript,unquoteScriptResult:value=>value,
+  pathOf:url=>new URL(url).pathname,profileHandleForUrl:routes.profileHandleForUrl,
+  Date,setTimeout,
+  hilog:{error(){},warn(){}},DOMAIN:0,TAG:'test',$r:value=>value
+});
+const navigationFor=(page,controller=page.controller)=>{
+  const navigation=new NavigationPage();
+  Object.assign(navigation,{currentUrl:page.navigation?.currentUrl??page.currentUrl??'',
+    currentPath:page.navigation?.currentPath??page.currentPath??'',navigationGeneration:0,
+    viewingHandle:'',hasError:false,progress:0,
+    host:{isNetworkReady:()=>page.webNetworkReady!==false,controller:()=>controller,
+      cancelProfileNavigation:()=>page.account?.cancelProfileNavigation?.(),toast:value=>page.toast?.(value)}});
+  return navigation;
+};
 const goRouteBody=mainSource.match(/private goRoute\(index: number\): void \{([\s\S]*?)\n  \}/)[1];
 const goRoute=vm.runInNewContext(stripTypeScriptTypes('(function(index){'+goRouteBody+'})'),{
   isTabRootPath:routes.isTabRootPath,TWITTER_ROUTES:['/home','/explore','/notifications','/i/chat'],scrollToTopScript:()=> 'scroll'});
 const navigations=[],scrolls=[];
-const navigationState={currentIndex:0,currentPath:'/settings',cancelProfileNavigation(){},tick(){},
-  loadWeb:url=>navigations.push(url),controller:{runJavaScript:value=>scrolls.push(value)}};
+const navigationState={currentIndex:0,settingsOpen:false,settingsWeb:false,
+  account:{settingsReadGeneration:0,cancelProfileNavigation(){}},tick(){},
+  navigation:{currentPath:'/settings',loadWeb:url=>navigations.push(url)},
+  controller:{runJavaScript:value=>scrolls.push(value)}};
 goRoute.call(navigationState,0);assert.deepEqual(navigations,['/home'],'二级页点击上次选中的标签仍须导航');
-navigationState.currentPath='/home';goRoute.call(navigationState,0);assert.deepEqual(scrolls,['scroll']);
+navigationState.navigation.currentPath='/home';goRoute.call(navigationState,0);assert.deepEqual(scrolls,['scroll']);
 const modalMethods=['bottomChromeHeight','updateWebModal','modalBlocksNetworkReload'].map(name=>
   mainSource.match(new RegExp('^  private '+name+'\\([\\s\\S]*?^  \\}','m'))[0]).join('\n');
 const ModalPage=vm.runInNewContext(stripTypeScriptTypes('class ModalPage{'+modalMethods+'};ModalPage'),{
   isSecondaryUrl:()=>false,isPostDetailUrl:()=>false,FLOATING_BAR_HEIGHT:58,BAR_HEIGHT:56});
 const modalPage=new ModalPage();let insetChanges=0,resumedReloads=0;
 Object.assign(modalPage,{webModalOpen:false,showsNativeNavigation:()=>true,isWide:false,floatingBar:true,bottomInset:24,
+  navigation:{currentUrl:'https://x.com/home'},account:{discovering:false},composer:{sheetOpen:false},
   syncChromeInsets(){insetChanges++;},flushNetworkReload(){resumedReloads++;}});
 assert.equal(modalPage.bottomChromeHeight(),82);
 modalPage.updateWebModal(true);assert.equal(modalPage.bottomChromeHeight(),0);assert.equal(modalPage.modalBlocksNetworkReload(),true);
@@ -146,12 +171,12 @@ const insetBody=mainSource.match(/private overlayTopInset\(\): number \{([\s\S]*
 const topInset=vm.runInNewContext(stripTypeScriptTypes('(function(){'+insetBody+'})'),{
   HEADER_HEIGHT:56,HEADER_CONTENT_LIFT:4
 });
-const insetState={topInset:39,homeTabsHeight:28,viewingHandle:'',overlaysWeb:()=>true,topChromeHeight:()=>56,isHomeRoot:()=>true};
+const insetState={topInset:39,homeTabsHeight:28,navigation:{viewingHandle:''},overlaysWeb:()=>true,topChromeHeight:()=>56,isHomeRoot:()=>true};
 assert.equal(topInset.call(insetState),77,'Home inset ends at the measured underline, not the full title bar');
 insetState.homeTabsHeight=40;assert.equal(topInset.call(insetState),83,'Large text changes the measured boundary');
 insetState.isHomeRoot=()=>false;assert.equal(topInset.call(insetState),95);
-insetState.viewingHandle='alice';assert.equal(topInset.call(insetState),0,'Profile banner has no top inset');
-insetState.viewingHandle='';assert.equal(topInset.call(insetState),95,'Leaving a profile restores the other page inset');
+insetState.navigation.viewingHandle='alice';assert.equal(topInset.call(insetState),0,'Profile banner has no top inset');
+insetState.navigation.viewingHandle='';assert.equal(topInset.call(insetState),95,'Leaving a profile restores the other page inset');
 insetState.topChromeHeight=()=>0;assert.equal(topInset.call(insetState),0);
 insetState.overlaysWeb=()=>false;assert.equal(topInset.call(insetState),0);
 
@@ -161,9 +186,10 @@ const profileMethods=['syncHeaderBlur','resetHeaderBlur','resetProfileLayout','r
 const ProfilePage=vm.runInNewContext(stripTypeScriptTypes('class ProfilePage{'+profileMethods+'};ProfilePage'),{
   HEADER_HEIGHT:56,HEADER_BLUR_DISTANCE:32,hilog:{error(){}},DOMAIN:0,TAG:''});
 const profilePage=new ProfilePage();let blurOffset=0;
-Object.assign(profilePage,{viewingHandle:'alice',webWidth:440,topInset:39,avatarAlive:true,appBackground:false,rawWeb:false,
+Object.assign(profilePage,{viewingHandle:'alice',webWidth:440,topInset:39,pageAlive:true,appBackground:false,rawWeb:false,
   currentUrl:'https://x.com/alice',controller:{getUrl:()=>profilePage.currentUrl},lastBlurOffset:0,
   blurScroller:{scrollTo:({yOffset,animation})=>{assert.equal(animation,false);blurOffset=yOffset;}}});
+profilePage.navigation={get currentUrl(){return profilePage.currentUrl;},get viewingHandle(){return profilePage.viewingHandle;}};
 profilePage.resetProfileLayout();profilePage.syncHeaderBlur(1000);
 assert.equal(blurOffset,0);assert.equal(profilePage.profileTitleOpacity,0);
 const layout={url:profilePage.currentUrl,width:880,viewWidth:440,scrollY:0,ready:true,hasBanner:true,
@@ -209,13 +235,59 @@ hasBanner=false;measure();assert.equal(profileReports.at(-1).bannerBottom,520);a
 profileContext.location={pathname:'/bob',href:'https://x.com/bob'};measure();assert.equal(profileReports.at(-1).ready,false);
 domHandle='bob';measure();assert.equal(profileReports.at(-1).ready,true);assert.equal(profileReports.at(-1).scrollY,100);
 identityHeight=0;measure();assert.equal(profileReports.at(-1).ready,false,'Loading placeholders cannot reveal the title');
-const pageBegin=mainSource.match(/\.onPageBegin\(\(\) => \{([\s\S]*?)\n      \}\)/)[1];
-const begin=vm.runInNewContext('(function(){'+pageBegin+'})');
-const loadingState={webNetworkReady:true,documentLoading:false,incomingPageReady:true,hasError:true,resetProfileLayout(){this.reset=true;},armFirstLoadTimeout(){},updateWebModal(){}};
-begin.call(loadingState);
-assert.equal(loadingState.reset,true);assert.equal(loadingState.documentLoading,true);assert.equal(loadingState.hasError,false);
+const pageBegin=mainSource.match(/\.onPageBegin\(\(event\) => \{([\s\S]*?)\n      \}\)/)[1];
+const begin=vm.runInNewContext('(function(event){'+pageBegin+'})',{session:0});
+const loadingState={webSession:0,webNetworkReady:true,documentLoading:false,incomingPageReady:true,navigation:{hasError:true},resetProfileLayout(){this.reset=true;},armFirstLoadTimeout(){},updateWebModal(){}};
+begin.call(loadingState,{url:'https://x.com/home'});
+assert.equal(loadingState.reset,true);assert.equal(loadingState.documentLoading,true);assert.equal(loadingState.navigation.hasError,false);
 loadingState.documentLoading=false;loadingState.webNetworkReady=false;begin.call(loadingState);
 assert.equal(loadingState.documentLoading,false,'网络策略阻断时不启动加载遮罩');
+// 使用实际 Web 回调验证图片下载、旧文档和旧会话不会污染错误页及重试地址。
+const [receiveError,renderExited,pageEnd]=['onErrorReceive','onRenderExited','onPageEnd'].map(name=>{
+  const body=mainSource.match(new RegExp('\\.'+name+'\\(\\(event\\) => \\{([\\s\\S]*?)\\n      \\}\\)'))[1];
+  return vm.runInNewContext(stripTypeScriptTypes('(function(event){'+body+'})'),{
+    session:0,DOMAIN:1,TAG:'test',hilog:{debug(){},error(){}},$r:key=>key
+  });
+});
+const errorState={webSession:0,webNetworkReady:true,loadingWebUrl:'',webSource:'https://x.com/home',
+  controller:{getUrl:()=> 'https://x.com/home'},navigation:{hasError:false,progress:0,currentUrl:'https://x.com/home'},failedWebUrl:'',imageViewerOpen:true,
+  incomingPageReady:false,incomingContent:{kind:'link',value:'https://x.com/alice'},
+  finishFirstLoad(){this.firstLoadDone=true;},toast(){}};
+const failure=(url,mainFrame=true,code=-105)=>({
+  request:{getRequestUrl:()=>url,isMainFrame:()=>mainFrame},error:{getErrorCode:()=>code}
+});
+for(const event of [failure('https://pbs.twimg.com/media/photo.jpg'),failure('https://x.com/explore'),
+  failure('https://x.com/home',false),failure('https://x.com/home',true,-3)]){
+  receiveError.call(errorState,event);
+  assert.equal(errorState.navigation.hasError,false);
+  assert.equal(errorState.failedWebUrl,'');
+  assert.equal(errorState.incomingContent.kind,'link');
+}
+errorState.imageViewerOpen=false;
+assert.equal(errorState.navigation.hasError,false,'图片返回后正常网页不能出现错误遮罩');
+errorState.loadingWebUrl='https://x.com/alice#posts';
+pageEnd.call(errorState,{url:'https://x.com/home'});
+assert.equal(errorState.loadingWebUrl,'https://x.com/alice#posts','上一页结束不能清除当前加载目标');
+receiveError.call(errorState,failure('https://x.com/home'));
+assert.equal(errorState.navigation.hasError,false,'新导航期间忽略上一页的延迟错误');
+receiveError.call(errorState,failure('https://x.com/alice'));
+assert.equal(errorState.navigation.hasError,true,'新文档失败时控制器仍指向旧地址也必须显示错误');
+assert.equal(errorState.failedWebUrl,'https://x.com/alice');
+errorState.controller.getUrl=()=> 'https://x.com/alice';
+errorState.navigation.currentUrl='https://x.com/alice';
+pageEnd.call(errorState,{url:'https://x.com/alice'});
+assert.equal(errorState.navigation.hasError,true);
+assert.equal(errorState.incomingPageReady,false,'失败后的结束回调不能假报网页可用');
+errorState.webSession=1;errorState.navigation.hasError=false;errorState.failedWebUrl='';
+for(const [callback,event] of [[receiveError,failure('https://x.com/alice')],[renderExited,{detail:1}],
+  [pageEnd,{url:'https://x.com/alice'}],[begin,{url:'https://x.com/alice'}]]){
+  callback.call(errorState,event);
+  assert.equal(errorState.navigation.hasError,false,'旧 WebView 回调不能破坏重试后新建的页面');
+  assert.equal(errorState.failedWebUrl,'');
+}
+errorState.webSession=0;
+renderExited.call(errorState,{detail:1});
+assert.equal(errorState.navigation.hasError,true,'当前渲染进程退出仍须显示错误');
 let loadTimeout;
 const loadingMethods=['armFirstLoadTimeout','finishFirstLoad'].map(name=>mainSource.match(new RegExp('^  private '+name+'\\([\\s\\S]*?^  \\}','m'))[0]).join('\n');
 const LoadingPage=vm.runInNewContext(stripTypeScriptTypes('class LoadingPage{'+loadingMethods+'};LoadingPage'),{
@@ -228,14 +300,19 @@ const replyMethod=mainSource.match(/private replyToPost\(\): void \{([\s\S]*?)\n
 const reply=vm.runInNewContext(stripTypeScriptTypes('(function(){'+replyMethod+'})'),{
   TWITTER_BASE:'https://x.com',web_webview:{WebviewController:class{}}
 });
-const replyState={openingCompose:false,sheetOpen:false,currentPath:'/alice/status/123',composeOwner:'alice'};
+const composerSource=readFileSync(new URL('../entry/src/main/ets/common/ComposerSession.ets',import.meta.url),'utf8');
+const replySessionMethods=['openReply','resetController'].map(name=>composerSource.match(new RegExp('^  '+name+'\\([\\s\\S]*?^  \\}', 'm'))[0]).join('\n');
+const ReplySession=vm.runInNewContext(stripTypeScriptTypes('class ReplySession{'+replySessionMethods+'};ReplySession'),{
+  TWITTER_BASE:'https://x.com',web_webview:{WebviewController:class{}}
+});
+const replyState={navigation:{currentPath:'/alice/status/123'},composer:new ReplySession()};
 reply.call(replyState);
-assert.equal(replyState.sheetOpen,true);
-assert.equal(replyState.composeUrl,'https://x.com/intent/tweet?in_reply_to=123');
-assert.equal(replyState.webComposer,true);assert.equal(replyState.composeLoading,true);
-assert.equal(replyState.composeOwner,'');
-const replyController=replyState.composeController;
-reply.call(replyState);assert.equal(replyState.composeController,replyController);
+assert.equal(replyState.composer.sheetOpen,true);
+assert.equal(replyState.composer.composeUrl,'https://x.com/intent/tweet?in_reply_to=123');
+assert.equal(replyState.composer.webComposer,true);assert.equal(replyState.composer.composeLoading,true);
+assert.equal(replyState.composer.composeOwner,'');
+const replyController=replyState.composer.composeController;
+reply.call(replyState);assert.equal(replyState.composer.composeController,replyController);
 // 测试真实注入串，避免只测试一份复制的实现。
 for (const value of ['中文\n第二段😀 https://x.com', '  两侧空格  ', 'a\r\nb']) {
   let text = '';
@@ -473,7 +550,7 @@ const ScrollPage=vm.runInNewContext(stripTypeScriptTypes('class ScrollPage{'+scr
   TouchType,isPostDetailUrl:routes.isPostDetailUrl,Date:{now:()=>scrollTime},HdsAnimationMode:{SCROLL_ANIMATION:0}});
 const scroll=new ScrollPage();
 Object.assign(scroll,{overlaysWeb:()=>true,syncHeaderBlur(){},resetHeaderBlur(){},autoHideBar:true,isWide:false,
-  currentUrl:'https://x.com/home',tabsController:{applyHideAnimation:()=>animations.push('hide'),
+  navigation:{currentUrl:'https://x.com/home'},tabsController:{applyHideAnimation:()=>animations.push('hide'),
     applyShowAnimation:()=>animations.push('show')}});
 let collapsed=false;
 Object.defineProperty(scroll,'barsCollapsed',{get:()=>collapsed,set(value){collapsed=value;scroll.onBarsCollapsedChanged();}});
@@ -546,10 +623,10 @@ assert.equal(scroll.barsCollapsed,false,'A slow active drag does not expire like
 startCollapsed();sample(47);sample(46);
 assert.equal(scroll.barsCollapsed,false,'Top region always shows navigation');
 assert.deepEqual(animations,['show'],'Top-region callbacks must not restart the show animation');
-for(const excluded of [{isWide:true},{autoHideBar:false},{currentUrl:'https://x.com/alice/status/123'}]){
+for(const excluded of [{isWide:true},{autoHideBar:false},{navigation:{currentUrl:'https://x.com/alice/status/123'}}]){
   startCollapsed();Object.assign(scroll,excluded);sample(500);sample(600);assert.equal(scroll.barsCollapsed,false);
   assert.deepEqual(animations,['show']);
-  Object.assign(scroll,{isWide:false,autoHideBar:true,currentUrl:'https://x.com/home'});
+  Object.assign(scroll,{isWide:false,autoHideBar:true,navigation:{currentUrl:'https://x.com/home'}});
 }
 startCollapsed();scroll.overlaysWeb=()=>false;sample(500);assert.equal(scroll.barsCollapsed,false);
 startCollapsed();scroll.resetChromeScroll();scroll.resetChromeScroll();
@@ -564,28 +641,35 @@ const pillBody=mainSource.match(/private settingsPillVisible\(\): boolean \{([\s
 const pill=vm.runInNewContext(stripTypeScriptTypes('(function(){'+pillBody+'})'),{
   isSiteUrl:url=>/^https:\/\/x\.com\//.test(url)
 });
-const pillState={firstLoadDone:true,hasError:false,authenticationPage:false,
-  currentUrl:'https://x.com/alice/about',currentPath:'/alice/about',
+const pillState={firstLoadDone:true,navigation:{hasError:false,currentUrl:'https://x.com/alice/about',currentPath:'/alice/about'},
+  authenticationPage:false,composer:{sheetOpen:false},account:{discovering:false},
   showsNativeNavigation:()=>false,isMediaViewer:()=>false};
 for(const path of ['/alice/about','/settings','/settings/your_twitter_data/account','/unknown/path']){
-  pillState.currentPath=path;pillState.currentUrl='https://x.com'+path;
+  pillState.navigation.currentPath=path;pillState.navigation.currentUrl='https://x.com'+path;
   assert.equal(pill.call(pillState),false,path);
 }
 pillState.authenticationPage=true;
 assert.equal(pill.call(pillState),false,'A stale auth read cannot expose the pill on a normal page');
 pillState.authenticationPage=false;
 for(const path of ['/','/login','/signup','/i/flow/login','/i/flow/signup']){
-  pillState.currentPath=path;pillState.currentUrl='https://x.com'+path;
+  pillState.navigation.currentPath=path;pillState.navigation.currentUrl='https://x.com'+path;
   assert.equal(pill.call(pillState),true,path);
 }
-pillState.currentPath='/unknown/path';pillState.currentUrl='https://x.com/unknown/path';
+pillState.navigation.currentPath='/unknown/path';pillState.navigation.currentUrl='https://x.com/unknown/path';
 pillState.firstLoadDone=false;assert.equal(pill.call(pillState),true);
-pillState.firstLoadDone=true;pillState.hasError=true;assert.equal(pill.call(pillState),true);
+pillState.firstLoadDone=true;pillState.navigation.hasError=true;assert.equal(pill.call(pillState),false,'错误页已有网络设置，不重复显示悬浮入口');
+pillState.rawWeb=true;assert.equal(pill.call(pillState),false,'直接网页模式同样只保留错误页设置入口');
+pillState.rawWeb=false;pillState.navigation.hasError=false;
 pillState.showsNativeNavigation=()=>true;assert.equal(pill.call(pillState),false);
 pillState.showsNativeNavigation=()=>false;
-for(const state of ['fullScreen','imageViewerOpen','sheetOpen','networkOpen','settingsOpen','discovering']) {
-  pillState[state]=true;assert.equal(pill.call(pillState),false,state);pillState[state]=false;
+for(const state of ['fullScreen','imageViewerOpen','networkOpen','settingsOpen','discovering']) {
+  if(state==='discovering')pillState.account.discovering=true;
+  else pillState[state]=true;
+  assert.equal(pill.call(pillState),false,state);
+  if(state==='discovering')pillState.account.discovering=false;
+  else pillState[state]=false;
 }
+pillState.composer.sheetOpen=true;assert.equal(pill.call(pillState),false,'sheetOpen');pillState.composer.sheetOpen=false;
 pillState.rawWeb=true;assert.equal(pill.call(pillState),true,'Original web mode keeps its return entry');
 
 // 头像下载、缓存和异步状态测试见 check-avatar-loading.mjs，使用生产下载器覆盖平台 I/O 边界。
@@ -648,22 +732,22 @@ const fabExpression=mainSource.match(/if \((this\.showsNativeNavigation\(\) && t
 const fabVisible=vm.runInNewContext('(function(){return '+fabExpression+';})');
 const homeBody=mainSource.match(/private isHomeRoot\(\): boolean \{([\s\S]*?)\n  \}/)[1];
 const isHomeRoot=vm.runInNewContext('(function(){'+homeBody+'})');
-const fabState={currentPath:'/home',isHomeRoot,showsNativeNavigation:()=>true,hasError:false,firstLoadDone:true};
+const fabState={navigation:{currentPath:'/home',hasError:false},isHomeRoot,showsNativeNavigation:()=>true,firstLoadDone:true};
 assert.equal(fabVisible.call(fabState),true);
 for (const path of ['/explore','/search','/notifications','/i/chat','/messages/compose','/alice','/alice/status/123','/settings']) {
-  fabState.currentPath=path;assert.equal(fabVisible.call(fabState),false,path);
+  fabState.navigation.currentPath=path;assert.equal(fabVisible.call(fabState),false,path);
 }
-fabState.currentPath='/home';fabState.hasError=true;assert.equal(fabVisible.call(fabState),false);
-fabState.hasError=false;fabState.firstLoadDone=false;assert.equal(fabVisible.call(fabState),false);
+fabState.navigation.currentPath='/home';fabState.navigation.hasError=true;assert.equal(fabVisible.call(fabState),false);
+fabState.navigation.hasError=false;fabState.firstLoadDone=false;assert.equal(fabVisible.call(fabState),false);
 // 新草稿使旧异步校验失效，后台不再发起校验。
 let syncTask, resolveFill;
 const composeValidationContext={DRAFT_SAVE_DEBOUNCE_MS:700,COMPOSER_READY_SCRIPT:scripts.COMPOSER_READY_SCRIPT,
-  fillComposerScript:scripts.fillComposerScript,$r:key=>key,MainTabs:{unquote:value=>value},
+  fillComposerScript:scripts.fillComposerScript,$r:key=>key,unquoteScriptResult:value=>value,
   clearTimeout(){},setTimeout:callback=>{syncTask=callback;return 1;},hilog:{warn(){}},DOMAIN:1,TAG:'test'};
-const method=name=>mainSource.match(new RegExp('private '+name+'\\([^)]*\\): void \\{([\\s\\S]*?)\\n  \\}'))[1];
+const method=name=>composerSource.match(new RegExp('private '+name+'\\([^)]*\\): void \\{([\\s\\S]*?)\\n  \\}'))[1];
 const syncCompose=vm.runInNewContext(stripTypeScriptTypes('(function(){'+method('scheduleComposeSync')+'})'),composeValidationContext);
 const clearCompose=vm.runInNewContext(stripTypeScriptTypes('(function(){'+method('clearComposeSync')+'})'),composeValidationContext);
-const composing={composeRevision:0,composeSyncTimer:-1,appBackground:false,sheetOpen:true,webComposer:false,
+const composing={composeRevision:0,composeSyncTimer:-1,alive:true,appBackground:false,sheetOpen:true,webComposer:false,
   composeLoading:false,composePreparing:false,posting:false,postUncertain:false,draft:'第一份',composeOwner:'alice',
   composeController:{runJavaScript:()=>new Promise(resolve=>{resolveFill=resolve;})},clearComposeSync:clearCompose};
 syncCompose.call(composing);const oldValidation=syncTask();
@@ -684,9 +768,14 @@ const ClientPage=vm.runInNewContext(stripTypeScriptTypes('class ClientPage{'+cli
   hilog:{error(){}},DOMAIN:0,TAG:'test'
 });
 const client=new ClientPage();const saved=[];let failedSave=false;let notices=0;
-Object.assign(client,{enabledTabs:[0,1,2,3,4],currentIndex:0,currentUrl:'https://x.com/home',settingsReadGeneration:0,
-  accountName:'Alice',incomingPageReady:true,resetChromeScroll(){},resetProfileLayout(){},
-  putPreference:async(key,value)=>{if(failedSave)throw Error('disk');saved.push([key,value]);},toast(){notices++;},loadWeb(url){this.loaded=url;}});
+Object.assign(client,{enabledTabs:[0,1,2,3,4],currentIndex:0,settingsReadGeneration:0,
+  account:{discovering:false,settingsReadGeneration:0,accountName:'Alice',accountLoading:false,accountError:false,
+    cancelProfileNavigation(){}},incomingPageReady:true,resetChromeScroll(){},resetProfileLayout(){},
+  putPreference:async(key,value)=>{if(failedSave)throw Error('disk');saved.push([key,value]);},toast(){notices++;}});
+client.navigation=navigationFor({...client,currentUrl:'https://x.com/home',toast:client.toast},
+  {loadUrl:url=>{client.loaded=url;},runJavaScript:async()=>''});
+client.navigation.host.controller=()=>({loadUrl:url=>{client.loaded=url;},runJavaScript:async()=>''});
+client.navigation.loadWeb=async url=>{client.loaded=url;};
 client.openSettings();assert.equal(client.currentIndex,4);assert.equal(client.settingsOpen,true);
 client.syncFromUrl('https://x.com/alice');assert.equal(client.currentIndex,4,'后台读取本人资料不抢占设置标签');
 client.openSettingsRoute('/settings/notifications');client.syncFromUrl('https://x.com/settings/notifications');
@@ -713,7 +802,7 @@ assert.equal(vm.runInNewContext(appearance.accountDetailsScript('alice'),{locati
 console.log('PASS: native settings origins, stable navigation items, persistence failure, local theme and account boundaries');
 
 // 验证指定入口直接导航、身份识别取消与抽屉清理、设置加载不导航、返回设置、旧账号结果失效、后台弹层不影响原生底栏、排序及五项上限、偏好持久化。
-const navMethods = ['closeWebDrawer', 'loadWeb', 'openSettingsRoute', 'openOwnProfile', 'cancelProfileNavigation', 'acceptHandle', 'onBackPress', 'reorderTabs', 'setMaterialLevel', 'currentHdsMaterialLevel'].map(name =>
+const navMethods = ['openSettingsRoute', 'openOwnProfile', 'onBackPress', 'reorderTabs', 'setMaterialLevel', 'currentHdsMaterialLevel'].map(name =>
   mainSource.match(new RegExp('^  (?:private )?(?:async )?' + name + '\\([\\s\\S]*?^  \\}', 'm'))[0]).join('\n');
 const NavTestPage = vm.runInNewContext(stripTypeScriptTypes('class NavTestPage {\n' + navMethods + '\n};NavTestPage'), {
   TWITTER_ROUTES: ['https://x.com/home'],
@@ -730,26 +819,49 @@ const NavTestPage = vm.runInNewContext(stripTypeScriptTypes('class NavTestPage {
   $r: v => v
 });
 
+const accountMethods=['closeWebDrawer','cancelProfileNavigation','acceptHandle','finishDiscover'].map(accountMethod).join('\n');
+const AccountPage=vm.runInNewContext(stripTypeScriptTypes('class AccountPage{'+accountMethods+'};AccountPage'),{
+  profileUrl:handle=>'https://x.com/'+handle,$r:value=>value,hilog:{warn(){}},DOMAIN:0,TAG:'test'
+});
+const accountFor=(page,overrides={})=>{
+  const account=new AccountPage();
+  Object.assign(account,{profileNavigation:0,settingsReadGeneration:0,discovering:false,ownHandle:'',accountName:'',accountBio:'',
+    host:{isControllerReady:()=>!!page.controller,getUIContext:()=>({getHostContext:()=>({})}),
+      controller:()=>page.controller,loadWeb:(...args)=>page.navigation.loadWeb(...args),
+      accountChanged:()=>page.unread?.resetAccount?.(),toast:value=>page.toast?.(value)},
+    saveOwnHandle(){},restoreAvatar(){},readAvatar(){},resetAvatar(){},confirmCurrentAccount:async()=>'',...overrides});
+  return account;
+};
+const UnreadPage=vm.runInNewContext(stripTypeScriptTypes('class UnreadPage{'+
+  ['resetAccount','clearNetworkBadgeCounts'].map(unreadMethod).join('\n')+'};UnreadPage'),{
+  DOMAIN:0,TAG:'test',hilog:{warn(){}}
+});
+const unreadFor=page=>{
+  const unread=new UnreadPage();
+  Object.assign(unread,{unreadNotifications:0,unreadMessages:0,badgeShown:-1,
+    host:{controller:()=>page.controller}});
+  return unread;
+};
+
 // 1. 指定入口直接导航 (Direct navigation on specified entries)
 {
   const nav = new NavTestPage();
   const directUrls = [], scriptRuns = [];
   Object.assign(nav, {
     webNetworkReady: true,
-    navigationGeneration: 0,
-    profileNavigation: 0,
     settingsOpen: true,
     settingsWeb: false,
     settingsWebUrl: '',
     settingsWebRoot: '',
     currentUrl: 'https://x.com/home',
-    cancelProfileNavigation() {},
     controller: {
       loadUrl: url => directUrls.push(url),
       runJavaScript: async s => { scriptRuns.push(s); return 'clicked'; }
     },
     toast() {}
   });
+  nav.account=accountFor(nav,{cancelProfileNavigation:async()=>{},closeWebDrawer:async()=>{}});
+  nav.navigation=navigationFor(nav);
 
   // 书签与平台设置直接导航
   nav.openSettingsRoute('/i/bookmarks');
@@ -769,7 +881,7 @@ const NavTestPage = vm.runInNewContext(stripTypeScriptTypes('class NavTestPage {
 
   // 本人主页在账号已知时直接导航
   directUrls.length = 0;
-  nav.ownHandle = 'alice';
+  nav.account.ownHandle = 'alice';
   nav.settingsOpen = true;
   await nav.openOwnProfile();
   assert.equal(nav.settingsWeb, true);
@@ -814,14 +926,16 @@ const NavTestPage = vm.runInNewContext(stripTypeScriptTypes('class NavTestPage {
   Object.assign(nav, {
     profileNavigation: 5,
     discovering: true,
-    incomingControllerReady: true,
+    host:{isControllerReady:()=>true},
     controller: {
       runJavaScript: async s => { cancelScriptRun = s; }
     }
   });
-  await nav.cancelProfileNavigation();
-  assert.equal(nav.profileNavigation, 6);
-  assert.equal(nav.discovering, false);
+  const account=accountFor(nav,{profileNavigation:nav.profileNavigation,discovering:nav.discovering,
+    host:{isControllerReady:()=>true,controller:()=>nav.controller}});
+  await account.cancelProfileNavigation();
+  assert.equal(account.profileNavigation, 6);
+  assert.equal(account.discovering, false);
   assert.match(cancelScriptRun, /__otBootCancel/);
 
   // 连续多次调用 openOwnProfile 时，旧请求返回不得取消新请求
@@ -833,18 +947,15 @@ const NavTestPage = vm.runInNewContext(stripTypeScriptTypes('class NavTestPage {
     Object.assign(raceNav, {
       profileNavigation: 0,
       discovering: false,
-      avatarAlive: true,
+      pageAlive: true,
       appBackground: false,
       ownHandle: '',
-      incomingControllerReady: true,
       isHomeRoot: () => true,
-      loadWeb: (url) => { directLoads.push(url); },
-      acceptHandle: (h) => { raceNav.ownHandle = h; directLoads.push('https://x.com/' + h); },
       toast: () => {},
       controller: {
         runJavaScript: async (s) => {
           if (s.includes('__otBootCancel')) return '';
-          if (raceNav.profileNavigation === 1) {
+          if (raceNav.account?.profileNavigation === 1) {
             await firstPromise;
             return '"alice"';
           }
@@ -852,19 +963,23 @@ const NavTestPage = vm.runInNewContext(stripTypeScriptTypes('class NavTestPage {
         }
       }
     });
+    raceNav.account=accountFor(raceNav,{profileNavigation:0,discovering:false,ownHandle:'',
+      cancelProfileNavigation:async function(){this.profileNavigation++;this.discovering=false;},
+      acceptHandle:function(handle){this.ownHandle=handle;directLoads.push('https://x.com/'+handle);}});
+    raceNav.navigation=navigationFor(raceNav);
 
     const p1 = raceNav.openOwnProfile();
     // 等待一个微任务周期，让 p1 完成初始清理并进入资料脚本读取中
     await new Promise(r => setTimeout(r, 0));
     const p2 = raceNav.openOwnProfile();
     await p2;
-    assert.equal(raceNav.ownHandle, 'bob');
+    assert.equal(raceNav.account.ownHandle, 'bob');
     assert.deepEqual(directLoads, ['https://x.com/bob']);
 
     resolveFirst();
     await p1;
-    assert.equal(raceNav.ownHandle, 'bob', '旧请求不得覆盖新请求账号');
-    assert.equal(raceNav.profileNavigation, 2, '旧请求结束不得递增世代');
+    assert.equal(raceNav.account.ownHandle, 'bob', '旧请求不得覆盖新请求账号');
+    assert.equal(raceNav.account.profileNavigation, 2, '旧请求结束不得递增世代');
     assert.deepEqual(directLoads, ['https://x.com/bob'], '旧请求不得额外触发导航');
   }
 
@@ -876,10 +991,9 @@ const NavTestPage = vm.runInNewContext(stripTypeScriptTypes('class NavTestPage {
     Object.assign(errNav, {
       profileNavigation: 0,
       discovering: false,
-      avatarAlive: true,
+      pageAlive: true,
       appBackground: false,
       ownHandle: '',
-      incomingControllerReady: true,
       toast: (msg) => { toastMsg = msg; },
       controller: {
         runJavaScript: async (s) => {
@@ -891,11 +1005,15 @@ const NavTestPage = vm.runInNewContext(stripTypeScriptTypes('class NavTestPage {
         }
       }
     });
+    errNav.account=accountFor(errNav,{profileNavigation:0,discovering:false,ownHandle:'',
+      cancelProfileNavigation:async function(){this.profileNavigation++;this.discovering=false;},
+      closeWebDrawer:async()=>{drawerClosed=true;}});
+    errNav.navigation=navigationFor(errNav);
 
     await errNav.openOwnProfile();
     assert.equal(toastMsg, 'app.string.account_unconfirmed', '识别异常必须提示 account_unconfirmed');
     assert.equal(drawerClosed, true, '识别异常必须清理网页抽屉');
-    assert.equal(errNav.discovering, false, '识别异常后 discovering 必须恢复 false');
+    assert.equal(errNav.account.discovering, false, '识别异常后 discovering 必须恢复 false');
   }
 }
 
@@ -905,11 +1023,11 @@ const NavTestPage = vm.runInNewContext(stripTypeScriptTypes('class NavTestPage {
   let navUrl = '';
   Object.assign(navClient, {
     currentIndex: 0,
-    currentUrl: 'https://x.com/home',
     settingsOpen: false,
+    account:{accountError:false},
     resetChromeScroll() {},
     resetProfileLayout() {},
-    loadWeb: url => { navUrl = url; }
+    navigation: {currentUrl:'https://x.com/home',loadWeb: url => { navUrl = url; }}
   });
   navClient.openSettings();
   assert.equal(navClient.settingsOpen, true);
@@ -922,17 +1040,18 @@ const NavTestPage = vm.runInNewContext(stripTypeScriptTypes('class NavTestPage {
   const nav = new NavTestPage();
   let backwardCalled = false;
   Object.assign(nav, {
+    composer: { sheetOpen: false },
     settingsWeb: true,
     settingsOpen: false,
     settingsWebRoot: 'https://x.com/settings/your_twitter_data',
-    currentUrl: 'https://x.com/settings/your_twitter_data',
-    hasError: false,
-    cancelProfileNavigation() {},
+    navigation:{currentUrl:'https://x.com/settings/your_twitter_data',hasError:false},
     controller: {
       accessBackward: () => true,
       backward: () => { backwardCalled = true; }
     }
   });
+  nav.account=accountFor(nav,{cancelProfileNavigation:async()=>{}});
+  nav.navigation=navigationFor(nav);
 
   // 在 settingsWebRoot 处点击返回，应回到原生设置
   const handledRoot = nav.onBackPress();
@@ -944,19 +1063,19 @@ const NavTestPage = vm.runInNewContext(stripTypeScriptTypes('class NavTestPage {
   // 网页加载失败时返回，也应回到原生设置
   nav.settingsWeb = true;
   nav.settingsOpen = false;
-  nav.hasError = true;
-  nav.currentUrl = 'https://x.com/settings/other';
+  nav.navigation.hasError = true;
+  nav.navigation.currentUrl = 'https://x.com/settings/other';
   const handledError = nav.onBackPress();
   assert.equal(handledError, true);
   assert.equal(nav.settingsWeb, false);
   assert.equal(nav.settingsOpen, true);
-  assert.equal(nav.hasError, false);
+  assert.equal(nav.navigation.hasError, false);
 
   // 深层网页有历史记录时，返回后退历史
   nav.settingsWeb = true;
   nav.settingsOpen = false;
-  nav.hasError = false;
-  nav.currentUrl = 'https://x.com/settings/subpage';
+  nav.navigation.hasError = false;
+  nav.navigation.currentUrl = 'https://x.com/settings/subpage';
   const handledBack = nav.onBackPress();
   assert.equal(handledBack, true);
   assert.equal(backwardCalled, true);
@@ -967,30 +1086,22 @@ const NavTestPage = vm.runInNewContext(stripTypeScriptTypes('class NavTestPage {
 {
   const nav = new NavTestPage();
   let avatarReset = false;
-  Object.assign(nav, {
-    ownHandle: 'alice',
-    accountName: 'Alice Old',
-    accountBio: 'Old Bio',
-    unreadNotifications: 5,
-    unreadMessages: 2,
-    badgeShown: 7,
-    cancelProfileNavigation() {},
-    resetAvatar() { avatarReset = true; },
-    clearNetworkBadgeCounts() {},
-    saveOwnHandle() {},
-    restoreAvatar() {},
-    readAvatar() {},
-    finishDiscover() {}
-  });
+  Object.assign(nav,{controller:{runJavaScript:async()=>''}});
+  const unread=unreadFor(nav);
+  unread.unreadNotifications=5;unread.unreadMessages=2;unread.badgeShown=7;
+  nav.unread=unread;
+  nav.account=accountFor(nav,{ownHandle:'alice',accountName:'Alice Old',accountBio:'Old Bio',resetAvatar(){avatarReset=true;},
+    host:{isControllerReady:()=>false,controller:()=>nav.controller,
+      accountChanged:()=>nav.unread.resetAccount()}});
 
   // 账号改变时，清空资料、头像、未读计数
-  nav.acceptHandle('bob', false);
-  assert.equal(nav.ownHandle, 'bob');
-  assert.equal(nav.accountName, '');
-  assert.equal(nav.accountBio, '');
-  assert.equal(nav.unreadNotifications, 0);
-  assert.equal(nav.unreadMessages, 0);
-  assert.equal(nav.badgeShown, -1);
+  nav.account.acceptHandle('bob', false);
+  assert.equal(nav.account.ownHandle, 'bob');
+  assert.equal(nav.account.accountName, '');
+  assert.equal(nav.account.accountBio, '');
+  assert.equal(nav.unread.unreadNotifications, 0);
+  assert.equal(nav.unread.unreadMessages, 0);
+  assert.equal(nav.unread.badgeShown, -1);
   assert.equal(avatarReset, true);
 }
 

@@ -17,30 +17,75 @@ const runtime = { Promise, Date, setTimeout, clearTimeout, DOMAIN: 1, TAG: 'test
   TWITTER_COMPOSE: 'https://x.com/compose/post', OWN_HANDLE_SCRIPT:'owner', $r: key => key,
   preferences: { getPreferences: async () => prefs },
   fillComposerScript: text => 'fill:' + text, clickRouteScript: url => 'route:' + url,
-  web_webview: { WebviewController: class {} },
+  web_webview: { WebviewController: class { loadUrl() {} } },
   hilog: { info() {}, warn() {}, error() {} } };
-const methods = ['unquote', 'persistDraft', 'openWebComposer', 'openCompose', 'loadWeb', 'clearPendingPost', 'clearHandoffDraft'];
+const composerSource = read('entry/src/main/ets/common/ComposerSession.ets')
+  .replace(/^import[\s\S]*?;\r?\n/gm, '').replace(/^@Observed\r?\n/m, '').replace(/^export /gm, '');
+const decodeSource = read('entry/src/main/ets/common/WebChrome.ets').match(/export function unquoteScriptResult[\s\S]*?^}/m)[0].replace('export ', '');
+runtime.unquoteScriptResult = vm.runInNewContext(stripTypeScriptTypes(decodeSource) + ';unquoteScriptResult');
+const ComposerSession = vm.runInNewContext(stripTypeScriptTypes(composerSource) + ';ComposerSession', runtime);
+const methods = ['unquote'];
 const Page = vm.runInNewContext(stripTypeScriptTypes('class MainTabs {\n' + methods.map(method).join('\n') + '\n}; MainTabs'), runtime);
-function page() {
-  const p = new Page();
-  Object.assign(p, { draft: '保留完整文本\nsecond line', composeOwner: 'alice', posting: false, postUncertain: false,
-    webNetworkReady: true, navigationGeneration: 0, profileNavigation: 0, avatarAlive: true,
-    appBackground: false, cancelProfileNavigation() {}, closeWebDrawer() {},
-    composeHandoff: false, composeRevision: 0, draftSaveTimer: -1, draftWrite: Promise.resolve(), sheetOpen: false,
+const sessionClass = name => {
+  const source = read('entry/src/main/ets/common/' + name + '.ets')
+    .replace(/^import[\s\S]*?;\r?\n/gm, '').replace(/^@Observed\r?\n/m, '').replace(/^export /gm, '');
+  return vm.runInNewContext(stripTypeScriptTypes('(function() {\n' + source + '\nreturn ' + name + ';})()'), runtime);
+};
+runtime.FrameCallback = class {};
+const WebNavigation = sessionClass('WebNavigation');
+const AccountSession = sessionClass('AccountSession');
+const UnreadSession = sessionClass('UnreadSession');
+function composer() {
+  const session = new ComposerSession({
     getUIContext: () => ({ getHostContext: () => ({}), showAlertDialog() {} }),
-    clearComposeSync() { this.composeRevision++; }, scheduleComposeSync() {}, acceptHandle() {},
+    acceptHandle() {},
     confirmCurrentAccount: async () => 'Alice', toast: message => notices.push(message),
     putPreference: async (key, value) => {
       if (key === failKey) { throw Error('storage failed'); }
       writes.push([key, value]); store.set(key, value);
-    },
+    }
+  });
+  Object.assign(session, { draft: '保留完整文本\nsecond line', composeOwner: 'alice',
     composeController: { runJavaScript: async () => 'ok', loadUrl() {} } });
+  return session;
+}
+function page() {
+  const p = new Page();
+  p.navigation = new WebNavigation({ controller: () => p.controller, isNetworkReady: () => p.webNetworkReady,
+    cancelProfileNavigation: () => p.account.cancelProfileNavigation(), toast: message => p.toast(message) });
+  p.account = new AccountSession({ getUIContext: () => p.getUIContext(), controller: () => p.controller,
+    url: () => p.navigation.currentUrl, isControllerReady: () => p.incomingControllerReady,
+    isAuthenticationPage: () => p.authenticationPage, isRawWeb: () => p.rawWeb,
+    webImages: () => p.webImages, currentIndex: () => p.currentIndex,
+    isSettingsOpen: () => p.settingsOpen, isComposerOpen: () => p.composer.sheetOpen,
+    accountChanged: () => p.unread.resetAccount(), loadWeb: (...args) => p.navigation.loadWeb(...args),
+    toast: message => p.toast(message) });
+  p.unread = new UnreadSession({ controller: () => p.controller, owner: () => p.account.ownHandle,
+    url: () => p.navigation.currentUrl, isRawWeb: () => p.rawWeb, getUIContext: () => p.getUIContext(),
+    putPreference: async () => {} });
+  // 保留场景中的简洁赋值，实际状态与方法全部落到生产会话实例。
+  for (const [owner, keys] of [
+    [p.navigation, ['navigationGeneration', 'currentUrl', 'currentPath', 'hasError', 'progress', 'loadWeb']],
+    [p.account, ['profileNavigation', 'ownHandle', 'discovering', 'avatarReadRequest', 'avatarFailedUrl',
+      'clearAvatarRetry', 'confirmCurrentAccount', 'acceptHandle', 'cancelProfileNavigation', 'closeWebDrawer']],
+    [p.unread, ['unreadNotifications', 'unreadMessages', 'badgeShown', 'badgeSyncFailures', 'badgeSyncTarget',
+      'badgeSyncing', 'notificationsAllowed', 'retryBadgeRead', 'syncLauncherBadge']]
+  ]) {
+    for (const key of keys) {
+      Object.defineProperty(p, key, { get: () => typeof owner[key] === 'function' ? owner[key].bind(owner) : owner[key],
+        set: value => { owner[key] = value; } });
+    }
+  }
+  Object.assign(p, { composer: composer(), webNetworkReady: true, navigationGeneration: 0,
+    profileNavigation: 0, pageAlive: true, appBackground: false,
+    getUIContext: () => ({ getHostContext: () => ({}), showAlertDialog() {} }),
+    confirmCurrentAccount: async () => 'Alice', toast: message => notices.push(message) });
   return p;
 }
 
 // Handoff persists text and a recovery barrier before touching the webpage; a fresh page never submits it.
 {
-  const p = page(), text = p.draft;
+  const p = composer(), text = p.draft;
   p.composeController.runJavaScript = async () => {
     assert.equal(store.get('compose_draft:alice'), text);
     assert.ok(store.get('compose_handoff:alice'));
@@ -48,7 +93,7 @@ function page() {
   };
   await p.openWebComposer();
   assert.equal(p.webComposer, true); assert.equal(p.draft, text); assert.equal(p.postUncertain, true);
-  const restarted = page();
+  const restarted = composer();
   await restarted.openCompose();
   assert.equal(restarted.draft, text); assert.equal(restarted.composeHandoff, true);
   assert.equal(restarted.postUncertain, true); assert.equal(restarted.webComposer, false);
@@ -59,9 +104,9 @@ function page() {
 }
 // DOM failure, account mismatch and missing native identity still expose the real editor and preserve text.
 for (const failure of ['missing', 'throw', 'account', 'owner']) {
-  const p = page(), text = p.draft;
+  const p = composer(), text = p.draft;
   p.composeController.runJavaScript = async () => { if (failure === 'throw') { throw Error('DOM'); } return 'missing'; };
-  if (failure === 'account') { p.confirmCurrentAccount = async () => 'bob'; }
+  if (failure === 'account') { p.host.confirmCurrentAccount = async () => 'bob'; }
   if (failure === 'owner') {
     p.composeOwner = '';
     p.composeController.runJavaScript = () => { throw Error('must not autofill unidentified account'); };
@@ -70,7 +115,7 @@ for (const failure of ['missing', 'throw', 'account', 'owner']) {
 }
 // A failed deletion leaves the recovery barrier in place.
 {
-  const p = page(); p.postUncertain = true; p.composeHandoff = true;
+  const p = composer(); p.postUncertain = true; p.composeHandoff = true;
   failKey = 'compose_draft:alice'; await p.clearHandoffDraft(); failKey = undefined;
   assert.equal(p.composeHandoff, true); assert.equal(p.postUncertain, true);
 }
@@ -102,8 +147,46 @@ assert.doesNotMatch(viewer, /:\s*item\.source/);
 assert.match(viewer, /needsRecovery\(\)/);
 console.log('PASS: editor fallback, durable handoff, restart barrier, explicit recovery and local-only image display');
 
+// 执行完整会话：销毁时保存最新草稿、清理计时器，并拒绝旧网页校验结果。
+{
+  let timerId = 0, finishFill;
+  const timers = new Map();
+  const Session = vm.runInNewContext(stripTypeScriptTypes(composerSource) + ';ComposerSession', {
+    ...runtime, COMPOSER_READY_SCRIPT: 'ready', POST_RESULT_SCRIPT: 'result',
+    setTimeout: callback => { const id = ++timerId; timers.set(id, callback); return id; },
+    clearTimeout: id => timers.delete(id)
+  });
+  const p = new Session(composer().host);
+  Object.assign(p, { composeOwner: 'alice', sheetOpen: true, composeLoading: false,
+    composeController: { runJavaScript: () => new Promise(resolve => { finishFill = resolve; }) } });
+  p.changeDraft('第一份');
+  const validationId = p.composeSyncTimer;
+  const validation = timers.get(validationId); timers.delete(validationId);
+  const pending = validation();
+  p.changeDraft('最后一份');
+  p.dispose();
+  finishFill('ok'); await pending; await p.draftWrite;
+  assert.equal(store.get('compose_draft:alice'), '最后一份');
+  assert.equal(timers.size, 0, '销毁后不能重新创建校验或草稿定时器');
+  assert.equal(p.composeReady, false);
+
+  // 后台只暂停结果轮询，不解除已提交操作的未知状态；前台恢复确认。
+  const posting = new Session(composer().host);
+  let reads = 0;
+  Object.assign(posting, { posting: true, postUncertain: true,
+    composeController: { runJavaScript: async () => { reads++; return 'submitted'; } } });
+  await posting.checkPostResult();
+  assert.equal(timers.size, 1);
+  posting.setBackground(true);
+  assert.equal(timers.size, 0); assert.equal(posting.postUncertain, true); assert.equal(posting.posting, true);
+  posting.setBackground(false); await Promise.resolve(); await Promise.resolve();
+  assert.equal(reads, 2);
+  posting.dispose(); assert.equal(timers.size, 0);
+}
+console.log('PASS: composer lifetime, latest draft flush, stale validation and background post recovery');
+
 // Real startup reaches its final mount state even when optional material/window APIs fail.
-const extraMethods = ['aboutToAppear', 'closeWebDrawer', 'openOwnProfile', 'cancelProfileNavigation', 'isHomeRoot', 'syncLauncherBadge', 'recoverMediaWeb', 'reloadCurrent'];
+const extraMethods = ['aboutToAppear', 'openOwnProfile', 'isHomeRoot', 'recoverMediaWeb', 'reloadCurrent'];
 const extra = Object.fromEntries(extraMethods.map(name => {
   const code = method(name).replace(/^  (?:private )?/, '');
   return [name, code];
@@ -120,6 +203,7 @@ Object.assign(runtime, { PROFILE_TIMEOUT_MS: 10000, BADGE_RETRY_LIMIT: 3,
   removeExpiredDownloads: async () => {}, NetworkConfig: { getInstance: () => net },
   notificationManager: { async setBadgeNumber(total) { badgeCalls.push(total); if (badgeGate) { await badgeGate; } if (badgeError) { throw badgeError; } } },
   setTimeout: callback => { waits.push(callback); return waits.length; },
+  setInterval: () => 1, clearInterval() {},
   profileUrl: handle => 'https://x.com/' + handle,
   isSiteUrl: () => true });
 const ExtraPage = vm.runInNewContext(stripTypeScriptTypes('class ExtraPage {\n' + Object.values(extra).join('\n') + '\n};ExtraPage'), runtime);
@@ -139,7 +223,7 @@ for (const transition of ['blocked', 'rebuilt']) {
 }
 {
   const p = page();
-  Object.assign(p, { avatarAlive: true, ownHandle: '',
+  Object.assign(p, { pageAlive: true, ownHandle: '',
     bridge: Object.fromEntries(['setImageHandler','setProfileHandler','setThemeHandler','setHandler','setModalHandler'].map(name => [name, () => {}])),
     applyBreakpoints() {}, armFirstLoadTimeout() {}, armBadgeRefresh() {}, syncChromeInsets() {},
     recoverMediaWeb: ExtraPage.prototype.recoverMediaWeb });
@@ -158,7 +242,7 @@ for (const transition of ['blocked', 'rebuilt']) {
 for (const scenario of ['page_failed', 'apply_recovered', 'apply_failed']) {
   const p = page();
   let applies = 0, refreshes = 0;
-  Object.assign(p, { avatarAlive: true, ownHandle: '',
+  Object.assign(p, { pageAlive: true, ownHandle: '',
     bridge: Object.fromEntries(['setImageHandler','setProfileHandler','setThemeHandler','setHandler','setModalHandler'].map(name => [name, () => {}])),
     applyBreakpoints() {}, armFirstLoadTimeout() {}, armBadgeRefresh() {}, syncChromeInsets() {},
     recoverMediaWeb: ExtraPage.prototype.recoverMediaWeb });
@@ -202,8 +286,6 @@ console.log('PASS: error-page retry reapplies DoH, preserves failed URL, rebuild
   Object.assign(p, { currentPath: '/search', incomingControllerReady: false,
     controller:{runJavaScript:async()=> 'Alice'},
     isHomeRoot: ExtraPage.prototype.isHomeRoot,
-    cancelProfileNavigation: ExtraPage.prototype.cancelProfileNavigation,
-    closeWebDrawer: ExtraPage.prototype.closeWebDrawer,
     loadWeb: async () => {throw Error('不得绕回主页');}, acceptHandle: (...args) => accepted.push(args) });
   await ExtraPage.prototype.openOwnProfile.call(p);
   assert.deepEqual(accepted, [['Alice', true]]);
@@ -219,8 +301,6 @@ console.log('PASS: error-page retry reapplies DoH, preserves failed URL, rebuild
   const p=page(),accepted=[];
   Object.assign(p,{currentPath:'/search',incomingControllerReady:false,
     controller:{runJavaScript:async()=> ''},isHomeRoot:ExtraPage.prototype.isHomeRoot,
-    cancelProfileNavigation:ExtraPage.prototype.cancelProfileNavigation,
-    closeWebDrawer:ExtraPage.prototype.closeWebDrawer,
     loadWeb:async(url,keepProfile)=>{assert.equal(url,'https://x.com/home');assert.equal(keepProfile,true);},
     acceptHandle:(...args)=>accepted.push(args)});
   const navigating=ExtraPage.prototype.openOwnProfile.call(p);await tick();
@@ -232,7 +312,7 @@ console.log('PASS: error-page retry reapplies DoH, preserves failed URL, rebuild
   const p = page(); let retried = 0;
   Object.assign(p, { ownHandle: 'alice', unreadNotifications: 2, unreadMessages: 1, badgeShown: -1,
     badgeSyncFailures: 0, badgeSyncTarget: '', badgeSyncing: false,
-    notificationsAllowed: () => true, retryBadgeRead() { retried++; }, syncLauncherBadge: ExtraPage.prototype.syncLauncherBadge });
+    notificationsAllowed: () => true, retryBadgeRead() { retried++; } });
   badgeError = Error('system busy'); await p.syncLauncherBadge();
   assert.equal(p.badgeShown, -1); assert.equal(retried, 1);
   badgeError = undefined; await p.syncLauncherBadge(); assert.equal(p.badgeShown, 3);
@@ -243,8 +323,8 @@ console.log('PASS: error-page retry reapplies DoH, preserves failed URL, rebuild
   p.unreadMessages = 4; badgeGate = undefined; release(); await first; await tick();
   assert.equal(p.badgeShown, 6);
   badgeError = Error('still busy'); p.unreadMessages = 5;
-  for (let i = 0; i < 5; i++) { await p.syncLauncherBadge(); }
-  assert.equal(p.badgeSyncFailures, 3); assert.equal(badgeCalls.filter(total => total === 7).length, 3);
+  for (let i = 0; i < 8; i++) { await p.syncLauncherBadge(); }
+  assert.equal(p.badgeSyncFailures, 6); assert.equal(badgeCalls.filter(total => total === 7).length, 6);
   badgeError = undefined;
 }
 

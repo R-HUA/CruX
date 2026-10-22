@@ -12,10 +12,12 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import assert from 'node:assert/strict';
+import { stripTypeScriptTypes } from 'node:module';
 import vm from 'node:vm';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const chrome = join(here, '..', 'entry', 'src', 'main', 'ets', 'common', 'WebChrome.ets');
+const unreadSessionPath = join(here, '..', 'entry', 'src', 'main', 'ets', 'common', 'UnreadSession.ets');
 
 function extractScript() {
   const source = readFileSync(chrome, 'utf8').replace(/\r\n/g, '\n');
@@ -161,5 +163,78 @@ assert.equal(warnings, 3);
 window.__otBadgeCounts = {notifications:5,messages:2,time:Date.now()-60001};
 assert.equal(run(script, {[NOTIFICATIONS]:[element({text:'',attrs:{'aria-label':'Notifications (3 unread)'}})]}, '', window), '3/-1');
 console.log('Passive XHR counts, account changes, response boundaries and stale response fallback passed.');
+
+// Run the production session against platform doubles; page DOM checks above remain independent.
+const unreadSource = readFileSync(unreadSessionPath, 'utf8')
+  .replace(/^import .*;\r?\n/gm, '')
+  .replace(/^@Observed\r?\n/m, '')
+  .replace(/^export /gm, '');
+const decodeSource = readFileSync(chrome, 'utf8')
+  .match(/export function unquoteScriptResult[\s\S]*?^}/m)[0]
+  .replace('export ', '');
+const unquoteScriptResult = vm.runInNewContext(stripTypeScriptTypes(decodeSource) + ';unquoteScriptResult');
+let nextTimer = 0;
+const intervals = new Map();
+const timeouts = new Map();
+const unreadRuntime = {
+  UNREAD_COUNTS_SCRIPT: 'badge-counts', unquoteScriptResult, Date, Promise,
+  setInterval(callback) { const id = ++nextTimer; intervals.set(id, callback); return id; },
+  clearInterval(id) { intervals.delete(id); },
+  setTimeout(callback) { const id = ++nextTimer; timeouts.set(id, callback); return id; },
+  clearTimeout(id) { timeouts.delete(id); },
+  notificationManager: { async setBadgeNumber() {}, isNotificationEnabledSync: () => true },
+  hilog: { debug() {}, info() {}, warn() {} }, DOMAIN: 1, TAG: 'test'
+};
+const UnreadSession = vm.runInNewContext(
+  stripTypeScriptTypes(unreadSource) + ';UnreadSession', unreadRuntime);
+let owner = 'alice';
+let pageUrl = 'https://x.com/home';
+let runJavaScript = async () => '"4/2"';
+const session = new UnreadSession({
+  controller: () => ({ runJavaScript }), owner: () => owner, url: () => pageUrl,
+  isRawWeb: () => false, getUIContext: () => ({}), putPreference: async () => {}
+});
+const settle = async () => { for (let i = 0; i < 8; i++) await Promise.resolve(); };
+session.activate(false);
+session.refreshBadges();
+await settle();
+assert.equal(session.unreadNotifications, 4);
+assert.equal(session.unreadMessages, 2);
+
+runJavaScript = async () => '"-1/3"';
+session.refreshBadges();
+await settle();
+assert.equal(session.unreadNotifications, 4, 'unpublished notification count must retain the previous badge');
+assert.equal(session.unreadMessages, 3);
+assert.equal(timeouts.size, 1, 'partial counts schedule a bounded reread');
+
+session.armBadgeRefresh();
+let finishRead;
+runJavaScript = () => new Promise(resolve => { finishRead = resolve; });
+session.refreshBadges();
+session.setBackground(true);
+assert.equal(intervals.size, 0, 'backgrounding clears the periodic badge timer');
+assert.equal(timeouts.size, 0, 'backgrounding clears the retry timer');
+finishRead('"9/9"');
+await settle();
+assert.equal(session.unreadNotifications, 4, 'a read finishing in background cannot replace the badge');
+assert.equal(session.unreadMessages, 3);
+
+session.setBackground(false);
+runJavaScript = async () => '"-1/-1"';
+session.refreshBadges();
+await settle();
+assert.equal(timeouts.size, 1, 'an unpublished count schedules a retry before disposal');
+let finishDisposedRead;
+runJavaScript = () => new Promise(resolve => { finishDisposedRead = resolve; });
+session.refreshBadges();
+session.dispose();
+assert.equal(intervals.size, 0, 'disposing clears the periodic badge timer');
+assert.equal(timeouts.size, 0, 'disposing clears the pending retry timer');
+finishDisposedRead('"8/8"');
+await settle();
+assert.equal(session.unreadNotifications, 4, 'a read finishing after disposal cannot replace the badge');
+assert.equal(session.unreadMessages, 3);
+console.log('UnreadSession production flow and lifecycle checks passed.');
 console.log(failed === 0 ? '\nall cases passed' : `\n${failed} case(s) failed`);
 process.exit(failed === 0 ? 0 : 1);
