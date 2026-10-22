@@ -190,6 +190,8 @@ struct MainTabs {
   @State imageShareTrigger: number = 0;
   @State imageRepostMenuOpen: boolean = false;
   @State imageMoreOpen: boolean = false;
+  @State imageAnalyzerSelecting: boolean = false;
+  @State imageAnalyzerCancelTrigger: number = 0;
   @State currentIndex: number = 0;
   @State settingsOpen: boolean = false;
   @State settingsPage: string = '';
@@ -681,7 +683,11 @@ struct MainTabs {
   // requirement — back must not drop the user out of a page they can leave).
   onBackPress(): boolean {
     this.cancelProfileNavigation();
-    if (this.imageViewerOpen) { if (!this.dismissImageDetails()) { this.imageViewerOpen = false; } return true; }
+    if (this.imageViewerOpen) {
+      if (this.cancelImageAnalyzer()) { return true; }
+      if (!this.dismissImageDetails()) { this.imageViewerOpen = false; }
+      return true;
+    }
     if (this.networkOpen) { this.networkOpen = false; return true; }
     if (this.fullScreenHandler !== undefined) { this.fullScreenHandler.exitFullScreen(); return true; }
     if (this.sheetOpen) {
@@ -3637,6 +3643,8 @@ struct MainTabs {
       moreOpen: $imageMoreOpen, footerOffset: FLOATING_BAR_HEIGHT + this.bottomInset,
       shareTrigger: this.imageShareTrigger, immersiveMaterial: this.immersiveMaterial,
       topInset: this.topInset,
+      analyzerSelecting: $imageAnalyzerSelecting,
+      cancelAnalyzerTrigger: this.imageAnalyzerCancelTrigger,
       webImages: this.webImages, onClose: () => { this.imageViewerOpen = false; },
       onRecover: () => { this.recoverMediaWeb(false); }, onWeb: () => { this.recoverMediaWeb(true); } })
   }
@@ -3650,11 +3658,19 @@ struct MainTabs {
     this.imageCurrentFile = undefined;
     this.imageChromeVisible = true;
     this.imageDragging = false;
+    this.imageAnalyzerSelecting = false;
+    this.imageAnalyzerCancelTrigger = 0;
   }
 
   private dismissImageDetails(): boolean {
     if (!this.imageDetailsVisible) { return false; }
     this.imageDetailsVisible = false;
+    return true;
+  }
+
+  private cancelImageAnalyzer(): boolean {
+    if (!this.imageAnalyzerSelecting) { return false; }
+    this.imageAnalyzerCancelTrigger++;
     return true;
   }
 

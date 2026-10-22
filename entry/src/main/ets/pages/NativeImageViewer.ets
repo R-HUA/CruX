@@ -1,8 +1,9 @@
 import { common } from '@kit.AbilityKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
-import { pasteboard } from '@kit.BasicServicesKit';
+import { BusinessError, pasteboard } from '@kit.BasicServicesKit';
 import { KeyCode } from '@kit.InputKit';
 import { curves, uiMaterial, window } from '@kit.ArkUI';
+import { visionImageAnalyzer } from '@kit.VisionKit';
 import { MediaAddress, imageForQuality } from '../common/WebMedia';
 import { MediaFile, MediaFiles } from '../common/MediaFiles';
 import { WebImageDownloads } from '../common/WebImageDownloads';
@@ -23,6 +24,9 @@ export struct NativeImageViewer {
   @Link moreOpen: boolean;
   @Prop footerOffset: number = 80;
   @Prop @Watch('shareRequested') shareTrigger: number = 0;
+  @Link analyzerSelecting: boolean;
+  @Prop @Watch('cancelRequested') cancelAnalyzerTrigger: number = 0;
+  @State localCancelTrigger: number = 0;
   webImages: WebImageDownloads | undefined = undefined;
   onClose: () => void = () => {};
   onRecover: () => void = () => {};
@@ -50,15 +54,12 @@ export struct NativeImageViewer {
     this.windowReady = this.prepareWindow();
     this.loadIndex(this.index);
     this.loadIndex(this.index + 1);
-    // 首次浏览后让出画布；用户主动操作后由单击控制显隐。
-    this.chromeHideTimer = setTimeout(() => {
-      this.chromeHideTimer = -1;
-      if (this.chromeVisible) { this.toggleChrome(); }
-    }, 3000);
+    this.resetChromeHideTimer();
   }
 
   aboutToDisappear(): void {
     this.alive = false;
+    this.cancelAnalyzer();
     this.currentLoadedFile = undefined;
     clearTimeout(this.chromeHideTimer);
     this.windowReady.then(async () => {
@@ -152,27 +153,71 @@ export struct NativeImageViewer {
 
   private async act(action: string): Promise<void> {
     const file = this.currentFile();
-    if (!file || this.busy) { return; }
+    if (!file || this.busy) {
+      hilog.error(0x0A11, 'OpenTwit', 'event=image_action_failed action=%{public}s error=unavailable', action);
+      this.getUIContext().getPromptAction().showToast({ message: $r('app.string.operation_failed'), duration: 2000 });
+      return;
+    }
     clearTimeout(this.chromeHideTimer);
     this.busy = true;
     try {
       const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
       if (action === 'save') {
         await this.files.save(context, file);
-        this.getUIContext().getPromptAction().showToast({ message: $r('app.string.media_saved') });
+        this.getUIContext().getPromptAction().showToast({ message: $r('app.string.media_saved'), duration: 2000 });
       } else if (action === 'share') {
         await this.files.share(context, file);
       } else {
         await pasteboard.getSystemPasteboard().setData(pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, file.url));
-        this.getUIContext().getPromptAction().showToast({ message: $r('app.string.media_copied') });
+        this.getUIContext().getPromptAction().showToast({ message: $r('app.string.media_copied'), duration: 2000 });
       }
     } catch (error) {
       hilog.error(0x0A11, 'OpenTwit', 'event=image_action_failed action=%{public}s error=%{public}s', action, JSON.stringify(error));
-      this.getUIContext().getPromptAction().showToast({ message: $r('app.string.operation_failed') });
+      this.getUIContext().getPromptAction().showToast({ message: $r('app.string.operation_failed'), duration: 2000 });
     } finally { this.busy = false; }
   }
 
   private shareRequested(): void { if (this.alive) { this.act('share'); } }
+
+  private cancelRequested(): void {
+    if (this.analyzerSelecting) {
+      this.cancelAnalyzer();
+    }
+  }
+
+  private cancelAnalyzer(): boolean {
+    if (this.analyzerSelecting) {
+      this.localCancelTrigger++;
+      this.analyzerSelecting = false;
+      if (this.chromeVisible) { this.resetChromeHideTimer(); }
+      return true;
+    }
+    return false;
+  }
+
+  private onAnalyzerSelecting(selecting: boolean): void {
+    this.analyzerSelecting = selecting;
+    if (selecting) {
+      clearTimeout(this.chromeHideTimer);
+      this.chromeHideTimer = -1;
+    } else if (this.chromeVisible) {
+      this.resetChromeHideTimer();
+    }
+  }
+
+  private resetChromeHideTimer(): void {
+    clearTimeout(this.chromeHideTimer);
+    if (!this.chromeVisible || this.analyzerSelecting) {
+      this.chromeHideTimer = -1;
+      return;
+    }
+    this.chromeHideTimer = setTimeout(() => {
+      this.chromeHideTimer = -1;
+      if (this.chromeVisible && !this.analyzerSelecting && !this.moreOpen && !this.detailsVisible) {
+        this.toggleChrome();
+      }
+    }, 3000);
+  }
 
   private toggleChrome(): void {
     clearTimeout(this.chromeHideTimer);
@@ -180,6 +225,9 @@ export struct NativeImageViewer {
     this.getUIContext().animateTo({ duration: 200, curve: Curve.EaseInOut }, () => {
       this.chromeVisible = !this.chromeVisible;
     });
+    if (this.chromeVisible) {
+      this.resetChromeHideTimer();
+    }
   }
 
   private dismissDetails(): boolean {
@@ -190,6 +238,7 @@ export struct NativeImageViewer {
 
   /** 放大图片的越界拖动在松手后切页，避免中途切换手势识别器。 */
   private turnPage(direction: number): void {
+    if (this.analyzerSelecting) { return; }
     const target = this.index + direction;
     if (this.busy || target < 0 || target >= this.items.length) { return; }
     if (direction > 0) { this.swiper.showNext(); } else { this.swiper.showPrevious(); }
@@ -199,25 +248,33 @@ export struct NativeImageViewer {
   moreMenu() {
     Menu() {
       MenuItem() {
-      Row() {
-      SaveButton({ text: SaveDescription.SAVE_IMAGE, buttonType: ButtonType.Normal })
-        .id('image-save').height(TOUCH_TARGET).fontSize(16).padding(0)
-        .fontColor(Color.White).backgroundColor(Color.Transparent)
-        .enabled(this.currentFile() !== undefined && !this.busy)
-        .onClick((_event: ClickEvent, result: SaveButtonOnClickResult) => {
-          if (result === SaveButtonOnClickResult.SUCCESS) { this.moreOpen = false; this.act('save'); }
-          else if (result === SaveButtonOnClickResult.TEMPORARY_AUTHORIZATION_FAILED) {
-            hilog.error(0x0A11, 'OpenTwit', 'event=image_save_authorization_failed');
-            this.getUIContext().getPromptAction().showToast({ message: $r('app.string.operation_failed') });
-          }
-        })
-      }.width(220).height(TOUCH_TARGET).padding({ left: S12, right: S12 })
+        Row() {
+          SaveButton({ text: SaveDescription.SAVE_IMAGE, buttonType: ButtonType.Normal })
+            .id('image-save').width('100%').height(TOUCH_TARGET).fontSize(16).padding(0)
+            .align(Alignment.Start)
+            .fontColor(Color.White).backgroundColor($r('app.color.image_menu_background'))
+            .enabled(this.currentFile() !== undefined && !this.busy)
+            .onClick(async (_event: ClickEvent, result: SaveButtonOnClickResult, error?: BusinessError<void>) => {
+              this.moreOpen = false;
+              if (result === SaveButtonOnClickResult.SUCCESS) {
+                await this.act('save');
+              } else {
+                hilog.error(0x0A11, 'OpenTwit', 'event=image_save_authorization_failed result=%{public}d error=%{public}s',
+                  result, error ? JSON.stringify(error) : 'none');
+                this.getUIContext().getPromptAction().showToast({ message: $r('app.string.operation_failed'), duration: 2000 });
+              }
+            })
+        }.width(220).height(TOUCH_TARGET).padding({ left: S12, right: S12 })
       }
       if (this.currentFile() && !this.currentFile()!.originalSize &&
         !this.items[this.index].id.startsWith('avatar-') && !this.items[this.index].id.startsWith('card-')) {
         MenuItem({ content: $r('app.string.media_load_original') }).contentFontColor(Color.White)
           .enabled(!this.busy && !this.loadingIndices.includes(this.index))
-          .onClick(() => { this.moreOpen = false; this.loadIndex(this.index, true); })
+          .onClick(() => {
+            this.moreOpen = false;
+            this.cancelAnalyzer();
+            this.loadIndex(this.index, true);
+          })
       }
       MenuItem({ content: $r('app.string.media_details') }).contentFontColor(Color.White)
         .enabled(this.currentFile() !== undefined)
@@ -226,6 +283,7 @@ export struct NativeImageViewer {
         .enabled(this.currentFile() !== undefined && !this.busy)
         .onClick(() => { this.moreOpen = false; this.act('copy'); })
     }
+    .backgroundColor($r('app.color.image_menu_background'))
   }
 
   @Builder
@@ -244,6 +302,7 @@ export struct NativeImageViewer {
       .accessibilityText($r('app.string.media_close'))
       .accessibilityLevel('yes')
       .onClick(() => {
+        if (this.cancelAnalyzer()) { return; }
         if (!this.dismissDetails()) { this.onClose(); }
       })
 
@@ -278,6 +337,8 @@ export struct NativeImageViewer {
       })
       .bindMenu(this.moreOpen, this.moreMenu, {
         placement: Placement.BottomRight,
+        backgroundColor: $r('app.color.image_menu_background'),
+        backgroundBlurStyle: BlurStyle.NONE,
         onAppear: () => { clearTimeout(this.chromeHideTimer); },
         onDisappear: () => { this.moreOpen = false; }
       })
@@ -306,22 +367,29 @@ export struct NativeImageViewer {
             source: this.loadedFiles[index] ? 'file://' + this.loadedFiles[index]!.path : '',
             pixelWidth: this.loadedFiles[index] ? this.loadedFiles[index]!.width : 0,
             pixelHeight: this.loadedFiles[index] ? this.loadedFiles[index]!.height : 0,
+            isGif: this.loadedFiles[index]?.extension === 'gif',
             active: index === this.index,
+            cancelTrigger: this.cancelAnalyzerTrigger + this.localCancelTrigger,
             onZoom: (zoomed: boolean) => { if (index === this.index) { this.zoomed = zoomed; } },
             onToggleChrome: () => this.toggleChrome(),
             onBackdrop: (opacity: number, dragging: boolean) => {
               if (index === this.index) { this.backdropOpacity = opacity; this.dragging = dragging; }
             },
             onPage: (direction: number) => this.turnPage(direction),
-            onShare: () => this.act('share'), onClose: this.onClose
+            onClose: this.onClose,
+            onSelecting: (selecting: boolean) => {
+              if (index === this.index) { this.onAnalyzerSelecting(selecting); }
+            }
           })
         }, (item: MediaAddress) => item.id)
       }
-      .index(this.index).loop(false).indicator(false).disableSwipe(this.zoomed || this.busy)
+      .index(this.index).loop(false).indicator(false)
+      .disableSwipe(this.zoomed || this.busy || this.analyzerSelecting)
       .width('100%').height('100%')
-      // 底部安全区固定预留，工具栏显隐与详情开关不改变图片尺寸。
-      .padding({ bottom: this.footerOffset + 26 + S8 })
       .onChange((index: number) => {
+        if (this.analyzerSelecting) {
+          this.cancelAnalyzer();
+        }
         this.index = index;
         this.zoomed = false;
         this.backdropOpacity = 1;
@@ -370,6 +438,7 @@ export struct NativeImageViewer {
       LayoutSafeAreaEdge.START, LayoutSafeAreaEdge.END])
     .onKeyEvent((event: KeyEvent) => {
       if (event.type === KeyType.Down && event.keyCode === KeyCode.KEYCODE_ESCAPE) {
+        if (this.cancelAnalyzer()) { return true; }
         if (!this.dismissDetails()) { this.onClose(); }
         return true;
       }
@@ -381,26 +450,166 @@ export struct NativeImageViewer {
 /** 图片在全窗口内变换；普通横滑由 Swiper 处理，放大越界松手后切图。 */
 @Component
 struct ZoomImage {
-  @Prop source: string = '';
+  @Prop @Watch('sourceChanged') source: string = '';
   @Prop pixelWidth: number = 0;
   @Prop pixelHeight: number = 0;
-  @Prop @Watch('reset') active: boolean = false;
+  @Prop isGif: boolean = false;
+  @Prop @Watch('activeChanged') active: boolean = false;
+  @Prop @Watch('cancelRequested') cancelTrigger: number = 0;
   onZoom: (zoomed: boolean) => void = () => {};
   onToggleChrome: () => void = () => {};
   onBackdrop: (opacity: number, dragging: boolean) => void = () => {};
   onPage: (direction: number) => void = () => {};
-  onShare: () => void = () => {};
   onClose: () => void = () => {};
+  onSelecting: (selecting: boolean) => void = () => {};
   @State scaleValue: number = 1;
   @State x: number = 0;
   @State y: number = 0;
   @State widthValue: number = 0;
   @State heightValue: number = 0;
+  @State displayFailed: boolean = false;
+  @State imageKey: number = 0;
+  @State analyzerEnabled: boolean = false;
+  @State selecting: boolean = false;
   private startScale: number = 1;
   private startX: number = 0;
   private startY: number = 0;
   private dismissing: boolean = false;
   private pinching: boolean = false;
+  private aiController: visionImageAnalyzer.VisionImageAnalyzerController | undefined = undefined;
+  private aiOptions: ImageAIOptions | undefined = undefined;
+  private supportTypes: ImageAnalyzerType[] = [];
+  private generation: number = 0;
+  private visibilityCallback: ((visibility: visionImageAnalyzer.ImageAnalyzerVisibility) => void) | undefined = undefined;
+  private textChangeCallback: ((text: string) => void) | undefined = undefined;
+  private subjectChangeCallback: ((subjects: visionImageAnalyzer.Subject[]) => void) | undefined = undefined;
+
+  aboutToAppear(): void {
+    if (this.active) {
+      this.setupAnalyzer();
+    }
+  }
+
+  aboutToDisappear(): void {
+    this.teardownAnalyzer();
+  }
+
+  private activeChanged(): void {
+    this.reset();
+    if (this.active) {
+      this.setupAnalyzer();
+    } else {
+      this.teardownAnalyzer();
+    }
+  }
+
+  private sourceChanged(): void {
+    this.displayFailed = false;
+    this.imageKey++;
+    if (this.active) {
+      this.setupAnalyzer();
+    }
+  }
+
+  private cancelRequested(): void {
+    if (this.selecting && this.aiController) {
+      try {
+        if (canIUse('SystemCapability.AI.VisionImageAnalyzer')) {
+          this.aiController.setImageAnalyzerVisibility(visionImageAnalyzer.ImageAnalyzerVisibility.HIDDEN);
+        }
+      } catch (e) {
+        hilog.warn(0x0A11, 'OpenTwit', 'event=analyzer_cancel_failed error=%{public}s', JSON.stringify(e));
+      }
+      this.updateSelecting(false);
+    }
+  }
+
+  private updateSelecting(selected: boolean): void {
+    if (this.selecting !== selected) {
+      this.selecting = selected;
+      this.onSelecting(selected);
+    }
+  }
+
+  private setupAnalyzer(): void {
+    this.teardownAnalyzer();
+    if (!this.active || this.isGif || this.source === '') {
+      return;
+    }
+    const currentGen = ++this.generation;
+    try {
+      if (canIUse('SystemCapability.AI.VisionImageAnalyzer')) {
+        const controller = new visionImageAnalyzer.VisionImageAnalyzerController();
+        const types = controller.getImageAnalyzerSupportTypes();
+        if (currentGen !== this.generation || !this.active) {
+          return;
+        }
+        if (types && types.length > 0) {
+          this.supportTypes = types;
+          this.aiController = controller;
+          this.aiOptions = { types: types, aiController: controller };
+          this.bindAnalyzerListeners(controller, currentGen);
+          this.analyzerEnabled = true;
+          return;
+        }
+      }
+    } catch (e) {
+      hilog.warn(0x0A11, 'OpenTwit', 'event=analyzer_init_failed error=%{public}s', JSON.stringify(e));
+    }
+    this.analyzerEnabled = false;
+  }
+
+  private bindAnalyzerListeners(controller: visionImageAnalyzer.VisionImageAnalyzerController, gen: number): void {
+    this.visibilityCallback = (visibility: visionImageAnalyzer.ImageAnalyzerVisibility) => {
+      if (gen !== this.generation || !this.active) { return; }
+      this.updateSelecting(visibility === visionImageAnalyzer.ImageAnalyzerVisibility.SHOWN);
+    };
+    this.textChangeCallback = (text: string) => {
+      if (gen !== this.generation || !this.active) { return; }
+      this.updateSelecting(text.length > 0);
+    };
+    this.subjectChangeCallback = (subjects: visionImageAnalyzer.Subject[]) => {
+      if (gen !== this.generation || !this.active) { return; }
+      this.updateSelecting(subjects.length > 0);
+    };
+
+    try {
+      controller.on('imageAnalyzerVisibilityChange', this.visibilityCallback);
+      controller.on('selectedTextChange', this.textChangeCallback);
+      controller.on('selectedSubjectsChange', this.subjectChangeCallback);
+    } catch (e) {
+      hilog.warn(0x0A11, 'OpenTwit', 'event=analyzer_listener_bind_failed error=%{public}s', JSON.stringify(e));
+    }
+  }
+
+  private teardownAnalyzer(): void {
+    this.generation++;
+    this.updateSelecting(false);
+    this.analyzerEnabled = false;
+    if (this.aiController) {
+      try {
+        if (canIUse('SystemCapability.AI.VisionImageAnalyzer')) {
+          if (this.visibilityCallback) {
+            this.aiController.off('imageAnalyzerVisibilityChange', this.visibilityCallback);
+            this.visibilityCallback = undefined;
+          }
+          if (this.textChangeCallback) {
+            this.aiController.off('selectedTextChange', this.textChangeCallback);
+            this.textChangeCallback = undefined;
+          }
+          if (this.subjectChangeCallback) {
+            this.aiController.off('selectedSubjectsChange', this.subjectChangeCallback);
+            this.subjectChangeCallback = undefined;
+          }
+          this.aiController.setImageAnalyzerVisibility(visionImageAnalyzer.ImageAnalyzerVisibility.HIDDEN);
+        }
+      } catch (e) {
+        hilog.warn(0x0A11, 'OpenTwit', 'event=analyzer_cleanup_failed error=%{public}s', JSON.stringify(e));
+      }
+      this.aiController = undefined;
+      this.aiOptions = undefined;
+    }
+  }
 
   private reset(): void {
     this.scaleValue = 1;
@@ -422,7 +631,7 @@ struct ZoomImage {
   }
 
   private finishPan(event: GestureEvent): void {
-    if (this.pinching) { return; }
+    if (this.pinching || this.selecting) { return; }
     if (this.dismissing) {
       if (this.y > 110 || (this.y > 24 && event.velocityY > 900)) {
         this.getUIContext().animateTo({ duration: 180, curve: Curve.EaseOut,
@@ -455,10 +664,48 @@ struct ZoomImage {
 
   build() {
     Stack() {
-      if (this.source !== '') {
-        Image(this.source).width('100%').height('100%').objectFit(ImageFit.Contain)
-          .scale({ x: this.scaleValue, y: this.scaleValue }).translate({ x: this.x, y: this.y })
-          .draggable(false)
+      if (this.source !== '' && !this.displayFailed) {
+        if (this.aiOptions !== undefined) {
+          Image(this.source, this.aiOptions)
+            .key(this.source + '-' + this.imageKey)
+            .width('100%').height('100%').objectFit(ImageFit.Contain)
+            .scale({ x: this.scaleValue, y: this.scaleValue }).translate({ x: this.x, y: this.y })
+            .draggable(false)
+            .enableAnalyzer(this.analyzerEnabled)
+            .onComplete(() => {
+              this.displayFailed = false;
+            })
+            .onError((_err: ImageError) => {
+              hilog.error(0x0A11, 'OpenTwit', 'event=image_display_failed source=%{public}s', this.source);
+              this.displayFailed = true;
+            })
+        } else {
+          Image(this.source)
+            .key(this.source + '-' + this.imageKey)
+            .width('100%').height('100%').objectFit(ImageFit.Contain)
+            .scale({ x: this.scaleValue, y: this.scaleValue }).translate({ x: this.x, y: this.y })
+            .draggable(false)
+            .enableAnalyzer(false)
+            .onComplete(() => {
+              this.displayFailed = false;
+            })
+            .onError((_err: ImageError) => {
+              hilog.error(0x0A11, 'OpenTwit', 'event=image_display_failed source=%{public}s', this.source);
+              this.displayFailed = true;
+            })
+        }
+      }
+      if (this.displayFailed) {
+        Column({ space: S12 }) {
+          Text($r('app.string.media_failed')).fontColor(Color.White)
+          Button($r('app.string.retry')).onClick(() => {
+            this.displayFailed = false;
+            this.imageKey++;
+          })
+        }
+        .width('100%').height('100%')
+        .justifyContent(FlexAlign.Center)
+        .alignItems(HorizontalAlign.Center)
       }
     }.width('100%').height('100%')
     .onAreaChange((_old: Area, area: Area) => {
@@ -468,6 +715,7 @@ struct ZoomImage {
     .gesture(GestureGroup(GestureMode.Parallel,
       GestureGroup(GestureMode.Exclusive,
         TapGesture({ count: 2 }).onAction((event: GestureEvent) => {
+          if (this.selecting) { return; }
           if (this.scaleValue > 1.01) { this.animateReset(); return; }
           this.getUIContext().animateTo({ duration: 280, curve: Curve.FastOutSlowIn }, () => {
             this.scaleValue = 2.5;
@@ -478,11 +726,14 @@ struct ZoomImage {
             this.clamp(); this.onZoom(true);
           });
         }),
-        TapGesture({ count: 1 }).onAction(() => this.onToggleChrome()),
-        LongPressGesture().onAction(() => this.onShare())
+        TapGesture({ count: 1 }).onAction(() => {
+          if (this.selecting) { return; }
+          this.onToggleChrome();
+        })
       ),
       PinchGesture({ fingers: 2 })
         .onActionStart(() => {
+          if (this.selecting) { return; }
           this.pinching = true;
           this.dismissing = false;
           this.startScale = this.scaleValue;
@@ -490,6 +741,7 @@ struct ZoomImage {
           this.onZoom(true);
         })
         .onActionUpdate((event: GestureEvent) => {
+          if (this.selecting) { return; }
           this.scaleValue = Math.max(0.75, Math.min(5, this.startScale * event.scale));
           this.clamp();
         })
@@ -497,11 +749,12 @@ struct ZoomImage {
         .onActionCancel(() => this.finishPinch()),
       PanGesture({ fingers: 1, direction: PanDirection.All }).tag('image-pan')
         .onActionStart(() => {
+          if (this.selecting) { return; }
           this.startX = this.x; this.startY = this.y;
           this.dismissing = this.scaleValue <= 1.01;
         })
         .onActionUpdate((event: GestureEvent) => {
-          if (this.pinching) { return; }
+          if (this.pinching || this.selecting) { return; }
           if (this.dismissing) {
             this.x = event.offsetX * 0.85;
             this.y = Math.max(0, event.offsetY);
@@ -518,6 +771,7 @@ struct ZoomImage {
         .onActionCancel(() => { if (this.dismissing && !this.pinching) { this.animateReset(); } })
     ))
     .onGestureRecognizerJudgeBegin((event: BaseGestureEvent, recognizer: GestureRecognizer) => {
+      if (this.selecting) { return GestureJudgeResult.REJECT; }
       if (recognizer.getTag() === 'image-pan' && this.scaleValue <= 1.01) {
         const pan = event as PanGestureEvent;
         if (Math.abs(pan.offsetX) >= Math.abs(pan.offsetY) || pan.offsetY <= 0) { return GestureJudgeResult.REJECT; }

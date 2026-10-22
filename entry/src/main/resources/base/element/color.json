@@ -3,6 +3,10 @@
     {
       "name": "start_window_background",
       "value": "#FFFFFF"
+    },
+    {
+      "name": "image_menu_background",
+      "value": "#242424"
     }
   ]
 }
