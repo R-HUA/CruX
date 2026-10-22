@@ -28,6 +28,7 @@
     {"name":"media_original_size","value":"原始尺寸"},
     {"name":"media_available_size","value":"可用尺寸"},
     {"name":"media_share","value":"分享"},
+    {"name":"media_save","value":"保存图片"},
     {"name":"media_copy","value":"复制链接"},
     {"name":"media_saved","value":"已保存到相册"},
     {"name":"media_copied","value":"已复制链接"},

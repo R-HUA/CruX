@@ -198,20 +198,41 @@ export class MediaFiles {
     }
   }
 
-  /** 安全控件授权后直接提交缓存文件，不经过像素解码和重新编码。 */
-  save(context: common.UIAbilityContext, file: MediaFile): Promise<void> {
+  /** 系统授权弹窗后直接写入缓存文件，不经过像素解码和重新编码。 */
+  save(context: common.UIAbilityContext, file: MediaFile): Promise<boolean> {
     const task = this.saveFile(context, file);
-    this.operations.push(task);
+    this.operations.push(task.then(() => {}));
     return task;
   }
 
-  private async saveFile(context: common.UIAbilityContext, file: MediaFile): Promise<void> {
+  private async saveFile(context: common.UIAbilityContext, file: MediaFile): Promise<boolean> {
     const helper = photoAccessHelper.getPhotoAccessHelper(context);
     try {
-      const change = photoAccessHelper.MediaAssetChangeRequest.createImageAssetRequest(context, fileUri.getUriFromPath(file.path));
-      await helper.applyChanges(change);
+      const srcUri = fileUri.getUriFromPath(file.path);
+      const ext = file.extension.toLowerCase();
+      const config: photoAccessHelper.PhotoCreationConfig = {
+        fileNameExtension: ext,
+        photoType: photoAccessHelper.PhotoType.IMAGE
+      };
+      const desUris = await helper.showAssetsCreationDialog([srcUri], [config]);
+      if (!desUris || desUris.length === 0) {
+        hilog.info(0x0A11, 'OpenTwit', 'event=image_save_canceled');
+        return false;
+      }
+      const desUri = desUris[0];
+      const srcFile = await fileIo.open(file.path, fileIo.OpenMode.READ_ONLY);
+      const desFile = await fileIo.open(desUri, fileIo.OpenMode.WRITE_ONLY);
+      try {
+        await fileIo.copyFile(srcFile.fd, desFile.fd);
+      } finally {
+        await fileIo.close(srcFile);
+        await fileIo.close(desFile);
+      }
       hilog.info(0x0A11, 'OpenTwit', 'event=image_saved');
-    } finally { await helper.release(); }
+      return true;
+    } finally {
+      await helper.release();
+    }
   }
 
   share(context: common.UIAbilityContext, file: MediaFile): Promise<void> {

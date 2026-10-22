@@ -167,8 +167,10 @@ export struct NativeImageViewer {
     try {
       const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
       if (action === 'save') {
-        await this.files.save(context, file);
-        this.getUIContext().getPromptAction().showToast({ message: $r('app.string.media_saved'), duration: 2000 });
+        const saved = await this.files.save(context, file);
+        if (saved) {
+          this.getUIContext().getPromptAction().showToast({ message: $r('app.string.media_saved'), duration: 2000 });
+        }
       } else if (action === 'share') {
         await this.files.share(context, file);
       } else {
@@ -251,25 +253,12 @@ export struct NativeImageViewer {
   @Builder
   moreMenu() {
     Menu() {
-      MenuItem() {
-        Row() {
-          SaveButton({ text: SaveDescription.SAVE_IMAGE, buttonType: ButtonType.Normal })
-            .id('image-save').width('100%').height(TOUCH_TARGET).fontSize(16).padding(0)
-            .align(Alignment.Start)
-            .fontColor(Color.White).backgroundColor($r('app.color.image_menu_background'))
-            .enabled(this.currentFile() !== undefined && !this.busy)
-            .onClick(async (_event: ClickEvent, result: SaveButtonOnClickResult, error?: BusinessError<void>) => {
-              this.moreOpen = false;
-              if (result === SaveButtonOnClickResult.SUCCESS) {
-                await this.act('save');
-              } else {
-                hilog.error(0x0A11, 'OpenTwit', 'event=image_save_authorization_failed result=%{public}d error=%{public}s',
-                  result, error ? JSON.stringify(error) : 'none');
-                this.getUIContext().getPromptAction().showToast({ message: $r('app.string.operation_failed'), duration: 2000 });
-              }
-            })
-        }.width(220).height(TOUCH_TARGET).padding({ left: S12, right: S12 })
-      }
+      MenuItem({ content: $r('app.string.media_save') }).contentFontColor(Color.White)
+        .enabled(this.currentFile() !== undefined && !this.busy)
+        .onClick(() => {
+          this.moreOpen = false;
+          this.act('save');
+        })
       if (this.currentFile() && !this.currentFile()!.originalSize &&
         !this.items[this.index].id.startsWith('avatar-') && !this.items[this.index].id.startsWith('card-')) {
         MenuItem({ content: $r('app.string.media_load_original') }).contentFontColor(Color.White)
@@ -287,7 +276,6 @@ export struct NativeImageViewer {
         .enabled(this.currentFile() !== undefined && !this.busy)
         .onClick(() => { this.moreOpen = false; this.act('copy'); })
     }
-    .backgroundColor($r('app.color.image_menu_background'))
   }
 
   @Builder
@@ -344,8 +332,6 @@ export struct NativeImageViewer {
       })
       .bindMenu(this.moreOpen, this.moreMenu, {
         placement: Placement.BottomRight,
-        backgroundColor: $r('app.color.image_menu_background'),
-        backgroundBlurStyle: BlurStyle.NONE,
         onAppear: () => { clearTimeout(this.chromeHideTimer); },
         onDisappear: () => { this.moreOpen = false; }
       })

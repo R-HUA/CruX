@@ -28,6 +28,7 @@
     {"name":"media_original_size","value":"Original dimensions"},
     {"name":"media_available_size","value":"Available dimensions"},
     {"name":"media_share","value":"Share"},
+    {"name":"media_save","value":"Save image"},
     {"name":"media_copy","value":"Copy link"},
     {"name":"media_saved","value":"Saved to Photos"},
     {"name":"media_copied","value":"Link copied"},
