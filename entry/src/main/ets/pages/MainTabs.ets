@@ -70,20 +70,22 @@ const PAGE_STATE_DELAY_MS: number = 700;
 // its navigations never fire the Web component's load callbacks; the injected
 // history hook calls this instead.
 class PageBridge {
+  private active: () => boolean = () => false;
+  constructor(active: () => boolean) { this.active = active; }
   // 网页弹层只能绘制在 Web 内，需要通知原生控件让位。
   private modalHandler: (url: string, open: boolean) => void = () => {};
   setModalHandler(handler: (url: string, open: boolean) => void): void { this.modalHandler = handler; }
-  onWebModal(url: string, open: boolean): void { this.modalHandler(url, open); }
+  onWebModal(url: string, open: boolean): void { if (this.active()) { this.modalHandler(url, open); } }
   private profileHandler: (payload: string) => void = () => {};
   setProfileHandler(handler: (payload: string) => void): void { this.profileHandler = handler; }
-  onProfileLayout(payload: string): void { this.profileHandler(payload); }
+  onProfileLayout(payload: string): void { if (this.active()) { this.profileHandler(payload); } }
   private themeHandler: (color: string) => void = () => {};
   setThemeHandler(handler: (color: string) => void): void { this.themeHandler = handler; }
-  onTheme(source: string, color: string): void { if (source === 'main') { this.themeHandler(color); } }
+  onTheme(source: string, color: string): void { if (this.active() && source === 'main') { this.themeHandler(color); } }
   private imageHandler: (payload: string) => boolean = () => false;
   setImageHandler(handler: (payload: string) => boolean): void { this.imageHandler = handler; }
 
-  onImages(payload: string): boolean { return this.imageHandler(payload); }
+  onImages(payload: string): boolean { return this.active() && this.imageHandler(payload); }
   private handler: (url: string) => void = (url: string) => {
   };
 
@@ -92,7 +94,7 @@ class PageBridge {
   }
 
   onUrlChange(source: string, url: string): void {
-    if (source === 'main') { this.handler(url); }
+    if (this.active() && source === 'main') { this.handler(url); }
   }
 }
 // 网页路由与账号入口共用有界就绪检查，避免慢网误判。
@@ -213,21 +215,24 @@ struct MainTabs {
   @State webModalOpen: boolean = false;
   @State navigation: WebNavigation = new WebNavigation({
     controller: () => this.controller, isNetworkReady: () => this.webNetworkReady,
+    isControllerReady: () => this.webControllerReady,
+    documentStarted: (url: string) => this.documentStarted(url),
     cancelProfileNavigation: () => this.account.cancelProfileNavigation(),
     toast: (message: ResourceStr) => this.toast(message)
   });
   @State account: AccountSession = new AccountSession({
-    getUIContext: () => this.getUIContext(), controller: () => this.controller,
+    getUIContext: () => this.getUIContext(), webScript: (script: string) => this.webScript(script),
     url: () => this.navigation.currentUrl, isAuthenticationPage: () => this.authenticationPage,
     isRawWeb: () => this.rawWeb, webImages: () => this.webImages, currentIndex: () => this.currentIndex,
-    isControllerReady: () => this.incomingControllerReady, isSettingsOpen: () => this.settingsOpen,
+    isControllerReady: () => this.webControllerReady, isSettingsOpen: () => this.settingsOpen,
     isComposerOpen: () => this.composer.sheetOpen, accountChanged: () => this.unread.resetAccount(),
     loadWeb: (url: string, keepProfile: boolean, allowDocumentLoad: boolean, direct: boolean) =>
       this.navigation.loadWeb(url, keepProfile, allowDocumentLoad, direct),
     toast: (message: ResourceStr) => this.toast(message)
   });
   @State unread: UnreadSession = new UnreadSession({
-    controller: () => this.controller, owner: () => this.account.ownHandle, url: () => this.navigation.currentUrl,
+    webScript: (script: string) => this.webScript(script), owner: () => this.account.ownHandle, url: () => this.navigation.currentUrl,
+    isControllerReady: () => this.webControllerReady,
     isRawWeb: () => this.rawWeb, getUIContext: () => this.getUIContext(),
     putPreference: (key: string, value: preferences.ValueType) => this.putPreference(key, value)
   });
@@ -245,8 +250,11 @@ struct MainTabs {
   @State webNetworkReady: boolean = true;
   private webSource: string = TWITTER_ROUTES[0];
   // 新文档尚未提交时，控制器仍可能返回上一页地址。
-  private loadingWebUrl: string = '';
+  private pendingDocumentUrl: string = '';
   private failedWebUrl: string = '';
+  @State retrying: boolean = false;
+  private renderRecoveryPending: boolean = false;
+  private lastRenderRecovery: number = 0;
   private pageStateTimer: number = -1;
   @State authenticationPage: boolean = false;
   @State fullScreen: boolean = false;
@@ -254,7 +262,7 @@ struct MainTabs {
   @StorageLink('incomingContent') @Watch('onIncomingContentChanged') incomingContent: IncomingContent =
     { kind: '', value: '' };
   @StorageLink('incomingError') @Watch('onIncomingErrorChanged') incomingError: number = 0;
-  private incomingControllerReady: boolean = false;
+  private webControllerReady: boolean = false;
   private incomingPageReady: boolean = false;
   private fullScreenHandler: FullScreenExitHandler | undefined = undefined;
   private fullScreenWindow: window.Window | undefined = undefined;
@@ -270,7 +278,7 @@ struct MainTabs {
   @State canGoBack: boolean = false;
   private controller: web_webview.WebviewController = new web_webview.WebviewController();
   private wideListener: mediaquery.MediaQueryListener | undefined = undefined;
-  private bridge: PageBridge = new PageBridge();
+  private bridge: PageBridge = this.createBridge(0);
   private firstLoadTimer: number = -1;
   private networkUnsubscribe: (() => void) | undefined = undefined;
   private networkGeneration: number = 0;
@@ -281,6 +289,36 @@ struct MainTabs {
     const color = ColorMetrics.resourceColor(theme.colors.fontPrimary);
     this.statusBarContentColor = '#' + ((color.red << 16) | (color.green << 8) | color.blue)
       .toString(16).padStart(6, '0');
+  }
+
+  /** 旧网页保留的代理只属于旧会话，恢复期间不能回调新控制器。 */
+  private createBridge(session: number): PageBridge {
+    const bridge = new PageBridge(() => this.pageAlive && this.webControllerReady && session === this.webSession);
+    bridge.setImageHandler((payload: string) => this.openImages(payload));
+    bridge.setModalHandler((url: string, open: boolean) => {
+      if (this.rawWeb || !isSiteUrl(url) || this.webUrl() !== url) { return; }
+      this.updateWebModal(open);
+    });
+    bridge.setProfileHandler((payload: string) => this.receiveProfileLayout(payload));
+    bridge.setThemeHandler((color: string) => {
+      const match = /^rgb\((\d{1,3}),\s*(\d{1,3}),\s*(\d{1,3})\)$/.exec(color);
+      if (!match || !isSiteUrl(this.webUrl())) { return; }
+      const red = Number(match[1]), green = Number(match[2]), blue = Number(match[3]);
+      if (red > 255 || green > 255 || blue > 255) { return; }
+      this.pageBackground = color;
+      this.webColorMode = this.themeMode === 'dark' ? ThemeColorMode.DARK : this.themeMode === 'light' ?
+        ThemeColorMode.LIGHT : ThemeColorMode.SYSTEM;
+    });
+    bridge.setHandler((url: string) => {
+      if (!isSiteUrl(url) && !isAuthUrl(url)) { return; }
+      this.saveWebSession();
+      if (this.rawWeb) { return; }
+      this.syncFromUrl(url);
+      this.updateChromeFlag(url);
+      this.applyPageChrome(url);
+      this.schedulePageStateRead();
+    });
+    return bridge;
   }
 
   async aboutToAppear(): Promise<void> {
@@ -310,15 +348,18 @@ struct MainTabs {
       net.ensureInitialized(shellContext);
       const netSnapshot: NetworkSnapshot = net.snapshot();
       this.webNetworkReady = !(netSnapshot.mode === 'secure_only' && !netSnapshot.suspended && netSnapshot.applyError);
-      if (!this.webNetworkReady) { this.navigation.hasError = true; }
+      if (!this.webNetworkReady) { this.navigation.failure = 'policy'; }
       this.networkGeneration = netSnapshot.generation;
       this.networkUnsubscribe = net.subscribe((snapshot: NetworkSnapshot) => {
         const ready = !(snapshot.mode === 'secure_only' && !snapshot.suspended && snapshot.applyError);
         if (!ready) {
+          this.webControllerReady = false;
+          this.retrying = false;
+          this.renderRecoveryPending = false;
+          this.pendingDocumentUrl = '';
           this.navigation.navigationGeneration++;
           this.webNetworkReady = false;
-          this.navigation.hasError = true;
-          this.incomingControllerReady = false;
+          this.navigation.failure = 'policy';
           this.incomingPageReady = false;
           this.account.cancelProfileNavigation();
           this.composer.networkBlocked();
@@ -334,29 +375,6 @@ struct MainTabs {
         if (snapshot.generation !== this.networkGeneration) {
           this.networkPendingReload = true;
         }
-      });
-      this.bridge.setImageHandler((payload: string) => this.openImages(payload));
-      this.bridge.setModalHandler((url: string, open: boolean) => {
-        if (this.rawWeb || !this.incomingControllerReady || !isSiteUrl(url) || this.controller.getUrl() !== url) { return; }
-        this.updateWebModal(open);
-      });
-      this.bridge.setProfileHandler((payload: string) => this.receiveProfileLayout(payload));
-      this.bridge.setThemeHandler((color: string) => {
-        const match = /^rgb\((\d{1,3}),\s*(\d{1,3}),\s*(\d{1,3})\)$/.exec(color);
-        if (!match || !isSiteUrl(this.controller.getUrl())) { return; }
-        const red = Number(match[1]), green = Number(match[2]), blue = Number(match[3]);
-        if (red > 255 || green > 255 || blue > 255) { return; }
-        this.pageBackground = color;
-        this.webColorMode = this.themeMode === 'dark' ? ThemeColorMode.DARK : this.themeMode === 'light' ?
-          ThemeColorMode.LIGHT : ThemeColorMode.SYSTEM;
-      });
-      this.bridge.setHandler((url: string) => {
-        this.saveWebSession();
-        if (this.rawWeb) { return; }
-        this.syncFromUrl(url);
-        this.updateChromeFlag(url);
-        this.applyPageChrome(url);
-        this.schedulePageStateRead();
       });
       this.applyBreakpoints();
       this.armFirstLoadTimeout();
@@ -396,7 +414,7 @@ struct MainTabs {
         this.customUa = await prefs.get('custom_ua', '') as string;
         this.webColorMode = this.themeMode === 'dark' ? ThemeColorMode.DARK : this.themeMode === 'light' ?
           ThemeColorMode.LIGHT : ThemeColorMode.SYSTEM;
-        if (this.incomingControllerReady) { this.controller.setCustomUserAgent(this.userAgent()); }
+        this.applyUserAgent();
         // 上次账号只预热头像，不用于资料跳转或发帖身份确认。
         await this.account.initialize(prefs);
         this.syncChromeInsets();
@@ -410,9 +428,12 @@ struct MainTabs {
   }
 
   aboutToDisappear(): void {
+    this.webControllerReady = false;
+    this.retrying = false;
+    this.renderRecoveryPending = false;
+    this.pendingDocumentUrl = '';
     this.navigation.navigationGeneration++;
     this.account.cancelProfileNavigation();
-    this.incomingControllerReady = false;
     this.incomingPageReady = false;
     this.pageAlive = false;
     this.stopBackgroundWork();
@@ -462,8 +483,8 @@ struct MainTabs {
       this.schedulePageStateRead();
       this.flushNetworkReload();
     }
-    if (this.incomingControllerReady && !this.rawWeb) {
-      this.controller.runJavaScript(chromeActiveScript(!this.appBackground)).catch((err: BusinessError) => {
+    if (this.webControllerReady && !this.rawWeb) {
+      this.webScript(chromeActiveScript(!this.appBackground)).catch((err: BusinessError) => {
         hilog.warn(DOMAIN, TAG, 'event=chrome_lifecycle_failed code=%{public}d', err.code);
       });
     }
@@ -504,7 +525,7 @@ struct MainTabs {
   /** 外部入口只在控制器就绪后消费，编辑或模态操作进行中不覆盖用户状态。 */
   private onIncomingContentChanged(): void {
     const content = this.incomingContent;
-    if (content.kind === '' || !this.incomingControllerReady || !this.incomingPageReady) { return; }
+    if (content.kind === '' || !this.webControllerReady || !this.incomingPageReady) { return; }
     this.incomingContent = { kind: '', value: '' };
     if (this.modalBlocksNetworkReload() || this.fullScreen || this.composer.openingCompose) {
       this.toast($r('app.string.incoming_busy'));
@@ -524,6 +545,7 @@ struct MainTabs {
     this.firstLoadTimer = setTimeout(() => {
       this.firstLoadDone = true;
       this.documentLoading = false;
+      this.retrying = false;
       this.firstLoadTimer = -1;
     }, FIRST_LOAD_TIMEOUT_MS);
   }
@@ -603,14 +625,14 @@ struct MainTabs {
       return true;
     }
     if (this.settingsWeb) {
-      if (this.navigation.hasError || this.navigation.currentUrl === this.settingsWebRoot || !this.controller.accessBackward()) {
+      if (this.navigation.hasError || this.navigation.currentUrl === this.settingsWebRoot || !this.webCanGoBack()) {
         this.settingsWeb = false;
         this.settingsOpen = true;
-        this.navigation.hasError = false;
+        this.navigation.failure = 'none';
         return true;
       }
       try {
-        if (this.controller.accessBackward()) {
+        if (this.webCanGoBack()) {
           this.controller.backward();
           return true;
         }
@@ -618,11 +640,12 @@ struct MainTabs {
       }
       this.settingsWeb = false;
       this.settingsOpen = true;
-      this.navigation.hasError = false;
+      this.navigation.failure = 'none';
       return true;
     }
+    if (!this.webControllerReady) { return this.retrying; }
     try {
-      if (this.controller.accessBackward()) {
+      if (this.webCanGoBack()) {
         this.controller.backward();
         return true;
       }
@@ -685,7 +708,7 @@ struct MainTabs {
       const deadline = Date.now() + PROFILE_TIMEOUT_MS;
       while (generation === this.navigation.navigationGeneration && this.pageAlive && !this.appBackground) {
         if (this.isHomeRoot()) {
-          const result = MainTabs.unquote(await this.controller.runJavaScript(ACCOUNT_SWITCH_SCRIPT));
+          const result = MainTabs.unquote(await this.webScript(ACCOUNT_SWITCH_SCRIPT));
           if (result === 'opened') { return; }
         }
         if (Date.now() >= deadline) { break; }
@@ -712,10 +735,9 @@ struct MainTabs {
     this.account.cancelProfileNavigation();
     if (!wasSettings && index === previousIndex && isTabRootPath(this.navigation.currentPath)) {
       // Tapping the active tab scrolls to top, like the stock app.
-      try {
-        this.controller.runJavaScript(scrollToTopScript());
-      } catch (err) {
-      }
+      this.webScript(scrollToTopScript()).catch((error: Error) => {
+        hilog.warn(DOMAIN, TAG, 'event=scroll_top_failed error=%{public}s', error.message);
+      });
       return;
     }
     this.tick();
@@ -764,7 +786,7 @@ struct MainTabs {
           ConfigurationConstant.ColorMode.COLOR_MODE_DARK : value === 'light' ?
           ConfigurationConstant.ColorMode.COLOR_MODE_LIGHT : ConfigurationConstant.ColorMode.COLOR_MODE_NOT_SET);
         this.webColorMode = value === 'dark' ? ThemeColorMode.DARK : value === 'light' ? ThemeColorMode.LIGHT : ThemeColorMode.SYSTEM;
-        if (this.incomingControllerReady) { await this.controller.runJavaScript(appearanceScript(this.themeMode)); }
+        if (this.webControllerReady) { await this.webScript(appearanceScript(this.themeMode)); }
         if (this.composer.composeReady) { await this.composer.composeController.runJavaScript(appearanceScript(this.themeMode)); }
       } else if (key === 'font_scale') {
         this.getUIContext().getHostContext()!.getApplicationContext().setFontSizeScale((value as number) / 100);
@@ -772,7 +794,7 @@ struct MainTabs {
       }
       else if (key === 'custom_ua') {
         this.customUa = value as string;
-        this.controller.setCustomUserAgent(this.userAgent());
+        this.applyUserAgent();
         this.reloadCurrent();
         this.toast($r('app.string.settings_saved'));
       }
@@ -839,6 +861,7 @@ struct MainTabs {
   }
 
   private async clearWebCache(): Promise<void> {
+    if (!this.webControllerReady) { this.toast($r('app.string.operation_failed')); return; }
     try {
       this.controller.removeCache(true);
       hilog.info(DOMAIN, TAG, 'event=web_cache_cleared');
@@ -884,7 +907,7 @@ struct MainTabs {
       onRawWeb: () => {
         this.rawWeb = !this.rawWeb;
         this.leaveSettings();
-        this.controller.setCustomUserAgent(this.rawWeb ? web_webview.WebviewController.getDefaultUserAgent() : this.userAgent());
+        this.applyUserAgent();
         this.reloadCurrent();
       } })
   }
@@ -894,16 +917,14 @@ struct MainTabs {
   // only moves once the timeline has actually changed.
   private selectHomeTab(index: number): void {
     if (index === this.homeTabIndex) {
-      try {
-        this.controller.runJavaScript(scrollToTopScript());
-      } catch (err) {
-      }
+      this.webScript(scrollToTopScript()).catch((error: Error) => {
+        hilog.warn(DOMAIN, TAG, 'event=scroll_top_failed error=%{public}s', error.message);
+      });
       return;
     }
-    try {
-      this.controller.runJavaScript(selectHomeTabScript(index));
-    } catch (err) {
-    }
+    this.webScript(selectHomeTabScript(index)).catch((error: Error) => {
+      hilog.warn(DOMAIN, TAG, 'event=home_tab_failed error=%{public}s', error.message);
+    });
     this.tick();
     this.schedulePageStateRead();
   }
@@ -922,9 +943,9 @@ struct MainTabs {
     }
     const generation = this.account.profileNavigation;
     this.account.discovering = true;
-    this.navigation.hasError = false;
+    this.navigation.failure = 'none';
     try {
-      let handle = MainTabs.unquote(await this.controller.runJavaScript(OWN_HANDLE_SCRIPT));
+      let handle = MainTabs.unquote(await this.webScript(OWN_HANDLE_SCRIPT));
       if (generation !== this.account.profileNavigation || !this.pageAlive || this.appBackground) {
         return;
       }
@@ -1047,50 +1068,147 @@ struct MainTabs {
     return '';
   }
 
+  /** 绑定检查与同步异常都留在平台边界，调用方始终收到可处理的 Promise。 */
+  private async webScript(script: string): Promise<string> {
+    if (!this.webControllerReady) { throw new Error('Web controller is not attached'); }
+    const session = this.webSession;
+    const result = await this.controller.runJavaScript(script);
+    if (!this.webControllerReady || session !== this.webSession) { throw new Error('Web session changed'); }
+    return result;
+  }
+
+  private webUrl(): string {
+    if (!this.webControllerReady) { return ''; }
+    try { return this.controller.getUrl(); } catch (error) {
+      hilog.warn(DOMAIN, TAG, 'event=web_url_failed error=%{public}s', JSON.stringify(error));
+      return '';
+    }
+  }
+
+  private webCanGoBack(): boolean {
+    if (!this.webControllerReady) { return false; }
+    try { return this.controller.accessBackward(); } catch (error) {
+      hilog.warn(DOMAIN, TAG, 'event=web_history_failed error=%{public}s', JSON.stringify(error));
+      return false;
+    }
+  }
+
+  private applyUserAgent(): void {
+    if (!this.webControllerReady) { return; }
+    try {
+      this.controller.setCustomUserAgent(this.rawWeb ? web_webview.WebviewController.getDefaultUserAgent() : this.userAgent());
+    } catch (error) {
+      hilog.warn(DOMAIN, TAG, 'event=user_agent_failed error=%{public}s', JSON.stringify(error));
+      this.toast($r('app.string.operation_failed'));
+    }
+  }
+
+  /** 应用发起的加载先登记目标，覆盖 PageBegin 之前的失败。 */
+  private documentStarted(url: string): void {
+    this.pendingDocumentUrl = url;
+    this.failedWebUrl = url;
+    this.documentLoading = true;
+    this.incomingPageReady = false;
+    this.armFirstLoadTimeout();
+  }
+
   private reloadCurrent(): void {
-    if (this.navigation.hasError || !this.webNetworkReady) {
+    if (this.retrying) { return; }
+    if (this.navigation.failure === 'policy' || !this.webNetworkReady) {
+      this.retrying = true;
       const session = this.webSession;
-      NetworkConfig.getInstance().refresh();
+      const network = NetworkConfig.getInstance();
+      network.ensureApplied();
+      const snapshot = network.snapshot();
+      this.webNetworkReady = !(snapshot.mode === 'secure_only' && !snapshot.suspended && snapshot.applyError);
       // 应用成功的订阅回调可能已重建页面，不能再刷新尚未绑定的新控制器。
-      if (!this.webNetworkReady || this.webSession !== session) { return; }
+      if (!this.webNetworkReady) { this.navigation.failure = 'policy'; this.retrying = false; return; }
+      if (this.webSession !== session) { return; }
+      this.recoverMediaWeb(this.rawWeb, false);
+      this.composer.resetController();
+      return;
+    }
+    if (this.navigation.failure === 'render') {
+      this.retrying = true;
+      this.lastRenderRecovery = Date.now();
       this.recoverMediaWeb(this.rawWeb, false);
       return;
     }
-    // A retry replaces the error surface with the normal progress UI.
-    this.navigation.hasError = false;
+    if (!this.webControllerReady) { return; }
+    const failed = this.navigation.failure === 'document';
+    const target = this.failedWebUrl || this.navigation.currentUrl || this.webSource;
+    this.retrying = true;
+    this.navigation.failure = 'none';
     this.account.retryFailedAvatar();
     this.navigation.progress = 0;
     this.refreshing = true;
+    this.documentStarted(target);
     try {
-      this.controller.refresh();
+      if (failed) { this.controller.loadUrl(target); }
+      else { this.controller.refresh(); }
     } catch (err) {
-      this.navigation.hasError = true;
+      this.navigation.failure = 'document';
+      this.pendingDocumentUrl = '';
+      this.retrying = false;
       this.refreshing = false;
+      this.finishFirstLoad();
       hilog.error(DOMAIN, TAG, 'event=refresh_failed error=%{public}s', JSON.stringify(err));
     }
   }
 
   /** 重建所属 Web 隔离无 GUID 的旧下载；保留共享登录会话和当前站内地址。 */
   private recoverMediaWeb(showWeb: boolean, notify: boolean = true): void {
+    this.webControllerReady = false;
+    this.retrying = true;
+    this.renderRecoveryPending = false;
     this.webSession++;
+    this.bridge = this.createBridge(this.webSession);
     this.navigation.navigationGeneration++;
     this.account.cancelProfileNavigation();
     this.imageViewerOpen = false;
     this.rawWeb = showWeb;
     this.webSource = (this.navigation.hasError ? this.failedWebUrl : '') || this.navigation.currentUrl || this.webSource;
-    this.loadingWebUrl = this.webSource;
+    this.documentStarted(this.webSource);
     this.webImages?.close().catch((error: Error) => {
       hilog.error(DOMAIN, TAG, 'event=web_image_close_failed error=%{public}s', error.message);
       this.toast($r('app.string.operation_failed'));
     });
     this.webImages = undefined;
-    this.incomingControllerReady = false;
     this.incomingPageReady = false;
     this.webModalOpen = false;
     this.controller = new web_webview.WebviewController();
-    this.navigation.hasError = false;
+    this.navigation.failure = 'none';
     this.navigation.progress = 0;
     if (notify && !showWeb) { this.toast($r('app.string.media_reopen')); }
+  }
+
+  /** 查看器先释放图片，再恢复渲染；短时间内重复退出交给用户重试。 */
+  private renderExited(): void {
+    this.webControllerReady = false;
+    this.incomingPageReady = false;
+    this.navigation.navigationGeneration++;
+    this.account.cancelProfileNavigation();
+    this.pendingDocumentUrl = '';
+    this.retrying = false;
+    this.refreshing = false;
+    this.finishFirstLoad();
+    if (this.lastRenderRecovery > 0 && Date.now() - this.lastRenderRecovery < 30000) {
+      this.renderRecoveryPending = false;
+      this.navigation.failure = 'render';
+      return;
+    }
+    this.renderRecoveryPending = true;
+    this.webModalOpen = false;
+    this.flushRenderRecovery();
+  }
+
+  private flushRenderRecovery(): void {
+    if (!this.renderRecoveryPending || !this.pageAlive || this.appBackground || this.fullScreen ||
+      this.modalBlocksNetworkReload() || !this.webNetworkReady) { return; }
+    this.renderRecoveryPending = false;
+    this.lastRenderRecovery = Date.now();
+    this.retrying = true;
+    this.recoverMediaWeb(this.rawWeb, false);
   }
 
   /** 账号读取失败不应使原生界面消失；登录与未知路由交给网页。 */
@@ -1183,7 +1301,7 @@ struct MainTabs {
     }
     if (!layout || typeof layout.ready !== 'boolean' || !this.pageAlive || this.appBackground || this.rawWeb ||
       this.settingsOpen || this.imageViewerOpen || this.navigation.viewingHandle === '' ||
-      layout.url !== this.navigation.currentUrl || layout.url !== this.controller.getUrl() ||
+      layout.url !== this.navigation.currentUrl || layout.url !== this.webUrl() ||
       layout.viewWidth !== this.webWidth) { return; }
     if (!layout.ready) { this.resetProfileLayout(); return; }
     if (typeof layout.hasBanner !== 'boolean' || !(layout.width > 0) || !Number.isFinite(layout.width) || !Number.isFinite(layout.scrollY) ||
@@ -1314,9 +1432,9 @@ struct MainTabs {
   }
 
   private syncChromeInsets(): void {
-    if (this.rawWeb || !isSiteUrl(this.navigation.currentUrl) || this.webWidth <= 0) { return; }
+    if (!this.webControllerReady || this.rawWeb || !isSiteUrl(this.navigation.currentUrl) || this.webWidth <= 0) { return; }
     if (this.navigation.viewingHandle !== '') { this.syncHeaderBlur(this.lastScrollY); }
-    this.controller.runJavaScript(chromeInsetsScript(
+    this.webScript(chromeInsetsScript(
       this.overlayTopInset(),
       this.overlaysWeb() ? this.bottomChromeHeight() : 0, this.webWidth
     )).catch((error: Error) => {
@@ -1343,7 +1461,7 @@ struct MainTabs {
       if (key === 'original_images') { this.originalImages = value; }
       if (key === DESKTOP_MODE_KEY) {
         this.desktopMode = value;
-        this.controller.setCustomUserAgent(this.rawWeb ? web_webview.WebviewController.getDefaultUserAgent() : this.userAgent());
+        this.applyUserAgent();
         this.reloadCurrent();
       }
       this.resetChromeScroll();
@@ -1400,6 +1518,7 @@ struct MainTabs {
 
   /** DoH changes apply to new resolutions; reload once after the panel closes. */
   private flushNetworkReload(): void {
+    this.flushRenderRecovery();
     if (!this.networkPendingReload || this.appBackground || this.fullScreen ||
       this.modalBlocksNetworkReload()) {
       return;
@@ -1445,11 +1564,11 @@ struct MainTabs {
     if (this.rawWeb || !/^https:\/\/(www\.)?(x|twitter)\.com(\/|$)/.test(url)) { return; }
     const navigation: boolean = usesNativeNavigation(url);
     try {
-      this.controller.runJavaScript(appearanceScript(this.themeMode)).catch((error: Error) => {
+      this.webScript(appearanceScript(this.themeMode)).catch((error: Error) => {
         hilog.error(DOMAIN, TAG, 'event=appearance_apply_failed error=%{public}s', error.message);
         this.toast($r('app.string.operation_failed'));
       });
-      this.controller.runJavaScript(chromeScript(navigation, usesNativeHeader(url), url))
+      this.webScript(chromeScript(navigation, usesNativeHeader(url), url))
         .then((raw: string) => this.logChromeResult('apply', raw))
         .catch((err: Error) => {
           hilog.warn(DOMAIN, TAG, 'event=chrome_injection_failed source=apply code=%{public}d',
@@ -1466,7 +1585,7 @@ struct MainTabs {
     if (this.rawWeb) { return; }
     try {
       const navigation: boolean = usesNativeNavigation(url);
-      this.controller.runJavaScript(chromeFlagScript(navigation, usesNativeHeader(url), url))
+      this.webScript(chromeFlagScript(navigation, usesNativeHeader(url), url))
         .then((raw: string) => this.logChromeResult('flag', raw))
         .catch((err: Error) => {
           hilog.warn(DOMAIN, TAG, 'event=chrome_injection_failed source=flag code=%{public}d',
@@ -1529,7 +1648,7 @@ struct MainTabs {
   private readPageState(): void {
     const pageUrl = this.navigation.currentUrl;
     try {
-      this.controller.runJavaScript('Boolean(document.querySelector(\'input[autocomplete="username"],input[autocomplete="current-password"],input[autocomplete="one-time-code"]\'))')
+      this.webScript('Boolean(document.querySelector(\'input[autocomplete="username"],input[autocomplete="current-password"],input[autocomplete="one-time-code"]\'))')
         .then((raw: string) => {
           if (!this.pageAlive || this.navigation.currentUrl !== pageUrl || this.appBackground) { return; }
           this.authenticationPage = raw === 'true';
@@ -1540,7 +1659,7 @@ struct MainTabs {
         }).catch((err: Error) => {
           hilog.warn(DOMAIN, TAG, 'event=auth_page_read_failed error=%{public}s', err.message);
         });
-      this.controller.runJavaScript('document.title').then((raw: string) => {
+      this.webScript('document.title').then((raw: string) => {
         if (!this.pageAlive || this.navigation.currentUrl !== pageUrl || this.appBackground) { return; }
         const title: string = MainTabs.unquote(raw);
         this.pageTitle = MainTabs.stripSiteSuffix(title);
@@ -1554,7 +1673,7 @@ struct MainTabs {
       this.account.readProfileDetails();
     }
     try {
-      this.canGoBack = this.controller.accessBackward();
+      this.canGoBack = this.webCanGoBack();
     } catch (err) {
       this.canGoBack = false;
     }
@@ -1565,7 +1684,7 @@ struct MainTabs {
   private readHomeTab(): void {
     const pageUrl = this.navigation.currentUrl;
     try {
-      this.controller.runJavaScript(HOME_TAB_SCRIPT).then((raw: string) => {
+      this.webScript(HOME_TAB_SCRIPT).then((raw: string) => {
         if (!this.pageAlive || this.navigation.currentUrl !== pageUrl || this.appBackground) { return; }
         const index: number = Number.parseInt(MainTabs.unquote(raw), 10);
         if (!Number.isNaN(index) && index >= 0) {
@@ -1660,7 +1779,13 @@ struct MainTabs {
 
   private interceptExternal(event: OnLoadInterceptEvent): boolean {
     const target = event.data.getRequestUrl();
-    if (!event.data.isMainFrame() || isSiteUrl(target) || isAuthUrl(target)) { return false; }
+    if (!event.data.isMainFrame()) { return false; }
+    // 图片主体拖放会被 ArkWeb 转成文件导航，必须在它提交空白错误页之前取消。
+    if (/^file:/i.test(target)) {
+      hilog.warn(DOMAIN, TAG, 'event=local_file_navigation_blocked');
+      return true;
+    }
+    if (isSiteUrl(target) || isAuthUrl(target)) { return false; }
     if (/^https?:\/\//i.test(target)) { this.openExternal(target); return true; }
     return false;
   }
@@ -2112,12 +2237,14 @@ struct MainTabs {
       SymbolGlyph($r('sys.symbol.wifi_slash'))
         .fontSize(48)
         .fontColor([$r('sys.color.ohos_id_color_text_secondary')])
-      Text($r('app.string.error_title'))
+      Text(this.navigation.failure === 'render' ? $r('app.string.render_error_title') :
+        this.navigation.failure === 'policy' ? $r('app.string.policy_error_title') : $r('app.string.error_title'))
         .fontSize(17)
         .fontFamily(FONT_FAMILY)
         .fontWeight(FontWeight.Medium)
         .fontColor($r('sys.color.ohos_id_color_text_primary'))
-      Text($r('app.string.error_message'))
+      Text(this.navigation.failure === 'render' ? $r('app.string.render_error_message') :
+        this.navigation.failure === 'policy' ? $r('app.string.policy_error_message') : $r('app.string.error_message'))
         .fontSize(14)
         .fontFamily(FONT_FAMILY)
         .textAlign(TextAlign.Center)
@@ -2127,6 +2254,7 @@ struct MainTabs {
         .fontFamily(FONT_FAMILY)
         .backgroundColor($r('sys.color.ohos_id_color_emphasize'))
         .margin({ top: S8 })
+        .enabled(!this.retrying)
         .onClick(() => this.reloadCurrent())
       if (this.settingsWeb) {
         Button($r('app.string.back'))
@@ -2137,7 +2265,7 @@ struct MainTabs {
           .onClick(() => {
             this.settingsWeb = false;
             this.settingsOpen = true;
-            this.navigation.hasError = false;
+            this.navigation.failure = 'none';
           })
       }
       Button($r('app.string.network_open_settings'))
@@ -2173,14 +2301,10 @@ struct MainTabs {
         controller: this.controller
       })
       .onControllerAttached(() => {
-        if (session !== this.webSession || !this.webNetworkReady) { return; }
-        // userAgent() on the attribute is deprecated; the controller API is the
-        // supported way and can only run once the controller is bound.
-        try {
-          this.controller.setCustomUserAgent(this.rawWeb ? web_webview.WebviewController.getDefaultUserAgent() : this.userAgent());
-        } catch (err) {
-          hilog.warn(DOMAIN, TAG, 'custom UA rejected: %{public}s', JSON.stringify(err));
-        }
+        if (!this.pageAlive || session !== this.webSession || !this.webNetworkReady) { return; }
+        this.webControllerReady = true;
+        this.documentStarted(this.webSource);
+        this.applyUserAgent();
         const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
         if (!this.webImages) { this.webImages = new WebImageDownloads(this.controller, context.cacheDir); }
         try {
@@ -2189,22 +2313,22 @@ struct MainTabs {
         } catch (err) {
           hilog.error(DOMAIN, TAG, 'event=download_delegate_failed code=%{public}d', (err as BusinessError).code);
         }
-        this.incomingControllerReady = true;
         this.onIncomingContentChanged();
       })
       .onWindowNew((event: OnWindowNewEvent) => {
         event.handler.setWebController(null);
+        if (session !== this.webSession || !this.webControllerReady) { return; }
         if (isSiteUrl(event.targetUrl) || isAuthUrl(event.targetUrl)) {
           this.navigation.loadWeb(event.targetUrl, false, true);
         } else if (/^https?:\/\//i.test(event.targetUrl)) {
           this.openExternal(event.targetUrl);
         } else { this.toast($r('app.string.operation_failed')); }
       })
-      .onLoadIntercept((event) => this.interceptExternal(event))
-      .onFullScreenEnter((event) => { this.enterFullScreen(event.handler); })
-      .onFullScreenExit(() => { this.exitFullScreen(); })
+      .onLoadIntercept((event) => session !== this.webSession || !this.webControllerReady || this.interceptExternal(event))
+      .onFullScreenEnter((event) => { if (session === this.webSession && this.webControllerReady) { this.enterFullScreen(event.handler); } })
+      .onFullScreenExit(() => { if (session === this.webSession) { this.exitFullScreen(); } })
       .onContextMenuShow((event) => {
-        if (!event || this.rawWeb || !event.param.existsImageContents() || !isSiteUrl(this.controller.getUrl())) { return false; }
+        if (session !== this.webSession || !this.webControllerReady || !event || this.rawWeb || !event.param.existsImageContents() || !isSiteUrl(this.webUrl())) { return false; }
         const media = resolveMedia(event.param.getSourceUrl());
         if (!media || this.imageViewerOpen) { return false; }
         this.imageItems = [media];
@@ -2236,6 +2360,7 @@ struct MainTabs {
       .onTouch((event: TouchEvent) => { this.handleWebTouch(event); })
       .onScroll((event: OnScrollEvent) => { this.handleWebScroll(event.yOffset); })
       .onAreaChange((_old: Area, area: Area) => {
+        if (session !== this.webSession) { return; }
         if (this.webWidth !== Number(area.width)) { this.resetProfileLayout(); }
         this.webWidth = Number(area.width);
         this.syncChromeInsets();
@@ -2247,29 +2372,29 @@ struct MainTabs {
         }
       })
       .onPageBegin((event) => {
-        if (session !== this.webSession || !this.webNetworkReady) { return; }
-        this.loadingWebUrl = event.url;
-        this.failedWebUrl = '';
+        if (session !== this.webSession || !this.webControllerReady || !this.webNetworkReady) { return; }
+        if (!isSiteUrl(event.url) && !isAuthUrl(event.url)) { return; }
+        this.retrying = false;
+        this.documentStarted(event.url);
         this.updateWebModal(false);
-        this.documentLoading = true;
-        this.armFirstLoadTimeout();
         this.resetProfileLayout();
-        this.incomingPageReady = false;
-        this.navigation.hasError = false;
+        this.navigation.failure = 'none';
       })
       .onPageEnd((event) => {
-        if (session !== this.webSession || !this.webNetworkReady) { return; }
-        if (this.loadingWebUrl !== '' && event.url.split('#')[0] !== this.loadingWebUrl.split('#')[0]) { return; }
-        if (event && this.controller.getUrl() !== event.url) { return; }
+        if (session !== this.webSession || !this.webControllerReady || !this.webNetworkReady) { return; }
         this.documentLoading = false;
-        this.loadingWebUrl = '';
+        this.pendingDocumentUrl = '';
+        this.retrying = false;
         this.navigation.progress = 100;
         this.refreshing = false;
         this.finishFirstLoad();
+        if (!isSiteUrl(event.url) && !isAuthUrl(event.url)) { return; }
         // 加载失败也会结束文档加载，不能据此启动账号发现或消费待处理链接。
         if (this.navigation.hasError) { return; }
+        if (this.webUrl() !== event.url) { return; }
+        this.failedWebUrl = '';
         if (!this.rawWeb && event && isSiteUrl(event.url)) {
-          this.controller.runJavaScript(MEDIA_CLICK_SCRIPT).catch((error: Error) => {
+          this.webScript(MEDIA_CLICK_SCRIPT).catch((error: Error) => {
             hilog.error(DOMAIN, TAG, 'event=image_bridge_failed error=%{public}s', error.message);
             this.toast($r('app.string.operation_failed'));
           });
@@ -2280,7 +2405,7 @@ struct MainTabs {
           this.applyPageChrome(event.url);
         }
         if (this.appBackground && !this.rawWeb) {
-          this.controller.runJavaScript(chromeActiveScript(false)).catch((err: BusinessError) => {
+          this.webScript(chromeActiveScript(false)).catch((err: BusinessError) => {
             hilog.warn(DOMAIN, TAG, 'event=chrome_lifecycle_failed code=%{public}d', err.code);
           });
         }
@@ -2296,19 +2421,22 @@ struct MainTabs {
         }
       })
       .onErrorReceive((event) => {
-        if (session !== this.webSession || !this.webNetworkReady) { return; }
+        if (session !== this.webSession || !this.webControllerReady || !this.webNetworkReady) { return; }
         const code = event.error.getErrorCode();
         if (!event.request.isMainFrame() || code === -3) { return; }
         const failedUrl = event.request.getRequestUrl();
-        const pageUrl = this.loadingWebUrl || this.controller.getUrl() || this.webSource;
+        const pageUrl = this.pendingDocumentUrl;
         // 图片下载与旧页面错误不能覆盖当前文档，也不能成为整页重试地址。
-        if (failedUrl.split('#')[0] !== pageUrl.split('#')[0]) {
-          hilog.debug(DOMAIN, TAG, 'event=web_error_ignored reason=other_document code=%{public}d', code);
+        if (pageUrl === '' || (!isSiteUrl(failedUrl) && !isAuthUrl(failedUrl)) ||
+          failedUrl.split('#')[0] !== pageUrl.split('#')[0]) {
+          hilog.debug(DOMAIN, TAG, 'event=web_error_ignored reason=no_matching_document code=%{public}d session=%{public}d', code, session);
           return;
         }
         this.failedWebUrl = failedUrl;
+        this.pendingDocumentUrl = '';
+        this.retrying = false;
         hilog.error(DOMAIN, TAG, 'event=main_frame_failed code=%{public}d session=%{public}d', code, session);
-        this.navigation.hasError = true;
+        this.navigation.failure = 'document';
         this.navigation.progress = 100;
         this.refreshing = false;
         this.finishFirstLoad();
@@ -2318,10 +2446,10 @@ struct MainTabs {
         }
       })
       .onRenderExited((event) => {
-        if (session !== this.webSession || !this.webNetworkReady) { return; }
-        hilog.error(DOMAIN, TAG, 'event=render_exit detail=%{public}s', JSON.stringify(event));
-        this.navigation.hasError = true;
-        this.finishFirstLoad();
+        if (!this.pageAlive || session !== this.webSession || !this.webNetworkReady) { return; }
+        hilog.error(DOMAIN, TAG, 'event=render_exit session=%{public}d viewer=%{public}s detail=%{public}s',
+          session, String(this.imageViewerOpen), JSON.stringify(event));
+        this.renderExited();
       })
       .onGeolocationShow((event) => {
         if (event && event.geolocation) {
@@ -2506,11 +2634,12 @@ struct MainTabs {
     .backgroundColor($r('sys.color.ohos_id_color_background'))
     // Escape works from anywhere in the sheet, not only from the editor.
     .onKeyEvent((event: KeyEvent) => this.composer.composeKey(event))
+    .onDisAppear(() => { this.flushNetworkReload(); })
   }
 
   /** 桥接数据属于网页输入，完整校验通过后才接管当前点击。 */
   private openImages(payload: string): boolean {
-    if (this.rawWeb || this.imageViewerOpen || this.composer.sheetOpen || this.fullScreen || !isSiteUrl(this.controller.getUrl())) { return false; }
+    if (this.rawWeb || this.imageViewerOpen || this.composer.sheetOpen || this.fullScreen || !isSiteUrl(this.webUrl())) { return false; }
     try {
       const data = JSON.parse(payload) as ImagePayload;
       if (!Array.isArray(data.urls) || data.urls.length < 1 || data.urls.length > 4 ||
@@ -2554,7 +2683,7 @@ struct MainTabs {
     let start = true;
     while (this.imageViewerOpen && this.pageAlive && !this.appBackground && this.account.ownHandle === owner &&
       this.navigation.navigationGeneration === generation && this.navigation.currentUrl === url && this.imagePost.postId === postId) {
-      const raw = MainTabs.unquote(await this.controller.runJavaScript(mediaActionScript(postId, id, action, start)));
+      const raw = MainTabs.unquote(await this.webScript(mediaActionScript(postId, id, action, start)));
       const result = JSON.parse(raw) as MediaActionResult;
       if (result.requestId !== id || result.postId !== postId) { throw new Error('Image action response mismatch'); }
       if (result.status === 'unavailable' || result.status === 'failed') { throw new Error('Post action ' + result.status); }
@@ -2566,7 +2695,7 @@ struct MainTabs {
       if (result.status === 'quote') {
         const quoteUrl = result.quoteUrl;
         if (!quoteUrl || !isSiteUrl(quoteUrl) || pathOf(quoteUrl) !== '/compose/post') { throw new Error('Quote route unavailable'); }
-        await this.controller.runJavaScript('document.dispatchEvent(new KeyboardEvent("keydown",{key:"Escape",bubbles:true}))');
+        await this.webScript('document.dispatchEvent(new KeyboardEvent("keydown",{key:"Escape",bubbles:true}))');
         this.imageViewerOpen = false;
         this.composer.openQuote(quoteUrl, owner);
         return result;
@@ -2603,6 +2732,7 @@ struct MainTabs {
     this.imageDragging = false;
     this.imageAnalyzerSelecting = false;
     this.imageAnalyzerCancelTrigger = 0;
+    if (!this.imageViewerOpen) { setTimeout(() => this.flushRenderRecovery(), 0); }
   }
 
   private dismissImageDetails(): boolean {

@@ -25,7 +25,7 @@ const composerSource = read('entry/src/main/ets/common/ComposerSession.ets')
 const decodeSource = read('entry/src/main/ets/common/WebChrome.ets').match(/export function unquoteScriptResult[\s\S]*?^}/m)[0].replace('export ', '');
 runtime.unquoteScriptResult = vm.runInNewContext(stripTypeScriptTypes(decodeSource) + ';unquoteScriptResult');
 const ComposerSession = vm.runInNewContext(stripTypeScriptTypes(composerSource) + ';ComposerSession', runtime);
-const methods = ['unquote'];
+const methods = ['unquote','webScript','documentStarted','applyUserAgent'];
 const Page = vm.runInNewContext(stripTypeScriptTypes('class MainTabs {\n' + methods.map(method).join('\n') + '\n}; MainTabs'), runtime);
 const sessionClass = name => {
   const source = read('entry/src/main/ets/common/' + name + '.ets')
@@ -53,20 +53,21 @@ function composer() {
 function page() {
   const p = new Page();
   p.navigation = new WebNavigation({ controller: () => p.controller, isNetworkReady: () => p.webNetworkReady,
+    isControllerReady: () => p.webControllerReady, documentStarted: url => p.documentStarted(url),
     cancelProfileNavigation: () => p.account.cancelProfileNavigation(), toast: message => p.toast(message) });
-  p.account = new AccountSession({ getUIContext: () => p.getUIContext(), controller: () => p.controller,
-    url: () => p.navigation.currentUrl, isControllerReady: () => p.incomingControllerReady,
+  p.account = new AccountSession({ getUIContext: () => p.getUIContext(), webScript: script => p.webScript(script),
+    url: () => p.navigation.currentUrl, isControllerReady: () => p.webControllerReady,
     isAuthenticationPage: () => p.authenticationPage, isRawWeb: () => p.rawWeb,
     webImages: () => p.webImages, currentIndex: () => p.currentIndex,
     isSettingsOpen: () => p.settingsOpen, isComposerOpen: () => p.composer.sheetOpen,
     accountChanged: () => p.unread.resetAccount(), loadWeb: (...args) => p.navigation.loadWeb(...args),
     toast: message => p.toast(message) });
-  p.unread = new UnreadSession({ controller: () => p.controller, owner: () => p.account.ownHandle,
+  p.unread = new UnreadSession({ webScript: script => p.webScript(script), isControllerReady: () => p.webControllerReady, owner: () => p.account.ownHandle,
     url: () => p.navigation.currentUrl, isRawWeb: () => p.rawWeb, getUIContext: () => p.getUIContext(),
     putPreference: async () => {} });
   // 保留场景中的简洁赋值，实际状态与方法全部落到生产会话实例。
   for (const [owner, keys] of [
-    [p.navigation, ['navigationGeneration', 'currentUrl', 'currentPath', 'hasError', 'progress', 'loadWeb']],
+    [p.navigation, ['navigationGeneration', 'currentUrl', 'currentPath', 'failure', 'progress', 'loadWeb']],
     [p.account, ['profileNavigation', 'ownHandle', 'discovering', 'avatarReadRequest', 'avatarFailedUrl',
       'clearAvatarRetry', 'confirmCurrentAccount', 'acceptHandle', 'cancelProfileNavigation', 'closeWebDrawer']],
     [p.unread, ['unreadNotifications', 'unreadMessages', 'badgeShown', 'badgeSyncFailures', 'badgeSyncTarget',
@@ -77,8 +78,11 @@ function page() {
         set: value => { owner[key] = value; } });
     }
   }
+  Object.defineProperty(p, 'hasError', {get: () => p.navigation.hasError,
+    set: value => {p.navigation.failure = value ? 'document' : 'none';}});
   Object.assign(p, { composer: composer(), webNetworkReady: true, navigationGeneration: 0,
-    profileNavigation: 0, pageAlive: true, appBackground: false,
+    profileNavigation: 0, pageAlive: true, appBackground: false, webControllerReady: true, webSession: 0,
+    createBridge: () => ({}), armFirstLoadTimeout() {}, finishFirstLoad() {}, userAgent: () => 'mobile',
     getUIContext: () => ({ getHostContext: () => ({}), showAlertDialog() {} }),
     confirmCurrentAccount: async () => 'Alice', toast: message => notices.push(message) });
   return p;
@@ -202,9 +206,9 @@ const extra = Object.fromEntries(extraMethods.map(name => {
   const code = method(name).replace(/^  (?:private )?/, '');
   return [name, code];
 }));
-let networkListener, badgeError, badgeGate;
+let networkListener, badgeError, badgeGate, netApplyError=false;
 const badgeCalls = [], waits = [];
-const net = { ensureInitialized() {}, snapshot: () => ({ generation: 1, mode: 'secure_only', suspended: false, applyError: false }),
+const net = { ensureInitialized() {}, snapshot: () => ({ generation: 1, mode: 'secure_only', suspended: false, applyError: netApplyError }),
   subscribe(callback) { networkListener = callback; return () => {}; } };
 Object.assign(runtime, { PROFILE_TIMEOUT_MS: 10000, BADGE_RETRY_LIMIT: 3,
   TWITTER_ROUTES: ['https://x.com/home'], NOTIFICATION_ASKED_KEY: 'asked', FLOATING_BAR_KEY: 'floating',
@@ -241,7 +245,7 @@ for (const transition of ['blocked', 'rebuilt']) {
   await ExtraPage.prototype.aboutToAppear.call(p);
   assert.equal(p.preferencesReady, true); assert.equal(p.webNetworkReady, true);
   networkListener({ generation: 2, mode: 'secure_only', suspended: false, applyError: true });
-  assert.equal(p.webNetworkReady, false); assert.equal(p.hasError, true); assert.equal(p.incomingControllerReady, false);
+  assert.equal(p.webNetworkReady, false); assert.equal(p.hasError, true); assert.equal(p.webControllerReady, false);
   p.webSession = 0;
   networkListener({ generation: 3, mode: 'secure_only', suspended: false, applyError: false });
   assert.equal(p.webNetworkReady, true); assert.equal(p.webSession, 1);
@@ -249,31 +253,38 @@ for (const transition of ['blocked', 'rebuilt']) {
   await ExtraPage.prototype.aboutToAppear.call(failedContext);
   assert.equal(failedContext.preferencesReady, true);
 }
-// 错误页重试重新应用网络策略，并用失败地址重建页面；应用仍失败时不能放行。
+// 文档失败沿用已绑定控制器；只有策略失败重配网络，应用仍失败时不能放行。
 for (const scenario of ['page_failed', 'apply_recovered', 'apply_failed']) {
   const p = page();
   let applies = 0, refreshes = 0;
+  netApplyError=false;
   Object.assign(p, { pageAlive: true, ownHandle: '',
     bridge: Object.fromEntries(['setImageHandler','setProfileHandler','setThemeHandler','setHandler','setModalHandler'].map(name => [name, () => {}])),
     applyBreakpoints() {}, armFirstLoadTimeout() {}, armBadgeRefresh() {}, syncChromeInsets() {},
     recoverMediaWeb: ExtraPage.prototype.recoverMediaWeb });
   await ExtraPage.prototype.aboutToAppear.call(p);
-  Object.assign(p, { hasError: true, webNetworkReady: scenario === 'page_failed', webSession: 0,
+  Object.assign(p, { failure: scenario === 'page_failed' ? 'document' : 'policy', webNetworkReady: scenario === 'page_failed', webSession: 0,
     currentUrl: 'https://x.com/home', webSource: 'https://x.com/home',
     failedWebUrl: 'https://x.com/alice/status/123', rawWeb: false,
-    controller: { refresh() { refreshes++; } } });
-  net.refresh = () => {
+    controller: { refresh() { refreshes++; }, loadUrl(url) {p.loadedUrl=url;} } });
+  net.ensureApplied = () => {
     applies++;
+    netApplyError=scenario === 'apply_failed';
     networkListener({ generation: 1, mode: 'secure_only', suspended: false, applyError: scenario === 'apply_failed' });
   };
   ExtraPage.prototype.reloadCurrent.call(p);
+  if(scenario === 'page_failed') {
+    assert.equal(applies,0);assert.equal(p.webSession,0);
+    assert.equal(p.loadedUrl,'https://x.com/alice/status/123');
+    assert.equal(p.hasError,false);continue;
+  }
   assert.equal(applies, 1);
   assert.equal(refreshes, 0, '错误页不能重复刷新失败控制器或刷新尚未绑定的新控制器');
   if (scenario === 'apply_failed') {
     assert.equal(p.webSession, 0);
     assert.equal(p.hasError, true);
     assert.equal(p.webNetworkReady, false);
-    net.refresh = () => networkListener({ generation: 1, mode: 'secure_only', suspended: false, applyError: false });
+    net.ensureApplied = () => {netApplyError=false;networkListener({ generation: 1, mode: 'secure_only', suspended: false, applyError: false });};
     ExtraPage.prototype.reloadCurrent.call(p);
   }
   assert.equal(p.webSession, 1, '策略恢复订阅和重试入口只能重建一次');
@@ -283,18 +294,18 @@ for (const scenario of ['page_failed', 'apply_recovered', 'apply_failed']) {
 }
 {
   const p = page(); let refreshes = 0;
-  net.refresh = () => { throw Error('正常刷新不重配网络'); };
+  net.ensureApplied = () => { throw Error('正常刷新不重配网络'); };
   Object.assign(p, { hasError: false, webNetworkReady: true, avatarReadRequest: 0,
     avatarFailedUrl: '', clearAvatarRetry() {}, controller: { refresh() { refreshes++; } } });
   ExtraPage.prototype.reloadCurrent.call(p);
   assert.equal(refreshes, 1);
 }
-console.log('PASS: error-page retry reapplies DoH, preserves failed URL, rebuilds once, and keeps strict-mode failures blocked');
+console.log('PASS: cause-specific retries preserve URLs, rebuild once, and keep strict-mode failures blocked');
 
 // 当前页面直接确认账号，不为个人资料固定绕回首页；取消后的身份读取不能导航。
 {
   const p = page(), accepted = [];
-  Object.assign(p, { currentPath: '/search', incomingControllerReady: false,
+  Object.assign(p, { currentPath: '/search', webControllerReady: true,
     controller:{runJavaScript:async()=> 'Alice'},
     isHomeRoot: ExtraPage.prototype.isHomeRoot,
     loadWeb: async () => {throw Error('不得绕回主页');}, acceptHandle: (...args) => accepted.push(args) });
@@ -310,7 +321,7 @@ console.log('PASS: error-page retry reapplies DoH, preserves failed URL, rebuild
 // 移动页没有本人资料链接时，保留从网页首页抽屉确认账号的流程。
 {
   const p=page(),accepted=[];
-  Object.assign(p,{currentPath:'/search',incomingControllerReady:false,
+  Object.assign(p,{currentPath:'/search',webControllerReady:true,
     controller:{runJavaScript:async()=> ''},isHomeRoot:ExtraPage.prototype.isHomeRoot,
     loadWeb:async(url,keepProfile)=>{assert.equal(url,'https://x.com/home');assert.equal(keepProfile,true);},
     acceptHandle:(...args)=>accepted.push(args)});

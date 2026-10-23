@@ -1,5 +1,9 @@
 {
   "string": [
+    {"name":"render_error_title","value":"Page stopped running"},
+    {"name":"render_error_message","value":"Tap Retry to reopen the page."},
+    {"name":"policy_error_title","value":"Secure connection unavailable"},
+    {"name":"policy_error_message","value":"Check your network settings, then retry."},
     {"name":"menu_switch_account","value":"Switch account"},
     {"name":"menu_share_page","value":"Share page"},
     {"name":"desktop_site","value":"Desktop site"},

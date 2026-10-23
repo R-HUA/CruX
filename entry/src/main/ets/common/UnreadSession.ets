@@ -1,4 +1,3 @@
-import web_webview from '@ohos.web.webview';
 import { notificationManager } from '@kit.NotificationKit';
 import { preferences } from '@kit.ArkData';
 import { common } from '@kit.AbilityKit';
@@ -18,7 +17,8 @@ const NOTIFICATION_POLL_LIMIT: number = 6;
 
 /** 计数读取使用当前页面和账号，避免将上下文复制成另一份状态。 */
 export interface UnreadHost {
-  controller: () => web_webview.WebviewController;
+  webScript: (script: string) => Promise<string>;
+  isControllerReady: () => boolean;
   owner: () => string;
   url: () => string;
   isRawWeb: () => boolean;
@@ -85,11 +85,11 @@ export class UnreadSession {
 
   /** 账号、路由或生命周期变化后，旧网页返回的计数不再生效。 */
   refreshBadges(): void {
-    if (this.host.isRawWeb() || this.appBackground || !this.alive) { return; }
+    if (!this.host.isControllerReady() || this.host.isRawWeb() || this.appBackground || !this.alive) { return; }
     const owner = this.host.owner();
     const pageUrl = this.host.url();
     try {
-      this.host.controller().runJavaScript(UNREAD_COUNTS_SCRIPT).then((raw: string) => {
+      this.host.webScript(UNREAD_COUNTS_SCRIPT).then((raw: string) => {
         if (this.appBackground || !this.alive || this.host.owner() !== owner || this.host.url() !== pageUrl) { return; }
         this.applyBadgeCounts(unquoteScriptResult(raw));
       }, (err: BusinessError) => {
@@ -102,7 +102,8 @@ export class UnreadSession {
   }
 
   private clearNetworkBadgeCounts(): void {
-    this.host.controller().runJavaScript('window.__otBadgeEpoch=(window.__otBadgeEpoch||0)+1;window.__otBadgeCounts=null;')
+    if (!this.host.isControllerReady()) { return; }
+    this.host.webScript('window.__otBadgeEpoch=(window.__otBadgeEpoch||0)+1;window.__otBadgeCounts=null;')
       .catch((err: BusinessError) => {
         hilog.warn(DOMAIN, TAG, 'event=badge_reset_failed code=%{public}d', err.code);
       });

@@ -291,7 +291,7 @@ let owner = 'alice';
 let pageUrl = 'https://x.com/home';
 let runJavaScript = async () => '"4/2"';
 const session = new UnreadSession({
-  controller: () => ({ runJavaScript }), owner: () => owner, url: () => pageUrl,
+  webScript: async script => runJavaScript(script), isControllerReady: () => true, owner: () => owner, url: () => pageUrl,
   isRawWeb: () => false, getUIContext: () => ({}), putPreference: async () => {}
 });
 const settle = async () => { for (let i = 0; i < 8; i++) await Promise.resolve(); };

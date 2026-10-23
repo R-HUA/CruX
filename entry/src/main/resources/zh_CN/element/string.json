@@ -1,5 +1,9 @@
 {
   "string": [
+    {"name":"render_error_title","value":"页面已停止运行"},
+    {"name":"render_error_message","value":"请点重试重新打开页面"},
+    {"name":"policy_error_title","value":"安全连接暂不可用"},
+    {"name":"policy_error_message","value":"请检查网络设置后重试"},
     {"name":"menu_switch_account","value":"切换账号"},
     {"name":"menu_share_page","value":"分享页面"},
     {"name":"desktop_site","value":"桌面版网站"},

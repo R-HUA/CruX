@@ -23,7 +23,7 @@ const accountMethods = ['activate', 'setBackground', 'dispose', 'initialize', 'a
   'resetAvatar', 'avatarImageFailed', 'closeAvatarFiles', 'closeRetiredAvatarFiles', 'retireAvatarFiles',
   'parseHandle', 'discoverOwnProfile', 'closeWebDrawer', 'cancelProfileNavigation', 'acceptHandle',
   'finishDiscover', 'readSettingsAccount', 'readAvatar', 'retryAvatarRead', 'clearAvatarRetry', 'confirmCurrentAccount'];
-const mainMethods = ['unquote', 'reloadCurrent', 'aboutToDisappear', 'applyPageChrome', 'updateChromeFlag', 'logChromeResult'];
+const mainMethods = ['unquote', 'webScript', 'documentStarted', 'reloadCurrent', 'aboutToDisappear', 'applyPageChrome', 'updateChromeFlag', 'logChromeResult'];
 // Execute the production account session, page lifecycle/chrome methods, and real MediaFiles downloader;
 // only platform I/O is substituted.
 const mainCode = stripTypeScriptTypes('class MainTabs {\n' + mainMethods.map(mainMethod).join('\n') + '\n}\n;MainTabs');
@@ -93,20 +93,20 @@ const context = { cacheDir: '/cache' };
 const makePage = () => {
   const page = new MainTabs();
   Object.assign(page, { rawWeb: false, authenticationPage: false, webNetworkReady: true, currentIndex: 0,
-    incomingControllerReady: false, settingsOpen: false, pageAlive: true, appBackground: false,
+    webControllerReady: true, settingsOpen: false, pageAlive: true, appBackground: false,
     webSession: 0, refreshing: false, imageViewerOpen: false, failedWebUrl: '', webSource: 'https://x.com/home',
     networkReloadTimer: -1, firstLoadTimer: -1, pageStateTimer: -1, networkUnsubscribe: undefined,
     shellWindow: undefined, wideListener: undefined, avoidChanged() {},
     navigation: { currentUrl: 'https://x.com/home', navigationGeneration: 0, hasError: false, progress: 0 },
     composer: { sheetOpen: false, dispose() {} }, unread: { dispose() {}, stop() {} },
     getUIContext: () => ({ getHostContext: () => context, postFrameCallback: frame => frames.push(frame) }),
-    stopBackgroundWork() {}, recoverMediaWeb() {}, syncChromeInsets() {}, toast() {}, refreshes: 0,
+    stopBackgroundWork() {}, recoverMediaWeb() {}, syncChromeInsets() {}, armFirstLoadTimeout() {}, toast() {}, refreshes: 0,
     webImages: undefined });
   page.account = new runtime.AccountSession({
-    getUIContext: () => page.getUIContext(), controller: () => page.controller,
+    getUIContext: () => page.getUIContext(), webScript: script => page.webScript(script),
     url: () => page.navigation.currentUrl, isAuthenticationPage: () => page.authenticationPage,
     isRawWeb: () => page.rawWeb, webImages: () => page.webImages, currentIndex: () => page.currentIndex,
-    isControllerReady: () => page.incomingControllerReady, isSettingsOpen: () => page.settingsOpen,
+    isControllerReady: () => page.webControllerReady, isSettingsOpen: () => page.settingsOpen,
     isComposerOpen: () => page.composer.sheetOpen, accountChanged: () => {},
     loadWeb: (url, keepProfile, allowDocumentLoad, direct) =>
       page.navigation.loaded.push([url, keepProfile, allowDocumentLoad, direct]),

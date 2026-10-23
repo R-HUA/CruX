@@ -1,4 +1,3 @@
-import web_webview from '@ohos.web.webview';
 import { preferences } from '@kit.ArkData';
 import { common } from '@kit.AbilityKit';
 import { BusinessError } from '@kit.BasicServicesKit';
@@ -27,7 +26,7 @@ interface AccountDetails { handle: string; name: string; bio: string; }
 /** 从页面读取即时上下文，账号状态只在会话中保存。 */
 export interface AccountHost {
   getUIContext: () => UIContext;
-  controller: () => web_webview.WebviewController;
+  webScript: (script: string) => Promise<string>;
   url: () => string;
   isAuthenticationPage: () => boolean;
   isRawWeb: () => boolean;
@@ -125,9 +124,10 @@ export class AccountSession {
 
   /** 资料字段只接受当前身份和当前设置读取代际的结果。 */
   readProfileDetails(): void {
+    if (!this.host.isControllerReady()) { return; }
     const handle = this.ownHandle;
     const generation = this.settingsReadGeneration;
-    this.host.controller().runJavaScript(accountDetailsScript(handle)).then((raw: string) => {
+    this.host.webScript(accountDetailsScript(handle)).then((raw: string) => {
       if (!this.alive || this.ownHandle.toLowerCase() !== handle.toLowerCase() || generation !== this.settingsReadGeneration) { return; }
       const clean = unquoteScriptResult(raw);
       if (clean !== '') {
@@ -139,7 +139,9 @@ export class AccountSession {
           }
         } catch (err) {}
       }
-    }).catch((_err: BusinessError) => {});
+    }).catch((err: BusinessError) => {
+      hilog.warn(DOMAIN, TAG, 'event=account_details_failed code=%{public}d', err.code);
+    });
   }
 
   private async saveOwnHandle(handle: string): Promise<void> {
@@ -302,11 +304,11 @@ export class AccountSession {
 
   /** 后台探测不能改变用户已经选择的新路由。 */
   async discoverOwnProfile(): Promise<void> {
-    if (this.host.isRawWeb() || this.discovering || this.host.isComposerOpen()) { return; }
+    if (!this.host.isControllerReady() || this.host.isRawWeb() || this.discovering || this.host.isComposerOpen()) { return; }
     const pageUrl = this.host.url();
     const generation = this.profileNavigation;
     try {
-      const raw = await this.host.controller().runJavaScript(OWN_HANDLE_SCRIPT);
+      const raw = await this.host.webScript(OWN_HANDLE_SCRIPT);
       if (!this.alive || this.host.url() !== pageUrl || this.appBackground || generation !== this.profileNavigation) { return; }
       const direct: string = AccountSession.parseHandle('/' + unquoteScriptResult(raw));
       if (direct !== '') { this.acceptHandle(direct, false); }
@@ -319,7 +321,7 @@ export class AccountSession {
   async closeWebDrawer(): Promise<void> {
     if (this.host.isControllerReady()) {
       try {
-        await this.host.controller().runJavaScript('window.__otBootCancel&&window.__otBootCancel()');
+        await this.host.webScript('window.__otBootCancel&&window.__otBootCancel()');
       } catch (error) {
         hilog.warn(DOMAIN, TAG, 'event=account_read_cancel_failed code=%{public}d', (error as BusinessError).code);
       }
@@ -383,7 +385,7 @@ export class AccountSession {
       }
       const handle = this.ownHandle;
       if (handle !== '' && isSiteUrl(this.host.url()) && pathOf(this.host.url()).toLowerCase() === '/' + handle.toLowerCase()) {
-        const raw = unquoteScriptResult(await this.host.controller().runJavaScript(accountDetailsScript(handle)));
+        const raw = unquoteScriptResult(await this.host.webScript(accountDetailsScript(handle)));
         if (generation === this.settingsReadGeneration && raw !== '') {
           const account = JSON.parse(raw) as AccountDetails;
           if (account.handle.toLowerCase() === this.ownHandle.toLowerCase()) {
@@ -404,12 +406,12 @@ export class AccountSession {
 
   /** 首页账号控件即可提供头像，资料页只补充已确认本人的链接。 */
   readAvatar(retryFailed: boolean = false): void {
-    if (!this.alive || this.host.isRawWeb() || this.host.isAuthenticationPage()) { return; }
+    if (!this.host.isControllerReady() || !this.alive || this.host.isRawWeb() || this.host.isAuthenticationPage()) { return; }
     const handle: string = this.ownHandle;
     const pageUrl: string = this.host.url();
     const request: number = ++this.avatarReadRequest;
     try {
-      this.host.controller().runJavaScript(accountAvatarScript(handle)).then((raw: string) => {
+      this.host.webScript(accountAvatarScript(handle)).then((raw: string) => {
         if (!this.alive || request !== this.avatarReadRequest || this.host.isAuthenticationPage() ||
           this.host.isRawWeb() || this.host.url() !== pageUrl || this.ownHandle.toLowerCase() !== handle.toLowerCase()) { return; }
         const url: string = unquoteScriptResult(raw);
@@ -425,7 +427,7 @@ export class AccountSession {
           hilog.info(DOMAIN, TAG, 'event=avatar_read_empty tab=%{public}d hasHandle=%{public}s attempt=%{public}d',
             this.host.currentIndex(), String(handle !== ''), this.avatarRetries);
           if (this.avatarRetries === 0) {
-            this.host.controller().runJavaScript(accountAvatarDiagScript()).then((diagnostics: string) => {
+            this.host.webScript(accountAvatarDiagScript()).then((diagnostics: string) => {
               hilog.info(DOMAIN, TAG, 'event=avatar_dom_diagnostics data=%{public}s', unquoteScriptResult(diagnostics));
             }).catch((err: BusinessError) => {
               hilog.warn(DOMAIN, TAG, 'event=avatar_diagnostics_failed code=%{public}d', err.code);
@@ -464,15 +466,15 @@ export class AccountSession {
   async confirmCurrentAccount(): Promise<string> {
     const pageUrl = this.host.url();
     const generation = this.profileNavigation;
-    const direct = unquoteScriptResult(await this.host.controller().runJavaScript(OWN_HANDLE_SCRIPT));
+    const direct = unquoteScriptResult(await this.host.webScript(OWN_HANDLE_SCRIPT));
     if (pageUrl !== this.host.url() || generation !== this.profileNavigation) { return ''; }
     if (/^[A-Za-z0-9_]{1,15}$/.test(direct)) { return direct; }
-    const result = unquoteScriptResult(await this.host.controller().runJavaScript(profileBootstrapScript(false)));
+    const result = unquoteScriptResult(await this.host.webScript(profileBootstrapScript(false)));
     if (result !== 'armed') { return ''; }
     const deadline = Date.now() + PROFILE_TIMEOUT_MS;
     while (Date.now() < deadline && this.alive && !this.appBackground &&
       pageUrl === this.host.url() && generation === this.profileNavigation) {
-      const handle = unquoteScriptResult(await this.host.controller().runJavaScript('window.__otBoot||""'));
+      const handle = unquoteScriptResult(await this.host.webScript('window.__otBoot||""'));
       if (pageUrl !== this.host.url() || generation !== this.profileNavigation) { return ''; }
       if (/^[A-Za-z0-9_]{1,15}$/.test(handle)) { return handle; }
       await new Promise<void>((resolve) => { setTimeout(resolve, 100); });

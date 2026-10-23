@@ -81,13 +81,13 @@ const consume=vm.runInNewContext(stripTypeScriptTypes('(function(){'+consumeBody
   $r:key=>key, hilog:{error(){}},DOMAIN:0,TAG:'test'
 });
 const opened=[],notices=[];
-const state={incomingContent:{kind:'compose',value:'文字'},incomingControllerReady:false,incomingPageReady:false,
+const state={incomingContent:{kind:'compose',value:'文字'},webControllerReady:false,incomingPageReady:false,
   modalBlocksNetworkReload:()=>false,fullScreen:false,
   composer:{openingCompose:false,openCompose:value=>opened.push(value)},toast:value=>notices.push(value),
   navigation:{loadWeb(value,keepProfile,allowDocumentLoad){assert.equal(keepProfile,false);assert.equal(allowDocumentLoad,true);opened.push(value);}},
   controller:{loadUrl(){throw Error('必须先尝试页内导航');}}};
 consume.call(state);assert.equal(state.incomingContent.value,'文字');
-state.incomingControllerReady=true;consume.call(state);assert.equal(opened.length,0);
+state.webControllerReady=true;consume.call(state);assert.equal(opened.length,0);
 state.incomingPageReady=true;consume.call(state);assert.deepEqual(opened,['文字']);
 consume.call(state);assert.equal(opened.length,1);
 state.incomingContent={kind:'link',value:'https://x.com/alice'};state.modalBlocksNetworkReload=()=>true;
