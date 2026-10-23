@@ -10,7 +10,9 @@ function load(name, exports) {
   const context = name === 'WebChrome' ? load('WebConfig', ['RESERVED_ROOTS','SECONDARY_PATH_PATTERN','PROFILE_PATH_PATTERN']) : {};
   return vm.runInNewContext(js + ';({' + exports.join(',') + '})', context);
 }
-const routes = load('WebConfig', ['routeIndexForUrl', 'profileHandleForUrl','usesNativeNavigation','usesNativeHeader','isTabRootPath','isPostDetailUrl']);
+const routes = load('WebConfig', ['routeIndexForUrl', 'profileHandleForUrl','usesNativeNavigation','usesNativeHeader','isTabRootPath','isPostDetailUrl','TWITTER_BOOKMARKS']);
+const bookmarksPath = new URL(routes.TWITTER_BOOKMARKS).pathname;
+assert.equal(routes.TWITTER_BOOKMARKS,'https://x.com/i/history','书签直接使用历史页的默认标签，避免旧入口重定向');
 for (const [path, expected] of [['/home',0],['/search?q=a',1],['/notifications',2],['/messages/42',3],['/i/chat',3],['/someone',-1],['/i/grok',5],['/grok',5],['/i/flow/login',-1],['/settings',-1],['/someone/status/123',-1]]) {
   assert.equal(routes.routeIndexForUrl('https://x.com' + path), expected, path);
 }
@@ -49,7 +51,7 @@ assert.equal(routes.isPostDetailUrl('https://x.com/i/web/status/123'),true);
 for (const url of ['https://x.com/alice/status/123/photo/1','https://x.com/alice/status/123/mediaViewer','https://example.com/alice/status/123']) {
   assert.equal(routes.isPostDetailUrl(url),false,url);
 }
-const scripts = load('WebChrome', ['fillComposerScript','clickPostButtonScript','POST_RESULT_SCRIPT','chromeScript','chromeFlagScript','chromeInsetsScript','chromeDocumentStartScript','chromeActiveScript','COMPOSER_READY_SCRIPT','ACCOUNT_SWITCH_SCRIPT','OWN_HANDLE_SCRIPT','profileBootstrapScript','clickRouteScript','accountAvatarScript','accountAvatarDiagScript','PROFILE_LAYOUT_SCRIPT','PROFILE_MEDIA_SCRIPT','WEB_MODAL_SCRIPT']);
+const scripts = load('WebChrome', ['fillComposerScript','clickPostButtonScript','POST_RESULT_SCRIPT','chromeScript','chromeFlagScript','chromeInsetsScript','chromeDocumentStartScript','chromeActiveScript','COMPOSER_READY_SCRIPT','ACCOUNT_SWITCH_SCRIPT','OWN_HANDLE_SCRIPT','profileBootstrapScript','clickRouteScript','cancelRouteScript','finishRouteScript','accountAvatarScript','accountAvatarDiagScript','PROFILE_LAYOUT_SCRIPT','PROFILE_MEDIA_SCRIPT','WEB_MODAL_SCRIPT']);
 assert.equal(scripts.chromeDocumentStartScript(false),'');
 // 模拟网页处理事件后，浏览器是否还会执行链接的默认导航。
 function clickRuntime() {
@@ -60,7 +62,7 @@ function clickRuntime() {
     preventDefault(){this.defaultPrevented=true;}
   }
   function anchor(href,handle) {
-    return {tagName:'A',getAttribute:name=>name==='href'?href:null,getClientRects:()=>[{}],
+    return {tagName:'A',getAttribute:name=>name==='href'?href:null,hasAttribute:()=>false,getClientRects:()=>[{}],
       dispatchEvent(event){handle?.(event);for(const listener of handlers)listener(event);
         assert.equal(event.defaultPrevented,true,'网页未接管的点击也不能触发整页加载');}};
   }
@@ -112,7 +114,7 @@ for (const path of ['/home','/explore','/search','/notifications','/messages','/
   let update;
   const context = {
     URL,window:{addEventListener(){}}, location:{pathname:path,href:'https://x.com'+path,replace(){}},
-    document:{head:{},getElementById:()=>style,querySelector:()=>auth?{}:null,querySelectorAll:()=>[]},
+    document:{head:{},documentElement:{},getElementById:()=>style,querySelector:()=>auth?{}:null,querySelectorAll:()=>[]},
     MutationObserver:class {constructor(callback){update=callback;}observe(){}disconnect(){}}
   };
   context.window.top=context.window;
@@ -121,6 +123,17 @@ for (const path of ['/home','/explore','/search','/notifications','/messages','/
   assert.equal(style.textContent.includes('TopNavBar'),routes.usesNativeHeader('https://x.com'+path),path);
   auth=true;update();assert.equal(style.textContent,'',path);
 }
+// head 尚未创建时，根节点即可承载隐藏顶栏的首屏样式。
+let initialStyle;
+const earlyContext={
+  URL,window:{addEventListener(){}},location:{pathname:'/home',href:'https://x.com/home'},
+  document:{head:null,documentElement:{appendChild:node=>{initialStyle=node;}},
+    createElement:()=>({textContent:''}),getElementById:()=>initialStyle,querySelector:()=>null,querySelectorAll:()=>[]},
+  MutationObserver:class {observe(){}disconnect(){}}
+};
+earlyContext.window.top=earlyContext.window;
+vm.runInNewContext(scripts.chromeDocumentStartScript(true),earlyContext);
+assert.ok(initialStyle.textContent.includes("header[role='banner']"));
 // 回复直接使用当前详情的帖子编号，原帖是否被虚拟列表回收不影响面板显示。
 const mainSource=readFileSync(new URL('../entry/src/main/ets/pages/MainTabs.ets',import.meta.url),'utf8');
 const accountSource=readFileSync(new URL('../entry/src/main/ets/common/AccountSession.ets',import.meta.url),'utf8');
@@ -129,12 +142,11 @@ const navigationSource=readFileSync(new URL('../entry/src/main/ets/common/WebNav
 const accountMethod=name=>accountSource.match(new RegExp('^  (?:private )?(?:async )?'+name+'\\([\\s\\S]*?^  \\}', 'm'))[0];
 const unreadMethod=name=>unreadSource.match(new RegExp('^  (?:private )?(?:async )?'+name+'\\([\\s\\S]*?^  \\}', 'm'))[0];
 const navigationMethod=name=>navigationSource.match(new RegExp('^  (?:private )?(?:async )?'+name+'\\([\\s\\S]*?^  \\}', 'm'))[0];
-const NavigationPage=vm.runInNewContext(stripTypeScriptTypes('class NavigationPage{'+
-  ['loadWeb','syncFromUrl'].map(navigationMethod).join('\n')+'};NavigationPage'),{
-  clickRouteScript:scripts.clickRouteScript,unquoteScriptResult:value=>value,
+const NavigationPage=vm.runInNewContext(stripTypeScriptTypes(navigationSource.replace(/^import .*;\r?\n/gm,'').replace('@Observed','')).replace(/^export /gm,'')+';WebNavigation',{
+  clickRouteScript:scripts.clickRouteScript,cancelRouteScript:scripts.cancelRouteScript,finishRouteScript:scripts.finishRouteScript,unquoteScriptResult:value=>value,
   pathOf:url=>new URL(url).pathname,profileHandleForUrl:routes.profileHandleForUrl,
-  Date,setTimeout,
-  hilog:{error(){},warn(){}},DOMAIN:0,TAG:'test',$r:value=>value
+  Date,setTimeout,clearTimeout,
+  hilog:{error(){},warn(){},info(){}},DOMAIN:0,TAG:'test',$r:value=>value
 });
 const navigationFor=(page,controller=page.controller)=>{
   const navigation=new NavigationPage();
@@ -142,21 +154,33 @@ const navigationFor=(page,controller=page.controller)=>{
     currentPath:page.navigation?.currentPath??page.currentPath??'',navigationGeneration:0,
     viewingHandle:'',failure:'none',progress:0,
     host:{isNetworkReady:()=>page.webNetworkReady!==false,controller:()=>controller,
-      isControllerReady:()=>page.webControllerReady!==false,documentStarted:url=>{page.pendingDocumentUrl=url;},
+      isControllerReady:()=>page.webControllerReady!==false,isActive:()=>page.pageAlive!==false&&!page.appBackground,
+      documentStarted:url=>{page.pendingDocumentUrl=url;},routeSettled:()=>page.syncFromUrl?.(controller.getUrl?.()??navigation.currentUrl),
       cancelProfileNavigation:()=>page.account?.cancelProfileNavigation?.(),toast:value=>page.toast?.(value)}});
   return navigation;
 };
-Object.defineProperty(NavigationPage.prototype,'hasError',{get(){return this.failure!=='none';}});
-const goRouteBody=mainSource.match(/private goRoute\(index: number\): void \{([\s\S]*?)\n  \}/)[1];
-const goRoute=vm.runInNewContext(stripTypeScriptTypes('(function(index){'+goRouteBody+'})'),{
-  isTabRootPath:routes.isTabRootPath,TWITTER_ROUTES:['/home','/explore','/notifications','/i/chat'],scrollToTopScript:()=> 'scroll'});
+const goRouteBody=mainSource.match(/private async goRoute\(index: number\): Promise<void> \{([\s\S]*?)\n  \}/)[1];
+const goRoute=vm.runInNewContext(stripTypeScriptTypes('(async function(index){'+goRouteBody+'})'),{
+  isTabRootPath:routes.isTabRootPath,routeIndexForUrl:routes.routeIndexForUrl,TWITTER_BASE:'https://x.com',TWITTER_ROUTES:['/home','/explore','/notifications','/i/chat'],scrollToTopScript:()=> 'scroll'});
 const navigations=[],scrolls=[];
 const navigationState={currentIndex:0,settingsOpen:false,settingsWeb:false,
   account:{settingsReadGeneration:0,cancelProfileNavigation(){}},tick(){},
-  navigation:{currentPath:'/settings',loadWeb:url=>navigations.push(url)},
+  navigation:{currentPath:'/settings',cancel(){},loadWeb:async url=>{navigations.push(url);return 'arrived';}},
   webScript:async value=>scrolls.push(value)};
 goRoute.call(navigationState,0);assert.deepEqual(navigations,['/home'],'二级页点击上次选中的标签仍须导航');
 navigationState.navigation.currentPath='/home';goRoute.call(navigationState,0);assert.deepEqual(scrolls,['scroll']);
+{
+  let complete;
+  const page={...navigationState,currentIndex:4,settingsOpen:true,
+    account:{settingsReadGeneration:0,cancelProfileNavigation(){}},
+    navigation:{currentPath:'/home',currentUrl:'https://x.com/explore',cancel(){},loadWeb:()=>new Promise(resolve=>{complete=resolve;})}};
+  const pending=goRoute.call(page,1);assert.equal(page.settingsOpen,true);assert.equal(page.currentIndex,4);
+  complete('failed');await pending;assert.equal(page.settingsOpen,true);assert.equal(page.currentIndex,4);
+  const retry=goRoute.call(page,1);complete('arrived');await retry;
+  assert.equal(page.settingsOpen,false);assert.equal(page.currentIndex,1);
+  page.navigation.loadWeb=async()=> 'failed';await goRoute.call(page,2);
+  assert.equal(page.currentIndex,0,'普通标签失败后按确认过的内容恢复，不能使用未确认的目标地址');
+}
 const modalMethods=['bottomChromeHeight','updateWebModal','modalBlocksNetworkReload'].map(name=>
   mainSource.match(new RegExp('^  private '+name+'\\([\\s\\S]*?^  \\}','m'))[0]).join('\n');
 const ModalPage=vm.runInNewContext(stripTypeScriptTypes('class ModalPage{'+modalMethods+'};ModalPage'),{
@@ -237,6 +261,23 @@ hasBanner=false;measure();assert.equal(profileReports.at(-1).bannerBottom,520);a
 profileContext.location={pathname:'/bob',href:'https://x.com/bob'};measure();assert.equal(profileReports.at(-1).ready,false);
 domHandle='bob';measure();assert.equal(profileReports.at(-1).ready,true);assert.equal(profileReports.at(-1).scrollY,100);
 identityHeight=0;measure();assert.equal(profileReports.at(-1).ready,false,'Loading placeholders cannot reveal the title');
+{
+  identityHeight=80;measure();profileContext.window.__otApplyTop=measure;
+  const StatePage=vm.runInNewContext(stripTypeScriptTypes('class StatePage{'+
+    mainSource.match(/^  private readPageState\([\s\S]*?^  \}/m)[0]+'};StatePage'),{
+    MainTabs:{unquote:value=>value,stripSiteSuffix:value=>value},hilog:{warn(){}},DOMAIN:0,TAG:''});
+  const page=new StatePage();
+  Object.assign(page,{navigation:{currentUrl:'https://x.com/bob',viewingHandle:'bob',isNavigating:true},
+    profileLayout:undefined,settingsOpen:false,pageAlive:true,appBackground:false,
+    account:{readAvatar(){},discoverOwnProfile(){}},readHomeTab(){},isOwnProfile:()=>false,webCanGoBack:()=>true,
+    webScript:async script=>script.includes('window.__otProfileLayout')?vm.runInNewContext(script,profileContext):'false'});
+  const count=profileReports.length;page.readPageState();
+  assert.equal(profileReports.length,count,'在途导航不提前更新原生主页布局');
+  page.navigation.isNavigating=false;page.readPageState();
+  assert.equal(profileReports.length,count+1,'确认到达后重报曾被忽略的同一份主页布局');
+  page.profileLayout={};page.readPageState();assert.equal(profileReports.length,count+1,'已接收的主页布局不反复重报');
+  await Promise.resolve();
+}
 // 控制器未绑定时所有方法同步抛错，覆盖重建与绑定之间的真实平台边界。
 let recoveryTime=100000,applies=0;
 const recoveryTasks=[];
@@ -276,7 +317,7 @@ Object.assign(errorState,{webSession:0,webControllerReady:true,webNetworkReady:t
   failedWebUrl:'',imageViewerOpen:true,lastRenderRecovery:0,renderRecoveryPending:false,retrying:false,
   incomingPageReady:false,incomingContent:{kind:''},webWidth:400,
   navigation:{failure:'none',progress:0,currentUrl:'https://x.com/home',viewingHandle:'',navigationGeneration:0,
-    get hasError(){return this.failure!=='none';}},
+    cancel(){this.navigationGeneration++;},get hasError(){return this.failure!=='none';}},
   account:{discovering:false,cancelProfileNavigation(){},retryFailedAvatar(){}},composer:{sheetOpen:false},
   resetProfileLayout(){this.reset=true;},armFirstLoadTimeout(){},updateWebModal(){},userAgent:()=>'',
   finishFirstLoad(){this.firstLoadDone=true;this.documentLoading=false;},toast(){},syncFromUrl(){},
@@ -457,39 +498,191 @@ assert.equal(vm.runInNewContext(scripts.profileBootstrapScript(false),accountCon
 assert.equal(accountContext.window.__otBoot,'');
 profileReady=true;accountChanged();
 assert.equal(accountContext.window.__otBoot,'alice');assert.equal(menuOpen,false);
-let routeClicks=0;
-const routeEvents=clickRuntime();
-let routeLinks=[routeEvents.anchor('/i/chat',event=>{event.preventDefault();routeClicks++;})],routeControls=[];
-const routeContext={...routeEvents,URL,location:{href:'https://x.com/home'},
-  document:{querySelectorAll:selector=>selector==='a[href]'?routeLinks:routeControls,querySelector:()=>null}};
-assert.equal(vm.runInNewContext(scripts.clickRouteScript('https://x.com/i/chat'),routeContext),'clicked');
-assert.equal(routeClicks,1);
-assert.equal(vm.runInNewContext(scripts.clickRouteScript('https://x.com/search?q=a'),routeContext),'missing');
-assert.equal(routeClicks,1);
-assert.equal(vm.runInNewContext(scripts.clickRouteScript('https://x.com/home'),routeContext),'same');
-routeLinks=[routeEvents.anchor('/explore')];
-assert.equal(vm.runInNewContext(scripts.clickRouteScript('https://x.com/explore'),routeContext),'pending','未绑定路由的链接不得整页跳转');
-routeLinks=[];
-let expanded=false,menuOpens=0;
-const moreControl={tagName:'BUTTON',getAttribute:()=>expanded?'true':'false',click(){expanded=!expanded;menuOpens++;}};
-routeControls=[moreControl];
-assert.equal(vm.runInNewContext(scripts.clickRouteScript('https://x.com/settings'),routeContext),'pending');
-assert.equal(vm.runInNewContext(scripts.clickRouteScript('https://x.com/settings'),routeContext),'pending');
-assert.equal(menuOpens,1,'等待菜单挂载期间不反复点击');
-routeLinks=[routeEvents.anchor('/settings',event=>{event.preventDefault();routeClicks++;expanded=false;})];
-assert.equal(vm.runInNewContext(scripts.clickRouteScript('https://x.com/settings'),routeContext),'clicked');
-assert.equal(routeClicks,2);
-routeLinks=[];
-assert.equal(vm.runInNewContext(scripts.clickRouteScript('https://x.com/alice/lists'),routeContext),'pending');
-routeContext.location.href='https://x.com/notifications';
-assert.equal(vm.runInNewContext(scripts.clickRouteScript('https://x.com/alice/lists'),routeContext),'cancelled','用户已切页时取消旧菜单导航');
-routeControls=[];
-for(const path of ['/home','/explore','/notifications','/i/chat','/alice','/alice/with_replies','/alice/reposts',
-  '/alice/media','/i/history','/alice/lists','/settings','/settings/profile','/settings/notifications','/search?q=a']){
-  routeContext.location.href='https://x.com/other';
-  routeLinks=[routeEvents.anchor(path,event=>event.preventDefault())];
-  assert.equal(vm.runInNewContext(scripts.clickRouteScript('https://x.com'+path),routeContext),'clicked',path);
+// 保留真实地址与已渲染内容两份独立状态，不能通过改地址让夹具自动切页。
+function routeRuntime(start='/home') {
+  const listeners=new Map(),stack=[{url:'https://x.com'+start,state:{key:'source'}}];
+  let cursor=0,rendered=start,heading=start,landmark={},links=[],identities;
+  const emit=(type,event)=>{for(const fn of [...(listeners.get(type)||[])])fn(event);};
+  const window={addEventListener(type,fn){if(!listeners.has(type))listeners.set(type,new Set());listeners.get(type).add(fn);},
+    removeEventListener(type,fn){listeners.get(type)?.delete(fn);},dispatchEvent(event){emit(event.type,event);}};
+  class MouseEvent {constructor(type,options){this.type=type;Object.assign(this,options);this.defaultPrevented=false;}preventDefault(){this.defaultPrevented=true;}}
+  const location={href:stack[0].url,get origin(){return new URL(this.href).origin;}};
+  const link=(href,handle)=>({tagName:'A',hasAttribute:()=>false,getAttribute:name=>name==='href'?href:name==='aria-current'?'page':null,
+    dispatchEvent(event){handle?.(event);emit('click',event);assert.equal(event.defaultPrevented,true);}});
+  const main={querySelectorAll(selector){
+      if(selector==='h1,h2,[role="heading"]')return [{textContent:heading}];
+      if(selector==='[data-testid="UserName"]')return identities||[{textContent:'30225094@'+rendered.split('/')[1],closest:()=>null}];
+      if(selector==='a[aria-current],a[aria-selected="true"]')return [link(rendered)];
+      if(selector==='article[data-testid="tweet"] a[href]')return rendered.includes('/status/')?[link(rendered)]:[];
+      throw Error('unexpected content selector: '+selector);
+    },querySelector(selector){
+      if(selector==='[data-testid="UserName"]')return {textContent:'@'+rendered.split('/')[1]};
+      if(selector==='[data-testid="SearchBox_Search_Input"]')return {value:new URL(rendered,location.href).searchParams.get('q')||''};
+      return landmark;
+    }};
+  const document={title:start+' / X',querySelector:()=>main,querySelectorAll(selector){
+    assert.equal(selector,'a[href]','日常导航只查找最终链接，不查菜单');return links;
+  }};
+  const history={get state(){return stack[cursor].state;},pushes:0,backs:0,
+    pushState(state,_unused,path){this.pushes++;stack.splice(++cursor);stack.push({url:new URL(path,location.href).href,state});location.href=stack[cursor].url;},
+    back(){this.backs++;if(cursor>0){location.href=stack[--cursor].url;emit('popstate',{type:'popstate',state:this.state});}}};
+  const context={URL,window,location,document,history,MouseEvent,PopStateEvent:MouseEvent};
+  const run=script=>vm.runInNewContext(script,context);
+  return {context,window,location,history,link,run,setLinks(value){links=value;},
+    render(path,empty=false){rendered=path;heading=path;landmark={empty};document.title=path+' / X';},
+    setHeading(value){heading=value;},setIdentities(value){identities=value;},
+    step(path,id=1,documentId=''){return JSON.parse(run(scripts.clickRouteScript(new URL(path,location.href).href,id,documentId)));},
+    controller:{getUrl:()=>location.href,runJavaScript:async script=>run(script),loadUrl(){throw Error('SPA 不得加载新文档');}}};
 }
+{
+  const runtime=routeRuntime();let clicks=0;
+  runtime.setLinks([runtime.link('/i/chat',event=>{event.preventDefault();clicks++;})]);
+  assert.equal(runtime.step('/i/chat').status,'pending');
+  assert.equal(runtime.step('/i/chat').status,'pending');
+  assert.equal(clicks,1,'已接管链接不重复点击');assert.equal(runtime.history.pushes,0,'已接管后不再补发 History');
+  runtime.location.href='https://x.com/i/chat';assert.equal(runtime.step('/i/chat').status,'pending','旧内容不能因地址改变而成功');
+  runtime.context.document.title='/i/chat / X';assert.equal(runtime.step('/i/chat').status,'pending','仅更新标题仍不能用旧内容冒充到达');
+  runtime.context.document.title='/home / X';
+  runtime.render('/i/chat');assert.equal(runtime.step('/i/chat').status,'arrived');
+  runtime.run(scripts.finishRouteScript(1,false));
+}
+{
+  const runtime=routeRuntime();runtime.step('/rhua0016');runtime.render('/rhua0016');
+  runtime.context.document.title='/home / X';runtime.setHeading('/home');
+  assert.equal(runtime.step('/rhua0016').status,'arrived','真实账号标识已经到达时不依赖标题同步变化，数字显示名不能阻断账号匹配');
+}
+{
+  const runtime=routeRuntime();runtime.step('/rhua0016');runtime.render('/rhua0016');
+  runtime.setIdentities([{textContent:'@rhua0016',closest:()=>({tagName:'ARTICLE'})}]);
+  assert.equal(runtime.step('/rhua0016').evidence,'profile_identity_missing','时间线里的本人帖子不能冒充主页身份区');
+  runtime.setIdentities([{textContent:'@other',closest:()=>null},{textContent:'30225094@rhua0016',closest:()=>null}]);
+  assert.equal(runtime.step('/rhua0016').status,'arrived','检查真实资料身份区，而不是仅检查第一个账号节点');
+}
+for(const path of [bookmarksPath,'/i/history/likes','/rhua0016/lists','/settings/account',
+  '/settings/security_and_account_access','/settings/privacy_and_safety','/settings/notifications',
+  '/settings/accessibility_display_and_languages','/settings/about']){
+  const runtime=routeRuntime();runtime.step(path);runtime.render(path,true);
+  runtime.context.document.title='/home / X';
+  assert.equal(runtime.step(path).status,'arrived','标题更新滞后时，目标内容及页面标题节点仍可确认到达: '+path);
+}
+{
+  const runtime=routeRuntime();runtime.setLinks([runtime.link('/explore')]);
+  const reply=runtime.step('/explore');assert.equal(reply.method,'history');assert.equal(reply.status,'pending');
+  assert.equal(runtime.history.pushes,1);assert.notEqual(runtime.history.state.key,'source');
+  runtime.step('/explore',1,reply.document);assert.equal(runtime.history.pushes,1,'轮询不重复 pushState');
+  runtime.render('/explore',true);assert.equal(runtime.step('/explore').status,'arrived','空列表也可完成切页');
+}
+for(const path of ['/home','/explore','/notifications','/i/chat','/alice','/alice/with_replies','/alice/media',
+  bookmarksPath,'/i/history/likes','/alice/lists','/settings/account','/settings/security_and_account_access',
+  '/settings/privacy_and_safety','/settings/notifications','/settings/accessibility_display_and_languages',
+  '/settings/about','/search?q=one','/alice/status/123']){
+  const runtime=routeRuntime('/other');
+  assert.equal(runtime.step(path).status,'pending',path);
+  runtime.render(path);assert.equal(runtime.step(path).status,'arrived',path);
+  assert.equal(runtime.history.pushes,1,path);
+}
+{
+  const runtime=routeRuntime('/search?q=old');const target='/search?q=new#results';
+  const first=runtime.step(target);assert.equal(first.status,'pending');
+  runtime.render('/search?q=old');assert.equal(runtime.step(target).status,'pending','搜索参数须与页面输入一致');
+  runtime.render(target);assert.equal(runtime.step(target).status,'arrived');
+  assert.equal(runtime.step(target,1,'other-document').status,'document_changed');
+}
+{
+  const runtime=routeRuntime();runtime.step('/i/bookmarks');runtime.run(scripts.finishRouteScript(1,true));
+  assert.equal(runtime.history.backs,1);assert.equal(runtime.location.href,'https://x.com/home');
+  runtime.step('/i/history/likes',2);runtime.run(scripts.cancelRouteScript(3));
+  runtime.run(scripts.finishRouteScript(2,true));assert.equal(runtime.history.backs,1,'新请求取消后旧请求不得回退');
+  assert.equal(runtime.step('/i/history/likes',2).status,'cancelled');
+  assert.equal(runtime.step('/i/history/likes',3).status,'pending','取消后同一目标的旧内容不能按原地导航成功');
+}
+{
+  const runtime=routeRuntime();runtime.step('/i/bookmarks');runtime.history.back();
+  assert.equal(runtime.step('/i/bookmarks').status,'cancelled','用户返回后不能重新发出旧导航');
+  runtime.run(scripts.finishRouteScript(1,true));assert.equal(runtime.history.backs,1);
+}
+{
+  const runtime=routeRuntime();runtime.step('/i/bookmarks');
+  runtime.location.href=routes.TWITTER_BOOKMARKS;runtime.render(bookmarksPath,true);
+  assert.equal(runtime.step('/i/bookmarks').status,'redirected','旧书签地址重定向后仍须按完整目标检查，入口应直接使用最终地址');
+}
+{
+  const runtime=routeRuntime();runtime.step('/i/bookmarks');runtime.location.href='https://x.com/i/flow/login';
+  assert.equal(runtime.step('/i/bookmarks').status,'redirected');
+  runtime.run(scripts.finishRouteScript(1,true));assert.equal(runtime.history.backs,0,'重定向不能盲目回退');
+  assert.equal(runtime.step('https://example.com/home',2).status,'cross_origin');
+}
+{
+  const runtime=routeRuntime(),notices=[];
+  const page={controller:runtime.controller,toast:value=>notices.push(value)};
+  const nav=navigationFor(page);nav.host.routeSettled=()=>nav.syncFromUrl(runtime.location.href);
+  const pending=nav.loadWeb('https://x.com/i/bookmarks');
+  await new Promise(resolve=>setTimeout(resolve,0));
+  assert.equal(nav.isNavigating,true);nav.syncFromUrl(runtime.location.href);
+  assert.equal(nav.currentPath,'','地址已经更新时不提前提交原生栏');
+  assert.equal(nav.interceptDocument(),true);
+  assert.equal(await pending,'failed');assert.equal(runtime.history.backs,1);assert.equal(notices.length,1);
+  assert.equal(nav.interceptDocument(),false);
+}
+{
+  const runtime=routeRuntime(),page={controller:runtime.controller,toast(){}};
+  const nav=navigationFor(page);nav.syncFromUrl(runtime.location.href);
+  nav.host.routeSettled=()=>nav.syncFromUrl(runtime.location.href);
+  runtime.setLinks([runtime.link('/explore',event=>{event.preventDefault();runtime.location.href='https://x.com/explore';})]);
+  const pending=nav.loadWeb('https://x.com/explore');
+  await new Promise(resolve=>setTimeout(resolve,0));nav.interceptDocument();
+  assert.equal(await pending,'failed');assert.equal(nav.currentPath,'/home');
+  nav.syncFromUrl(runtime.location.href);
+  assert.equal(nav.currentUrl,'https://x.com/explore');assert.equal(nav.currentPath,'/home','失败后的地址回调不能确认旧内容');
+  nav.syncFromUrl(runtime.location.href,true);assert.equal(nav.currentPath,'/explore','显式文档加载完成可重新确认地址');
+}
+{
+  const runtime=routeRuntime(),page={controller:runtime.controller,toast(){}};
+  const nav=navigationFor(page);let release;
+  nav.host.cancelProfileNavigation=()=>new Promise(resolve=>{release=resolve;});
+  const pending=nav.loadWeb('https://x.com/explore');
+  nav.cancel();assert.equal(await pending,'cancelled','取消不能被主页清理回调阻塞');
+  release();assert.equal(runtime.history.pushes,0);
+}
+{
+  const runtime=routeRuntime(),page={controller:runtime.controller,toast(){}};
+  const nav=navigationFor(page);let release;
+  const run=runtime.controller.runJavaScript;
+  runtime.controller.runJavaScript=script=>script.includes('(target,id,expectedDocument,sourceUrl)')
+    ?new Promise(resolve=>{release=()=>resolve(run(script));}):run(script);
+  const first=nav.loadWeb('https://x.com/explore');await new Promise(resolve=>setTimeout(resolve,0));
+  runtime.controller.runJavaScript=run;
+  const second=nav.loadWeb('https://x.com/notifications');
+  assert.equal(await first,'cancelled');release();
+  await new Promise(resolve=>setTimeout(resolve,0));runtime.render('/notifications');
+  assert.equal(await second,'arrived','迟到的旧脚本不能清理新请求或覆盖页面');
+  assert.equal(runtime.history.pushes,1);assert.equal(runtime.history.backs,0);
+}
+for(const change of ['return','background','controller','account']){
+  const runtime=routeRuntime();const page={controller:runtime.controller,toast(){throw Error('取消不应提示失败');}};
+  const nav=navigationFor(page);nav.host.controller=()=>page.controller;
+  const pending=nav.loadWeb('https://x.com/i/history/likes');
+  await new Promise(resolve=>setTimeout(resolve,0));
+  if(change==='background')page.appBackground=true;
+  if(change==='controller')page.controller={runJavaScript:async()=>'',loadUrl(){throw Error('no document');}};
+  nav.cancel();assert.equal(await pending,'cancelled',change);assert.equal(runtime.history.backs,0,change);
+}
+{
+  const runtime=routeRuntime(),page={controller:runtime.controller,toast(){throw Error('已到达主页不能提示失败');}};
+  const nav=navigationFor(page);nav.syncFromUrl(runtime.location.href);
+  nav.host.routeSettled=()=>nav.syncFromUrl(runtime.location.href);
+  const pending=nav.loadWeb('https://x.com/rhua0016');await new Promise(resolve=>setTimeout(resolve,0));
+  runtime.render('/rhua0016');runtime.setHeading('/home');runtime.context.document.title='/home / X';
+  assert.equal(await pending,'arrived');assert.equal(nav.currentPath,'/rhua0016');assert.equal(nav.viewingHandle,'rhua0016');
+  assert.equal(runtime.history.backs,0,'实际主页已到达时不回退首页');
+}
+{
+  const runtime=routeRuntime(),notices=[];const page={controller:runtime.controller,toast:value=>notices.push(value)};
+  const nav=navigationFor(page);nav.host.routeSettled=()=>nav.syncFromUrl(runtime.location.href);
+  assert.equal(await nav.loadWeb('https://x.com/i/bookmarks'),'failed','旧内容保持三秒须超时失败');
+  assert.equal(runtime.history.pushes,1);assert.equal(runtime.history.backs,1);assert.equal(notices.length,1);
+}
+console.log('PASS: SPA final links, History once, stale content, empty pages, route parameters, cancellation, rollback and document blocking');
 // 相同 DOM 不能因重复设置样式而持续触发自身观察器。
 let cssWrites=0, cssText='', authVisible=false;
 const style={get textContent(){return cssText;},set textContent(value){cssText=value;cssWrites++;}};
@@ -584,6 +777,16 @@ const avatarRoot=src=>({querySelectorAll:()=>[image(src)],matches:()=>false,clos
 const avatarContext={location:{pathname:'/home'},document:{querySelectorAll:selector=>
   selector.startsWith('[data-testid="DashButton_ProfileIcon_Link"]')?[avatarRoot(ownAvatar)]:[]}};
 assert.equal(vm.runInNewContext(scripts.accountAvatarScript(''),avatarContext),ownAvatar);
+const defaultAvatar='https://abs.twimg.com/sticky/default_profile_images/default_profile_normal.png';
+avatarContext.document.querySelectorAll=selector=>selector.startsWith('[data-testid="DashButton_ProfileIcon_Link"]')?
+  [avatarRoot(defaultAvatar),avatarRoot(ownAvatar)]:[];
+assert.equal(vm.runInNewContext(scripts.accountAvatarScript(''),avatarContext),ownAvatar,'跳过临时默认图继续读取真实头像');
+avatarContext.document.querySelectorAll=selector=>selector.startsWith('[data-testid="DashButton_ProfileIcon_Link"]')?
+  [avatarRoot(defaultAvatar)]:[];
+assert.equal(vm.runInNewContext(scripts.accountAvatarScript(''),avatarContext),'');
+avatarContext.document.querySelectorAll=selector=>selector.startsWith('[data-testid="DashButton_ProfileIcon_Link"]')?
+  [{...avatarRoot(''),querySelectorAll:()=>[{currentSrc:defaultAvatar,getAttribute:name=>name==='src'?ownAvatar:''}]}]:[];
+assert.equal(vm.runInNewContext(scripts.accountAvatarScript(''),avatarContext),ownAvatar,'currentSrc 为默认图时仍读取 src');
 for(const [kind,node] of [
   ['background',{style:{backgroundImage:'url("'+ownAvatar+'")'},getAttribute:()=>''}],
   ['svg-image',{getAttribute:name=>name==='href'?ownAvatar:''}]
@@ -870,12 +1073,15 @@ Object.assign(client,{enabledTabs:[0,1,2,3,4],currentIndex:0,settingsReadGenerat
 client.navigation=navigationFor({...client,currentUrl:'https://x.com/home',toast:client.toast},
   {loadUrl:url=>{client.loaded=url;},runJavaScript:async()=>''});
 client.navigation.host.controller=()=>({loadUrl:url=>{client.loaded=url;},runJavaScript:async()=>''});
-client.navigation.loadWeb=async url=>{client.loaded=url;};
+client.navigation.loadWeb=async url=>{client.loaded=url;return 'arrived';};
 client.openSettings();assert.equal(client.currentIndex,4);assert.equal(client.settingsOpen,true);
 client.syncFromUrl('https://x.com/alice');assert.equal(client.currentIndex,4,'后台读取本人资料不抢占设置标签');
 client.openSettingsRoute('/settings/notifications');client.syncFromUrl('https://x.com/settings/notifications');
 assert.equal(client.currentIndex,4,'设置子页保持来源标签');
-client.settingsOpen=true;client.leaveSettings();assert.equal(client.currentIndex,0);assert.equal(client.loaded,'https://x.com/home');
+client.settingsOpen=true;await client.leaveSettings();assert.equal(client.currentIndex,0);assert.equal(client.loaded,'https://x.com/home');
+client.openSettings();client.navigation.loadWeb=async()=> 'failed';
+await client.leaveSettings();assert.equal(client.settingsOpen,true);assert.equal(client.currentIndex,4,'返回来源失败时保留设置界面');
+client.navigation.loadWeb=async()=> 'arrived';await client.leaveSettings();
 client.syncFromUrl('https://x.com/alice');assert.equal(client.currentIndex,0,'个人主页不改变标签选中态');
 await client.setTabEnabled(5,true);assert.equal(saved.length,0);assert.equal(notices,1);
 await client.setTabEnabled(2,false);await client.setTabEnabled(5,true);
@@ -941,11 +1147,12 @@ const unreadFor=page=>{
   return unread;
 };
 
-// 1. 指定入口直接导航 (Direct navigation on specified entries)
+// 原生设置在目标确认后才收起，失败或被新意图取消时仍保留原入口。
 {
   const nav = new NavTestPage();
-  const directUrls = [], scriptRuns = [];
+  const targets = [];
   Object.assign(nav, {
+    pageAlive: true, appBackground: false,
     webNetworkReady: true,
     settingsOpen: true,
     settingsWeb: false,
@@ -953,38 +1160,40 @@ const unreadFor=page=>{
     settingsWebRoot: '',
     currentUrl: 'https://x.com/home',
     controller: {
-      loadUrl: url => directUrls.push(url),
-      runJavaScript: async s => { scriptRuns.push(s); return 'clicked'; }
+      loadUrl: () => { throw Error('日常入口不得整页加载'); },
+      runJavaScript: async () => ''
     },
     toast() {}
   });
   nav.account=accountFor(nav,{cancelProfileNavigation:async()=>{},closeWebDrawer:async()=>{}});
   nav.navigation=navigationFor(nav);
 
-  // 书签与平台设置直接导航
-  nav.openSettingsRoute('/i/bookmarks');
-  assert.equal(nav.settingsWeb, true);
-  assert.equal(nav.settingsOpen, false);
-  assert.equal(nav.settingsWebRoot, 'https://x.com/i/bookmarks');
-  assert.deepEqual(directUrls, ['https://x.com/i/bookmarks']);
-  assert.equal(scriptRuns.length, 0, '直接导航不执行网页链接脚本');
-
-  // 平台设置直接导航
-  directUrls.length = 0;
-  nav.openSettingsRoute('/settings/your_twitter_data');
-  assert.equal(nav.settingsWeb, true);
-  assert.equal(nav.settingsOpen, false);
-  assert.equal(nav.settingsWebRoot, 'https://x.com/settings/your_twitter_data');
-  assert.deepEqual(directUrls, ['https://x.com/settings/your_twitter_data']);
-
-  // 本人主页在账号已知时直接导航
-  directUrls.length = 0;
+  let settle;
+  nav.navigation.loadWeb=async url=>{targets.push(url);return new Promise(resolve=>{settle=resolve;});};
+  const opening=nav.openSettingsRoute(bookmarksPath);
+  assert.equal(nav.settingsWeb,false);assert.equal(nav.settingsOpen,true,'等待期间保留设置');
+  settle('arrived');await opening;
+  assert.equal(nav.settingsWeb,true);assert.equal(nav.settingsOpen,false);
+  assert.equal(nav.settingsWebRoot, routes.TWITTER_BOOKMARKS);
+  nav.navigation.loadWeb=async url=>{targets.push(url);return 'arrived';};
+  for(const path of ['/i/history/likes',...appearance.PLATFORM_SETTINGS]){
+    nav.settingsOpen=true;nav.settingsWeb=false;
+    await nav.openSettingsRoute(path);
+    assert.equal(nav.settingsWeb,true,path);assert.equal(nav.settingsOpen,false,path);
+    assert.equal(nav.settingsWebRoot,'https://x.com'+path);
+  }
   nav.account.ownHandle = 'alice';
   nav.settingsOpen = true;
   await nav.openOwnProfile();
   assert.equal(nav.settingsWeb, true);
   assert.equal(nav.settingsWebRoot, 'https://x.com/alice');
-  assert.deepEqual(directUrls, ['https://x.com/alice']);
+  assert.equal(targets.at(-1),'https://x.com/alice');
+  nav.settingsOpen=true;nav.settingsWeb=false;nav.navigation.loadWeb=async()=> 'failed';
+  await nav.openSettingsRoute('/settings/account');
+  assert.equal(nav.settingsOpen,true);assert.equal(nav.settingsWeb,false);
+  nav.navigation.loadWeb=async()=>new Promise(resolve=>{settle=resolve;});
+  const stale=nav.openSettingsRoute('/i/bookmarks');nav.account.settingsReadGeneration++;
+  settle('arrived');await stale;assert.equal(nav.settingsOpen,true);
 }
 
 // 2. 身份识别取消与抽屉清理 (Identity confirmation cancellation & failure drawer cleanup)
@@ -1063,8 +1272,9 @@ const unreadFor=page=>{
     });
     raceNav.account=accountFor(raceNav,{profileNavigation:0,discovering:false,ownHandle:'',
       cancelProfileNavigation:async function(){this.profileNavigation++;this.discovering=false;},
-      acceptHandle:function(handle){this.ownHandle=handle;directLoads.push('https://x.com/'+handle);}});
+      acceptHandle:function(handle,navigate){this.ownHandle=handle;assert.equal(navigate,false);}});
     raceNav.navigation=navigationFor(raceNav);
+    raceNav.navigation.loadWeb=async url=>{directLoads.push(url);return 'arrived';};
 
     const p1 = raceNav.openOwnProfile();
     // 等待一个微任务周期，让 p1 完成初始清理并进入资料脚本读取中
@@ -1110,7 +1320,7 @@ const unreadFor=page=>{
 
     await errNav.openOwnProfile();
     assert.equal(toastMsg, 'app.string.account_unconfirmed', '识别异常必须提示 account_unconfirmed');
-    assert.equal(drawerClosed, true, '识别异常必须清理网页抽屉');
+    assert.equal(drawerClosed, false, '本人入口只读取当前文档，不打开网页抽屉');
     assert.equal(errNav.account.discovering, false, '识别异常后 discovering 必须恢复 false');
   }
 }
@@ -1122,10 +1332,10 @@ const unreadFor=page=>{
   Object.assign(navClient, {
     currentIndex: 0,
     settingsOpen: false,
-    account:{accountError:false},
+    account:{accountError:false,cancelProfileNavigation(){}},
     resetChromeScroll() {},
     resetProfileLayout() {},
-    navigation: {currentUrl:'https://x.com/home',loadWeb: url => { navUrl = url; }}
+    navigation: {currentUrl:'https://x.com/home',cancel(){},loadWeb: url => { navUrl = url; }}
   });
   navClient.openSettings();
   assert.equal(navClient.settingsOpen, true);
@@ -1142,7 +1352,7 @@ const unreadFor=page=>{
     settingsWeb: true,
     settingsOpen: false,
     settingsWebRoot: 'https://x.com/settings/your_twitter_data',
-    navigation:{currentUrl:'https://x.com/settings/your_twitter_data',hasError:false},
+    navigation:{currentUrl:'https://x.com/settings/your_twitter_data',hasError:false,cancel(){}},
     controller: {
       accessBackward: () => true,
       backward: () => { backwardCalled = true; }
@@ -1283,4 +1493,4 @@ const unreadFor=page=>{
   assert.equal(nav.currentHdsMaterialLevel(), 0); // ADAPTIVE
 }
 
-console.log('PASS: direct navigation, cancellation drawer cleanup, settings independence, back-to-settings, stale account invalidation, background modal isolation, reorder/5-limit, and preference persistence');
+console.log('PASS: SPA navigation, settings confirmation, back-to-settings, stale account invalidation, background modal isolation, reorder/5-limit, and preference persistence');

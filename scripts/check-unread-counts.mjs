@@ -213,6 +213,28 @@ const unclonable = b.reply(4,null,{clone(){throw Error('used body');}});
 assert.equal(await badClone,unclonable);assert.equal(b.stats.warnings.length,5);
 
 const user = (id,handle) => ({__typename:'User',rest_id:id,core:{screen_name:handle}});
+const initialAccount = (id,entities) => ({session:{user_id:id},entities:{users:{entities}}});
+const initialized=browser();
+initialized.window.__INITIAL_STATE__=initialAccount('42',{'42':{screen_name:'Alice'},'7':{screen_name:'Bob'}});
+assert.equal(vm.runInContext(ownHandleScript,initialized.context),'Alice','没有资料链接和本人帖子时，从当前会话的初始化实体读取账号');
+assert.equal(initialized.stats.sent,0);assert.equal(initialized.stats.fetches.length,0,'账号读取不发起额外请求');
+initialized.xhr('HomeTimeline').complete({data:{}});
+assert.equal(initialized.window.__otReadAccount(),'Alice');
+initialized.xhr('HomeTimeline').complete({data:user('42','Renamed')});
+assert.equal(initialized.window.__otReadAccount(),'Renamed','新响应优先于文档初始化时的旧账号名');
+initialized.document.cookie='twid=u%3D7';
+assert.equal(vm.runInContext(ownHandleScript,initialized.context),'','切换账号后不能使用旧会话或其他缓存实体');
+initialized.window.__INITIAL_STATE__=initialAccount('7',{'7':{screen_name:'Bob'}});
+assert.equal(initialized.window.__otReadAccount(),'Bob');
+for(const initial of [undefined,{},initialAccount('7',{'42':{screen_name:'Alice'}}),
+  initialAccount('42',{}),initialAccount('42',{'42':{screen_name:'invalid-handle'}})]){
+  const missing=browser();missing.window.__INITIAL_STATE__=initial;
+  assert.equal(vm.runInContext(ownHandleScript,missing.context),'','缺失、账号不符或无效实体不能作为本人账号');
+}
+for(const cookie of ['','twid=invalid','twid=%E0%A4%A']){
+  const missing=browser(cookie);missing.window.__INITIAL_STATE__=initialAccount('42',{'42':{screen_name:'Alice'}});
+  assert.equal(vm.runInContext(ownHandleScript,missing.context),'','不可读的当前会话不能凭初始化实体确认账号');
+}
 const timeline = (...users) => ({data:{home:{home_timeline_urt:{instructions:users.map(author=>({
   entries:[{content:{itemContent:{tweet_results:{result:{core:{user_results:{result:author}}}}}}}]
 }))}}}});

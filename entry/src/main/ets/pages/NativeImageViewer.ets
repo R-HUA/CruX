@@ -31,6 +31,8 @@ export struct NativeImageViewer {
   onClose: () => void = () => {};
   onRecover: () => void = () => {};
   onWeb: () => void = () => {};
+  hasPost: boolean = false;
+  onViewPost: () => void = () => {};
   @State loadedFiles: (MediaFile | undefined)[] = [];
   @State loadingIndices: number[] = [];
   @State failedIndices: number[] = [];
@@ -39,6 +41,7 @@ export struct NativeImageViewer {
   @Prop topInset: number = 0;
   @State leftInset: number = 0;
   @State rightInset: number = 0;
+  @State menuMaxWidth: number = 160;
   private viewerWindow: window.Window | undefined = undefined;
   private previousBars: window.SystemBarProperties | undefined = undefined;
   private previousFullScreen: boolean = false;
@@ -272,10 +275,14 @@ export struct NativeImageViewer {
       MenuItem({ content: $r('app.string.media_details') }).contentFontColor(Color.White)
         .enabled(this.currentFile() !== undefined)
         .onClick(() => { this.moreOpen = false; this.detailsVisible = true; this.chromeVisible = true; })
+      if (this.hasPost) {
+        MenuItem({ content: $r('app.string.media_view_post') }).contentFontColor(Color.White)
+          .onClick(() => { this.moreOpen = false; this.onViewPost(); })
+      }
       MenuItem({ content: $r('app.string.media_copy') }).contentFontColor(Color.White)
         .enabled(this.currentFile() !== undefined && !this.busy)
         .onClick(() => { this.moreOpen = false; this.act('copy'); })
-    }
+    }.width(160).constraintSize({ maxWidth: this.menuMaxWidth })
   }
 
   @Builder
@@ -417,7 +424,12 @@ export struct NativeImageViewer {
               this.currentLoadedFile!.extension.toUpperCase() + ' · ' +
               (this.currentLoadedFile!.size >= 1048576 ? (this.currentLoadedFile!.size / 1048576).toFixed(1) + ' MB' :
                 Math.max(1, Math.round(this.currentLoadedFile!.size / 1024)) + ' KB'))
-          }.fontSize(12).fontColor('#99FFFFFF').height(26).backgroundColor(Color.Black)
+          }.fontSize(12).fontColor('#DDFFFFFF')
+            .padding({ left: S12, right: S12, top: S8, bottom: S8 })
+            .backgroundColor('#66000000')
+            .backgroundBlurStyle(BlurStyle.COMPONENT_THICK, { colorMode: ThemeColorMode.DARK })
+            .borderRadius(16)
+            .border({ width: 0.5, color: '#26FFFFFF' })
             .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
         }.width('100%').height('100%').padding({ left: S12, right: S12, bottom: this.footerOffset + S8 })
           .backgroundColor(Color.Transparent).hitTestBehavior(HitTestMode.None)
@@ -440,6 +452,9 @@ export struct NativeImageViewer {
       }
     }
     .width('100%').height(LayoutPolicy.matchParent)
+    .onAreaChange((_old: Area, area: Area) => {
+      this.menuMaxWidth = Math.max(0, Number(area.width) - this.leftInset - this.rightInset - S12 * 2);
+    })
     .ignoreLayoutSafeArea([LayoutSafeAreaType.SYSTEM], [LayoutSafeAreaEdge.TOP, LayoutSafeAreaEdge.BOTTOM,
       LayoutSafeAreaEdge.START, LayoutSafeAreaEdge.END])
     .onKeyEvent((event: KeyEvent) => {

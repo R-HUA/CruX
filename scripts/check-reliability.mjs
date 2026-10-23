@@ -18,6 +18,7 @@ const runtime = { Promise, Date, setTimeout, clearTimeout, DOMAIN: 1, TAG: 'test
   preferences: { getPreferences: async () => prefs },
   fillComposerScript: text => 'fill:' + text, clickPostButtonScript: owner => 'post:' + owner,
   clickRouteScript: url => 'route:' + url,
+  cancelRouteScript: id => 'cancel:' + id, finishRouteScript: (id,rollback) => 'finish:' + id + ':' + rollback,
   web_webview: { WebviewController: class { loadUrl() {} } },
   hilog: { info() {}, warn() {}, error() {} } };
 const composerSource = read('entry/src/main/ets/common/ComposerSession.ets')
@@ -53,7 +54,8 @@ function composer() {
 function page() {
   const p = new Page();
   p.navigation = new WebNavigation({ controller: () => p.controller, isNetworkReady: () => p.webNetworkReady,
-    isControllerReady: () => p.webControllerReady, documentStarted: url => p.documentStarted(url),
+    isControllerReady: () => p.webControllerReady,isActive:()=>p.pageAlive&&!p.appBackground,
+    routeSettled() {},documentStarted: url => p.documentStarted(url),
     cancelProfileNavigation: () => p.account.cancelProfileNavigation(), toast: message => p.toast(message) });
   p.account = new AccountSession({ getUIContext: () => p.getUIContext(), webScript: script => p.webScript(script),
     url: () => p.navigation.currentUrl, isControllerReady: () => p.webControllerReady,
@@ -134,25 +136,25 @@ for (const result of ['missing','disabled','unavailable']) {
   assert.equal(store.get('post_pending:alice'),false);assert.equal(store.get('compose_draft:alice'),text);
   assert.equal(p.composeMessage,'app.string.compose_submit_unavailable');
 }
-// 常规入口无论缺少链接还是脚本失败，都保留当前文档；外部新地址才允许建立文档。
+// 日常入口失败保留当前文档，只有显式文档操作使用独立入口。
 for(const failure of ['missing','throw']) {
   const p = page(), loaded = [];
   p.controller = { runJavaScript: async () => { if(failure==='throw')throw Error('DOM');return 'missing'; },
     loadUrl: url => loaded.push(url) };
   p.userAgent = () => 'mobile'; await p.loadWeb('https://x.com/home');
   assert.deepEqual(loaded, []);
-  await p.loadWeb('https://x.com/alice/status/123',false,true);
+  await p.navigation.loadDocument('https://x.com/alice/status/123');
   assert.deepEqual(loaded, ['https://x.com/alice/status/123']);
 }
 {
-  const p=page(),loaded=[],results=['pending','pending','clicked'];
-  p.controller={runJavaScript:async()=>results.shift(),loadUrl:url=>loaded.push(url)};
+  const p=page(),loaded=[],results=['pending','pending','arrived'];
+  p.controller={runJavaScript:async script=>script.startsWith('route:')?JSON.stringify({status:results.shift(),document:'same',method:'link'}):'',loadUrl:url=>loaded.push(url)};
   await p.loadWeb('https://x.com/settings');assert.deepEqual(loaded,[]);assert.equal(results.length,0);
 }
 {
   const p=page(),loaded=[];
-  p.controller={runJavaScript:async()=> 'cancelled',loadUrl:url=>loaded.push(url)};
-  await p.loadWeb('https://x.com/alice/status/123',false,true);assert.deepEqual(loaded,[],'用户切页取消后不补发外部导航');
+  p.controller={runJavaScript:async script=>script.startsWith('route:')?JSON.stringify({status:'cancelled',document:'same',method:'link'}):'',loadUrl:url=>loaded.push(url)};
+  assert.equal(await p.loadWeb('https://x.com/alice/status/123'),'cancelled');assert.deepEqual(loaded,[],'用户切页取消后不补发外部导航');
 }
 const panel = read('entry/src/main/ets/pages/ComposerPanel.ets');
 const more = panel.slice(panel.indexOf("Button($r('app.string.compose_more'))"), panel.indexOf('.onClick(this.onMore)'));
@@ -226,7 +228,7 @@ const tick = async () => { for (let i = 0; i < 30; i++) { await Promise.resolve(
 // Navigation already waiting on JavaScript must not use a rebuilt controller or bypass a policy block.
 for (const transition of ['blocked', 'rebuilt']) {
   const p = page(), loaded = []; let rejectRoute;
-  p.controller = { runJavaScript: () => new Promise((_resolve, reject) => { rejectRoute = reject; }),
+  p.controller = { runJavaScript: script => script.startsWith('route:')?new Promise((_resolve, reject) => { rejectRoute = reject; }):Promise.resolve(''),
     setCustomUserAgent() {}, loadUrl: url => loaded.push(url) };
   p.userAgent = () => 'mobile';
   const navigation = p.loadWeb('https://x.com/explore'); await tick();
@@ -304,30 +306,28 @@ console.log('PASS: cause-specific retries preserve URLs, rebuild once, and keep 
 
 // 当前页面直接确认账号，不为个人资料固定绕回首页；取消后的身份读取不能导航。
 {
-  const p = page(), accepted = [];
+  const p = page(), accepted = [],targets=[];
   Object.assign(p, { currentPath: '/search', webControllerReady: true,
     controller:{runJavaScript:async()=> 'Alice'},
     isHomeRoot: ExtraPage.prototype.isHomeRoot,
-    loadWeb: async () => {throw Error('不得绕回主页');}, acceptHandle: (...args) => accepted.push(args) });
+    loadWeb: async url => {targets.push(url);return 'arrived';}, acceptHandle: (...args) => accepted.push(args) });
   await ExtraPage.prototype.openOwnProfile.call(p);
-  assert.deepEqual(accepted, [['Alice', true]]);
+  assert.deepEqual(accepted, [['Alice', false]]);assert.deepEqual(targets,['https://x.com/Alice']);
   let finish;
-  p.currentPath='/home';p.controller.runJavaScript=async()=> '';
-  p.confirmCurrentAccount = () => new Promise(resolve => { finish = resolve; });
+  p.currentPath='/home';p.controller.runJavaScript=async script=>script==='owner'?new Promise(resolve=>{finish=resolve;}):'';
   const stale = ExtraPage.prototype.openOwnProfile.call(p); await tick();
   p.cancelProfileNavigation(); p.currentPath = '/explore'; finish('old'); await stale;
   assert.equal(accepted.length, 1); assert.equal(p.discovering, false);
 }
-// 移动页没有本人资料链接时，保留从网页首页抽屉确认账号的流程。
+// 无法读取当前身份时明确失败，不绕回首页或打开抽屉。
 {
   const p=page(),accepted=[];
   Object.assign(p,{currentPath:'/search',webControllerReady:true,
     controller:{runJavaScript:async()=> ''},isHomeRoot:ExtraPage.prototype.isHomeRoot,
-    loadWeb:async(url,keepProfile)=>{assert.equal(url,'https://x.com/home');assert.equal(keepProfile,true);},
+    loadWeb:async()=>{throw Error('身份未确认时不得导航');},
     acceptHandle:(...args)=>accepted.push(args)});
-  const navigating=ExtraPage.prototype.openOwnProfile.call(p);await tick();
-  assert.equal(accepted.length,0);p.currentPath='/home';waits.shift()();await navigating;
-  assert.deepEqual(accepted,[['Alice',true]]);
+  await ExtraPage.prototype.openOwnProfile.call(p);
+  assert.equal(accepted.length,0);assert.equal(notices.at(-1),'app.string.account_unconfirmed');
 }
 // Launcher state commits only after success, serializes writes, and bounds failures for an unchanged count.
 {

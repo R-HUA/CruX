@@ -9,8 +9,9 @@ export const TWITTER_NOTIFICATIONS: string = 'https://x.com/notifications';
 // 与当前账号网页底栏的真实私信入口保持一致。
 export const TWITTER_MESSAGES: string = 'https://x.com/i/chat';
 export const TWITTER_SETTINGS: string = 'https://x.com/settings';
-// 当前网页的历史页默认显示书签，沿用其导航入口以保留页内路由。
-export const TWITTER_BOOKMARKS: string = 'https://x.com/i/bookmarks';
+// 历史页默认显示书签，直接使用最终地址以避免旧入口重定向。
+export const TWITTER_BOOKMARKS: string = 'https://x.com/i/history';
+export const TWITTER_LIKES: string = 'https://x.com/i/history/likes';
 export const TWITTER_COMPOSE: string = 'https://x.com/compose/post';
 export const TWITTER_LOGIN: string = 'https://x.com/i/flow/login';
 export const TWITTER_SIGNUP: string = 'https://x.com/i/flow/signup';

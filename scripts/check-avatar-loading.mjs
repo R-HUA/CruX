@@ -39,6 +39,7 @@ let policy = { mode: 'auto', url: 'https://dns.example/dns-query' };
 let responses = [], requests = [], frames = [], removed = [], logs = [], puts = [];
 let jsResults = [], cache = new Map(), cacheRead;
 let timerId = 0;
+let fileStamp = Date.now();
 const timers = new Map();
 const prefs = {
   get: async key => cacheRead ? cacheRead.promise : cache.get(key) || '',
@@ -51,7 +52,7 @@ const runtime = {
   unquoteScriptResult: vm.runInNewContext(stripTypeScriptTypes(decodeSource) + ';unquoteScriptResult'),
   ...vm.runInNewContext(stripTypeScriptTypes(readFileSync(new URL('../entry/src/main/ets/common/WebMedia.ets',import.meta.url),'utf8'))
     .replace(/^export /gm,'')+';({resolveMedia})'),
-  ArrayBuffer, Uint8Array, Map, Promise, Date, FrameCallback: class {},
+  ArrayBuffer, Uint8Array, Map, Promise, Date: { now: () => ++fileStamp }, FrameCallback: class {},
   DOMAIN: 0x0A11, TAG: 'OpenTwit', PREFS_NAME: 'opentwit_web', AVATAR_KEY: 'own_avatar',
   OWN_HANDLE_SCRIPT: 'owner', profileBootstrapScript: () => 'bootstrap',
   profileUrl: handle => 'https://x.com/' + handle, pathOf: url => new URL(url).pathname,
@@ -97,7 +98,7 @@ const makePage = () => {
     webSession: 0, refreshing: false, imageViewerOpen: false, failedWebUrl: '', webSource: 'https://x.com/home',
     networkReloadTimer: -1, firstLoadTimer: -1, pageStateTimer: -1, networkUnsubscribe: undefined,
     shellWindow: undefined, wideListener: undefined, avoidChanged() {},
-    navigation: { currentUrl: 'https://x.com/home', navigationGeneration: 0, hasError: false, progress: 0 },
+    navigation: { currentUrl: 'https://x.com/home', navigationGeneration: 0, hasError: false, progress: 0, cancel() {} },
     composer: { sheetOpen: false, dispose() {} }, unread: { dispose() {}, stop() {} },
     getUIContext: () => ({ getHostContext: () => context, postFrameCallback: frame => frames.push(frame) }),
     stopBackgroundWork() {}, recoverMediaWeb() {}, syncChromeInsets() {}, armFirstLoadTimeout() {}, toast() {}, refreshes: 0,
@@ -156,12 +157,14 @@ responses.push(Error('DoH failed'), ok());
 await read(page, urlA);
 assert.match(page.avatarPath, /^file:\/\/\/cache\/x-image-\d+-avatar_\d+\.png$/);
 assert.equal(requests.length, 2);
-assert.equal(requests[0].url,'https://pbs.twimg.com/profile_images/1/first.jpg','账号头像优先请求原尺寸');
+assert.equal(requests[0].url,'https://pbs.twimg.com/profile_images/1/first_400x400.jpg','账号头像优先请求高清方图');
 assert.equal(requests[0].options.dnsOverHttps, policy.url);
 assert.equal(requests[1].options.dnsOverHttps, undefined);
 const firstPath = page.avatarPath;
 await read(page, urlA); await read(page, urlA);
 assert.equal(requests.length, 2, 'Polling the same source must reuse its loaded file');
+await read(page, urlA.replace('_normal','_400x400'));await read(page,urlA.replace('_normal',''));
+assert.equal(requests.length,2,'同一头像的不同网页尺寸复用已下载的高清资源');assert.equal(page.avatarPath,firstPath);
 assert.equal(puts.length, 1, 'Unchanged source must not rewrite preferences on every poll');
 responses.push(ok()); await read(page, urlB);
 assert.notEqual(page.avatarPath, firstPath, 'Different URL must use a different file/cache identity');
@@ -179,13 +182,55 @@ await flushFrames(); assert.ok(removed.includes(secondPath.slice(7)));
 page.aboutToDisappear(); await settle();
 assert.equal(page.avatarPath, ''); assert.equal(page.avatarFiles, undefined);
 
-// 原尺寸不存在时先尝试高清方图，最后才使用网页的小图。
+// 高清方图不存在时尝试原尺寸，不再降级为网页的小图。
 page=makePage();policy={mode:'off'};
 responses.push({responseCode:404},ok());
 const qualityStart=requests.length;await read(page,urlA);
 assert.deepEqual(requests.slice(qualityStart).map(item=>item.url),[
-  'https://pbs.twimg.com/profile_images/1/first.jpg','https://pbs.twimg.com/profile_images/1/first_400x400.jpg']);
+  'https://pbs.twimg.com/profile_images/1/first_400x400.jpg','https://pbs.twimg.com/profile_images/1/first.jpg']);
 assert.notEqual(page.avatarPath,'');page.aboutToDisappear();await settle();
+
+// 两个高清候选均不存在时，不请求 normal/bigger，也不撤下已显示的头像。
+page=makePage();responses.push(ok());await read(page,urlA);
+const retainedPath=page.avatarPath;
+const pendingReplacement=deferred();responses.push(pendingReplacement);
+const replacementStart=requests.length;await read(page,urlB);
+assert.equal(page.avatarPath,retainedPath,'下载过程中保留同账号头像');
+await flushFrames();assert.ok(!removed.includes(retainedPath.slice(7)));
+responses.push({responseCode:404});pendingReplacement.resolve({responseCode:404});await settle();
+assert.equal(page.avatarPath,retainedPath,'下载失败仍保留旧图');
+assert.equal(page.avatarFailedUrl,urlB);
+assert.deepEqual(requests.slice(replacementStart).map(item=>item.url),[
+  'https://pbs.twimg.com/profile_images/2/second_400x400.jpg','https://pbs.twimg.com/profile_images/2/second.jpg']);
+responses.push(ok());await retry(page,urlB);
+assert.notEqual(page.avatarPath,retainedPath);
+await flushFrames();assert.ok(removed.includes(retainedPath.slice(7)));
+const displayedBeforeLeaving=page.avatarPath,pendingBeforeLeaving=deferred();responses.push(pendingBeforeLeaving);
+await read(page,urlA);const requestBeforeLeaving=requests.at(-1);
+page.aboutToDisappear();await settle();
+assert.equal(page.avatarPath,'');assert.equal(requestBeforeLeaving.destroyed,true);
+pendingBeforeLeaving.resolve(ok());await settle();await flushFrames();
+assert.equal(page.avatarPath,'');assert.ok(removed.includes(displayedBeforeLeaving.slice(7)));
+
+// 默认资源既不能从网页进入下载，也不能通过旧缓存恢复。
+const defaultAvatar='https://abs.twimg.com/sticky/default_profile_images/default_profile_normal.png';
+page=makePage();const beforeDefault=requests.length;await read(page,defaultAvatar);
+assert.equal(page.avatarUrl,'');assert.equal(page.avatarPath,'');
+cache.set('own_avatar:alice',defaultAvatar);await page.restoreAvatar('alice');await settle();
+assert.equal(requests.length,beforeDefault);
+responses.push(ok());await retry(page,urlA);
+const realPath=page.avatarPath;await read(page,defaultAvatar);
+assert.equal(page.avatarPath,realPath);assert.equal(page.avatarUrl,urlA);
+page.aboutToDisappear();await settle();cache.clear();
+
+// 旧图解码错误不能将正在下载的新地址标为失败或取消新下载。
+page=makePage();responses.push(ok());await read(page,urlA);
+const decodingPath=page.avatarPath,decodingReplacement=deferred();responses.push(decodingReplacement);
+await read(page,urlB);page.avatarImageFailed(decodingPath);
+assert.equal(page.avatarFailedUrl,'');assert.equal(page.avatarRetryTimer,-1);
+decodingReplacement.resolve(ok());await settle();
+assert.notEqual(page.avatarPath,'');assert.equal(page.avatarUrl,urlB);
+page.aboutToDisappear();await settle();
 
 // A rejected download must be retried with a new session and the current DNS policy.
 page = makePage(); policy = { mode: 'secure_only', url: 'https://dns.example/secure' };
@@ -315,7 +360,16 @@ page.logChromeResult('apply', JSON.stringify({ error: 'TypeError: https://x.com/
 assert.ok(logs.some(log => log.level === 'warn' && log.args.includes('TypeError')));
 assert.ok(!JSON.stringify(logs).includes('secret-message'));
 assert.ok(!JSON.stringify(logs).includes(urlA));
-assert.match(main, /accountPicture\(\$\$: AccountPictureState\)[\s\S]*?Image\(\$\$\.path\)/);
+const avatarItem=main.match(/ForEach\(\$\$\.path === '' \? \[\] : \[\$\$\.path\], \(path: string\) => \{([\s\S]*?)\n      \}, \(path: string\) => path\)/);
+assert.ok(avatarItem,'头像以实际文件路径保持图片实例与回调身份');
+const imageEvents=new Map(),avatarErrors=[];
+const avatarOwner={account:{avatarPath:'/new',clearAvatarRetry(){},avatarImageFailed:path=>avatarErrors.push(path)}};
+const renderAvatarItem=vm.runInNewContext(stripTypeScriptTypes('(function(path: string){'+avatarItem[1]+'})'),{
+  ImageFit:{Cover:1},Image(path){const image={width(){return this;},height(){return this;},borderRadius(){return this;},objectFit(){return this;},
+    onComplete(fn){return this;},onError(fn){imageEvents.set(path,fn);return this;}};return image;}
+});
+renderAvatarItem.call(avatarOwner,'/old');renderAvatarItem.call(avatarOwner,'/new');imageEvents.get('/old')();
+assert.deepEqual(avatarErrors,['/old'],'旧 Image 的迟到错误必须携带旧路径，不能读取更新后的头像路径');
 assert.equal((main.match(/this\.accountPicture\(\{ path: this\.account\.avatarPath \}\)/g) || []).length, 2);
 assert.ok(accountMethod('acceptHandle').includes('this.resetAvatar()'));
 const composerSource = readFileSync(new URL('../entry/src/main/ets/common/ComposerSession.ets',import.meta.url),'utf8');

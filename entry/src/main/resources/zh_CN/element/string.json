@@ -81,6 +81,14 @@
       "value": "书签"
     },
     {
+      "name": "menu_likes",
+      "value": "喜欢"
+    },
+    {
+      "name": "navigation_failed",
+      "value": "暂时无法打开此页面，请重试"
+    },
+    {
       "name": "menu_lists",
       "value": "列表"
     },
@@ -603,6 +611,8 @@
     {"name":"media_more","value":"更多"},
     {"name":"media_load_original","value":"加载原图"},
     {"name":"media_details","value":"图片详情"},
+    {"name":"media_view_post","value":"查看原帖"},
+    {"name":"media_action_unknown","value":"暂时无法确认操作结果"},
     {"name":"media_repost","value":"转发"},
     {"name":"media_unrepost","value":"取消转发"},
     {"name":"media_quote","value":"引用"},

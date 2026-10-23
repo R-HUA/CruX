@@ -1,6 +1,6 @@
 import { S8, S12, S16 } from '../common/Theme';
 import { ALL_TAB_IDS, PLATFORM_SETTINGS } from '../common/ClientSettings';
-import { TWITTER_BOOKMARKS, pathOf } from '../common/WebConfig';
+import { TWITTER_BOOKMARKS, TWITTER_LIKES, pathOf } from '../common/WebConfig';
 import { uiMaterial } from '@kit.ArkUI';
 
 /** 设置页只呈现客户端配置；平台项目点击后交给原网页处理。 */
@@ -271,6 +271,7 @@ export struct NativeSettingsPage {
     ListItem() { this.groupTitle($r('app.string.settings_account_group')) }
     ListItemGroup({ style: ListItemGroupStyle.CARD }) {
       this.linkRow($r('app.string.menu_bookmarks'), () => this.onRoute(pathOf(TWITTER_BOOKMARKS)))
+      this.linkRow($r('app.string.menu_likes'), () => this.onRoute(pathOf(TWITTER_LIKES)))
       if (this.handle !== '') {
         this.linkRow($r('app.string.menu_lists'), () => this.onRoute('/' + this.handle + '/lists'))
       }

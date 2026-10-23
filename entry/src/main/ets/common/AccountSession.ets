@@ -36,7 +36,7 @@ export interface AccountHost {
   isSettingsOpen: () => boolean;
   isComposerOpen: () => boolean;
   accountChanged: () => void;
-  loadWeb: (url: string, keepProfile: boolean, allowDocumentLoad: boolean, direct: boolean) => Promise<void>;
+  loadWeb: (url: string) => Promise<'arrived' | 'failed' | 'cancelled'>;
   toast: (message: ResourceStr) => void;
 }
 
@@ -68,6 +68,7 @@ export class AccountSession {
   avatarPath: string = '';
   avatarFailedUrl: string = '';
   private avatarFiles: MediaFiles | undefined = undefined;
+  private avatarLoadingFiles: MediaFiles | undefined = undefined;
   private avatarGeneration: number = 0;
   private avatarReadRequest: number = 0;
   private avatarRetryTimer: number = -1;
@@ -184,7 +185,7 @@ export class AccountSession {
       const url = await prefs.get(AVATAR_KEY + ':' + handle.toLowerCase(), '') as string;
       if (this.alive && generation === this.avatarGeneration && !this.host.isAuthenticationPage() &&
         (preview ? this.ownHandle === '' : this.ownHandle.toLowerCase() === handle.toLowerCase()) && this.avatarUrl === '' &&
-        /^https:\/\/(pbs|abs)\.twimg\.com\//i.test(url)) {
+        /^https:\/\/pbs\.twimg\.com\/profile_images\//i.test(url)) {
         this.loadAvatar(url);
       }
     } catch (err) {
@@ -195,33 +196,42 @@ export class AccountSession {
   /** 每个地址独占下载会话，复用真实图片下载器的 DoH 与回退策略。 */
   private async loadAvatar(url: string, retry: boolean = false): Promise<void> {
     if (!this.alive || this.host.isRawWeb() || this.host.isAuthenticationPage() || (!retry && this.avatarUrl === url)) { return; }
+    const resolved = resolveMedia(url);
+    if (resolved === undefined || !resolved.id.startsWith('avatar-')) { return; }
+    const current = resolveMedia(this.avatarUrl);
+    if (!retry && current !== undefined && current.candidates[0] === resolved.candidates[0] &&
+      (this.avatarPath !== '' || this.avatarLoadingFiles !== undefined)) { return; }
     const generation: number = ++this.avatarGeneration;
     const handle: string = this.ownHandle.toLowerCase();
-    const previous: MediaFiles | undefined = this.avatarFiles;
-    const wasDisplayed: boolean = this.avatarPath !== '';
+    this.retireAvatarFiles(this.avatarLoadingFiles, false);
     const files: MediaFiles = new MediaFiles(this.host.webImages());
-    this.avatarFiles = files;
+    this.avatarLoadingFiles = files;
     this.avatarUrl = url;
-    this.avatarPath = '';
     this.avatarFailedUrl = '';
-    this.retireAvatarFiles(previous, wasDisplayed);
     try {
-      const resolved = resolveMedia(url);
+      // 32vp 在高密度屏幕上仍需高清资源，不退回网页的小尺寸头像。
+      const original: string = resolved.candidates[0];
       const address: MediaAddress = { id: 'avatar_' + generation.toString(), source: url,
-        candidates: resolved !== undefined ? resolved.candidates : [url] };
+        candidates: [original.replace(/(\.[a-z]+)$/i, '_400x400$1'), original] };
       const context = this.host.getUIContext().getHostContext() as common.UIAbilityContext;
       const file: MediaFile = await files.load(address, context);
       if (!this.alive || generation !== this.avatarGeneration || this.ownHandle.toLowerCase() !== handle ||
         this.host.isAuthenticationPage()) { return; }
+      const previous: MediaFiles | undefined = this.avatarFiles;
+      const wasDisplayed: boolean = this.avatarPath !== '';
+      this.avatarFiles = files;
+      this.avatarLoadingFiles = undefined;
       this.avatarPath = 'file://' + file.path;
+      this.retireAvatarFiles(previous, wasDisplayed);
       if (this.avatarRetryTimer !== -1) { clearTimeout(this.avatarRetryTimer); }
       this.avatarRetryTimer = -1;
       if (handle !== '') { this.saveAvatar(handle, url); }
-      hilog.debug(DOMAIN, TAG, 'event=avatar_loaded');
+      hilog.info(DOMAIN, TAG, 'event=avatar_loaded candidate=%{public}d width=%{public}d height=%{public}d bytes=%{public}d',
+        address.candidates.indexOf(file.url), file.width, file.height, file.size);
     } catch (err) {
       if (!this.alive || generation !== this.avatarGeneration) { return; }
       this.avatarFailedUrl = url;
-      this.avatarFiles = undefined;
+      this.avatarLoadingFiles = undefined;
       this.retireAvatarFiles(files, false);
       hilog.warn(DOMAIN, TAG, 'event=avatar_download_failed code=%{public}d', (err as BusinessError).code);
       this.retryAvatarRead();
@@ -232,6 +242,8 @@ export class AccountSession {
     this.clearAvatarRetry();
     this.avatarGeneration++;
     this.avatarReadRequest++;
+    this.retireAvatarFiles(this.avatarLoadingFiles, false);
+    this.avatarLoadingFiles = undefined;
     const files: MediaFiles | undefined = this.avatarFiles;
     const wasDisplayed: boolean = this.avatarPath !== '';
     this.avatarFiles = undefined;
@@ -244,7 +256,7 @@ export class AccountSession {
   /** Image 的迟到事件不能撤下已经替换的新头像。 */
   avatarImageFailed(path: string): void {
     if (!this.alive || path === '' || path !== this.avatarPath) { return; }
-    this.avatarFailedUrl = this.avatarUrl;
+    if (this.avatarLoadingFiles === undefined) { this.avatarFailedUrl = this.avatarUrl; }
     this.avatarPath = '';
     const files: MediaFiles | undefined = this.avatarFiles;
     this.avatarFiles = undefined;
@@ -360,7 +372,7 @@ export class AccountSession {
       return;
     }
     if (this.ownHandle) {
-      this.host.loadWeb(profileUrl(this.ownHandle), false, true, true);
+      this.host.loadWeb(profileUrl(this.ownHandle));
       return;
     }
     this.host.toast($r('app.string.account_unconfirmed'));
@@ -415,7 +427,7 @@ export class AccountSession {
         if (!this.alive || request !== this.avatarReadRequest || this.host.isAuthenticationPage() ||
           this.host.isRawWeb() || this.host.url() !== pageUrl || this.ownHandle.toLowerCase() !== handle.toLowerCase()) { return; }
         const url: string = unquoteScriptResult(raw);
-        if (/^https:\/\/(pbs|abs)\.twimg\.com\//i.test(url)) {
+        if (/^https:\/\/pbs\.twimg\.com\/profile_images\//i.test(url)) {
           const failed: boolean = this.avatarFailedUrl === url;
           if (url !== this.avatarUrl || (failed && retryFailed)) {
             hilog.info(DOMAIN, TAG, 'event=avatar_url_matched retry=%{public}s', String(failed));
@@ -447,7 +459,8 @@ export class AccountSession {
 
   /** 水合和下载失败共用有限重试，避免一次失败长期停在占位头像。 */
   private retryAvatarRead(): void {
-    if (!this.alive || this.appBackground || this.host.isRawWeb() || this.host.isAuthenticationPage() || this.avatarPath !== '' ||
+    if (!this.alive || this.appBackground || this.host.isRawWeb() || this.host.isAuthenticationPage() ||
+      this.avatarLoadingFiles !== undefined || (this.avatarPath !== '' && this.avatarFailedUrl === '') ||
       this.avatarRetryTimer !== -1 || this.avatarRetries >= AVATAR_RETRY_LIMIT) { return; }
     this.avatarRetries++;
     this.avatarRetryTimer = setTimeout(() => {

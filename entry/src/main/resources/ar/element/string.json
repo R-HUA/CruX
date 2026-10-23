@@ -77,6 +77,14 @@
       "value": "الإشارات المرجعية"
     },
     {
+      "name": "menu_likes",
+      "value": "الإعجابات"
+    },
+    {
+      "name": "navigation_failed",
+      "value": "تعذر فتح هذه الصفحة. حاول مجدداً"
+    },
+    {
       "name": "menu_lists",
       "value": "القوائم"
     },
@@ -599,6 +607,8 @@
     {"name":"media_more","value":"المزيد"},
     {"name":"media_load_original","value":"تحميل الصورة الأصلية"},
     {"name":"media_details","value":"تفاصيل الصورة"},
+    {"name":"media_view_post","value":"عرض المنشور"},
+    {"name":"media_action_unknown","value":"يتعذر تأكيد نتيجة العملية حاليًا"},
     {"name":"media_repost","value":"إعادة النشر"},
     {"name":"media_unrepost","value":"إلغاء إعادة النشر"},
     {"name":"media_quote","value":"اقتباس"},

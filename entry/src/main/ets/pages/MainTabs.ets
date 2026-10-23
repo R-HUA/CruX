@@ -1,6 +1,7 @@
 import web_webview from '@ohos.web.webview';
 import mediaquery from '@ohos.mediaquery';
-import { MediaAddress, MediaPostState, MediaActionResult, resolveMedia, MEDIA_CLICK_SCRIPT, mediaActionScript } from '../common/WebMedia';
+import { MediaAddress, MediaPostState, MediaActionResult, MediaOrigin, resolveMedia, MEDIA_CLICK_SCRIPT,
+  MEDIA_ACTION_RESPONSE_SCRIPT, mediaActionScript, restoreMediaOriginScript } from '../common/WebMedia';
 import { MediaFile } from '../common/MediaFiles';
 import { WebImageDownloads } from '../common/WebImageDownloads';
 import { IncomingContent } from '../common/IncomingContent';
@@ -108,6 +109,7 @@ interface ImagePayload {
   liked?: boolean;
   bookmarked?: boolean;
   reposted?: boolean;
+  origin?: MediaOrigin;
 }
 
 /** 网页边界使用 CSS 像素，接收时按实际视口统一换算为 vp。 */
@@ -145,6 +147,14 @@ struct MainTabs {
   @State imageIndex: number = 0;
   @State imagePost: MediaPostState = { postId: '', postUrl: '' };
   private imageActionSequence: number = 0;
+  // 互动和返回只归当前查看会话，网页恢复后旧回调随实例一起失效。
+  private imageSession: number = 0;
+  private imageOwner: string = '';
+  private imageWebSession: number = 0;
+  private imageOrigin: MediaOrigin | undefined = undefined;
+  private imageNavigation: number = -1;
+  @State imagePostReady: boolean = false;
+  @State imageUncertainActions: string[] = [];
   @State imageChromeVisible: boolean = true;
   @State imageDragging: boolean = false;
   @State imageDetailsVisible: boolean = false;
@@ -216,8 +226,13 @@ struct MainTabs {
   @State navigation: WebNavigation = new WebNavigation({
     controller: () => this.controller, isNetworkReady: () => this.webNetworkReady,
     isControllerReady: () => this.webControllerReady,
+    isActive: () => this.pageAlive && !this.appBackground,
     documentStarted: (url: string) => this.documentStarted(url),
     cancelProfileNavigation: () => this.account.cancelProfileNavigation(),
+    routeSettled: () => {
+      this.syncFromUrl(this.webUrl());
+      this.schedulePageStateRead();
+    },
     toast: (message: ResourceStr) => this.toast(message)
   });
   @State account: AccountSession = new AccountSession({
@@ -225,9 +240,13 @@ struct MainTabs {
     url: () => this.navigation.currentUrl, isAuthenticationPage: () => this.authenticationPage,
     isRawWeb: () => this.rawWeb, webImages: () => this.webImages, currentIndex: () => this.currentIndex,
     isControllerReady: () => this.webControllerReady, isSettingsOpen: () => this.settingsOpen,
-    isComposerOpen: () => this.composer.sheetOpen, accountChanged: () => this.unread.resetAccount(),
-    loadWeb: (url: string, keepProfile: boolean, allowDocumentLoad: boolean, direct: boolean) =>
-      this.navigation.loadWeb(url, keepProfile, allowDocumentLoad, direct),
+    isComposerOpen: () => this.composer.sheetOpen, accountChanged: () => {
+      this.navigation.cancel();
+      this.unread.resetAccount();
+      this.imageOrigin = undefined;
+      if (this.imageViewerOpen) { this.imageViewerOpen = false; }
+    },
+    loadWeb: (url: string) => this.navigation.loadWeb(url),
     toast: (message: ResourceStr) => this.toast(message)
   });
   @State unread: UnreadSession = new UnreadSession({
@@ -357,7 +376,7 @@ struct MainTabs {
           this.retrying = false;
           this.renderRecoveryPending = false;
           this.pendingDocumentUrl = '';
-          this.navigation.navigationGeneration++;
+          this.navigation.cancel();
           this.webNetworkReady = false;
           this.navigation.failure = 'policy';
           this.incomingPageReady = false;
@@ -428,11 +447,14 @@ struct MainTabs {
   }
 
   aboutToDisappear(): void {
+    this.imageSession++;
+    this.imageActionSequence++;
+    this.imageOrigin = undefined;
     this.webControllerReady = false;
     this.retrying = false;
     this.renderRecoveryPending = false;
     this.pendingDocumentUrl = '';
-    this.navigation.navigationGeneration++;
+    this.navigation.cancel();
     this.account.cancelProfileNavigation();
     this.incomingPageReady = false;
     this.pageAlive = false;
@@ -476,6 +498,7 @@ struct MainTabs {
     this.composer.setBackground(this.appBackground);
     this.unread.setBackground(this.appBackground);
     if (this.appBackground) {
+      this.navigation.cancel();
       this.account.cancelProfileNavigation();
       this.stopBackgroundWork();
       this.saveWebSession();
@@ -535,7 +558,7 @@ struct MainTabs {
       this.composer.openCompose(content.value);
       return;
     }
-    this.navigation.loadWeb(content.value, false, true);
+    this.navigation.loadWeb(content.value);
   }
 
   // A page that never finishes loading must not leave the first-load spinner up
@@ -607,6 +630,7 @@ struct MainTabs {
   // Home tab, and only then let the system close the app (HarmonyOS UX
   // requirement — back must not drop the user out of a page they can leave).
   onBackPress(): boolean {
+    this.navigation.cancel();
     this.account.cancelProfileNavigation();
     if (this.imageViewerOpen) {
       if (this.cancelImageAnalyzer()) { return true; }
@@ -689,21 +713,25 @@ struct MainTabs {
     return this.customUa || userAgentFor(this.desktopMode || deviceInfo.deviceType === '2in1');
   }
 
-  private syncFromUrl(url: string): void {
+  private syncFromUrl(url: string, documentLoaded: boolean = false): void {
+    if (this.imageViewerOpen && url !== this.navigation.currentUrl && url !== this.imagePost.postUrl) {
+      this.imageOrigin = undefined;
+      this.imageViewerOpen = false;
+    }
     if (this.account.discovering && url !== this.navigation.currentUrl && pathOf(url) !== '/home') { this.account.cancelProfileNavigation(); }
     if (url !== this.navigation.currentUrl) { this.resetProfileLayout(); this.resetChromeScroll(); }
-    const idx: number = routeIndexForUrl(url);
-    if (!this.settingsOpen && !this.settingsWeb && idx >= 0 && this.enabledTabs.includes(idx) && idx !== this.currentIndex) {
+    this.navigation.syncFromUrl(url, documentLoaded);
+    const idx: number = routeIndexForUrl(TWITTER_BASE + this.navigation.currentPath);
+    if (!this.navigation.isNavigating && !this.settingsOpen && !this.settingsWeb && idx >= 0 && this.enabledTabs.includes(idx) && idx !== this.currentIndex) {
       this.currentIndex = idx;
     }
-    this.navigation.syncFromUrl(url);
   }
 
   /** 网页账号入口不修改会话；切换后重新确认身份和头像。 */
   private async openAccountSwitcher(): Promise<void> {
     this.account.cancelProfileNavigation();
     try {
-      if (!this.isHomeRoot()) { await this.navigation.loadWeb(TWITTER_ROUTES[0]); }
+      if (!this.isHomeRoot() && await this.navigation.loadWeb(TWITTER_ROUTES[0]) !== 'arrived') { return; }
       const generation = this.navigation.navigationGeneration;
       const deadline = Date.now() + PROFILE_TIMEOUT_MS;
       while (generation === this.navigation.navigationGeneration && this.pageAlive && !this.appBackground) {
@@ -721,17 +749,15 @@ struct MainTabs {
     }
   }
 
-  private goRoute(index: number): void {
+  private async goRoute(index: number): Promise<void> {
     if (index === 4) {
       this.openSettings();
       return;
     }
+    this.navigation.cancel();
     const wasSettings = this.settingsOpen || this.settingsWeb;
     const previousIndex = this.currentIndex;
-    this.account.settingsReadGeneration++;
-    this.settingsOpen = false;
-    this.settingsWeb = false;
-    this.currentIndex = index;
+    const settingsGeneration = ++this.account.settingsReadGeneration;
     this.account.cancelProfileNavigation();
     if (!wasSettings && index === previousIndex && isTabRootPath(this.navigation.currentPath)) {
       // Tapping the active tab scrolls to top, like the stock app.
@@ -741,11 +767,21 @@ struct MainTabs {
       return;
     }
     this.tick();
-    this.navigation.loadWeb(index === 5 ? TWITTER_BASE + '/i/grok' : TWITTER_ROUTES[index]);
+    const pending = this.navigation.loadWeb(index === 5 ? TWITTER_BASE + '/i/grok' : TWITTER_ROUTES[index]);
+    const generation = this.navigation.navigationGeneration;
+    const result = await pending;
+    if (result === 'cancelled' || generation !== this.navigation.navigationGeneration ||
+      settingsGeneration !== this.account.settingsReadGeneration) { return; }
+    if (result === 'arrived') { this.settingsOpen = false; this.settingsWeb = false; }
+    else if (wasSettings) { return; }
+    const actualIndex = routeIndexForUrl(TWITTER_BASE + this.navigation.currentPath);
+    this.currentIndex = result === 'arrived' ? index : actualIndex >= 0 ? actualIndex : previousIndex;
   }
 
   /** 原生设置覆盖常驻网页，资料读取与用户离开共用代际取消。 */
   private openSettings(page: string = ''): void {
+    this.navigation.cancel();
+    this.account.cancelProfileNavigation();
     if (!this.settingsOpen && !this.settingsWeb) {
       this.settingsOrigin = this.currentIndex;
       this.settingsOriginUrl = this.navigation.currentUrl || TWITTER_ROUTES[0];
@@ -758,22 +794,31 @@ struct MainTabs {
     if (this.authenticationPage || !this.incomingPageReady) { this.account.accountError = true; }
   }
 
-  private leaveSettings(): void {
-    this.account.settingsReadGeneration++;
+  private async leaveSettings(): Promise<void> {
+    const settingsGeneration = ++this.account.settingsReadGeneration;
+    this.account.accountLoading = false;
+    const pending = this.navigation.loadWeb(this.settingsOriginUrl);
+    const generation = this.navigation.navigationGeneration;
+    const result = await pending;
+    if (result !== 'arrived' || generation !== this.navigation.navigationGeneration ||
+      settingsGeneration !== this.account.settingsReadGeneration) { return; }
     this.settingsOpen = false;
     this.settingsWeb = false;
-    this.account.accountLoading = false;
     this.currentIndex = this.settingsOrigin;
-    this.navigation.loadWeb(this.settingsOriginUrl);
   }
 
-  private openSettingsRoute(path: string): void {
-    this.account.settingsReadGeneration++;
-    this.settingsOpen = false;
-    this.settingsWeb = true;
+  private async openSettingsRoute(path: string): Promise<void> {
+    const generation = ++this.account.settingsReadGeneration;
     this.account.accountLoading = false;
-    this.settingsWebRoot = TWITTER_BASE + path;
-    this.navigation.loadWeb(this.settingsWebRoot, false, true, true);
+    const target = TWITTER_BASE + path;
+    const pending = this.navigation.loadWeb(target);
+    const navigationGeneration = this.navigation.navigationGeneration;
+    const result = await pending;
+    if (result !== 'arrived' || navigationGeneration !== this.navigation.navigationGeneration ||
+      generation !== this.account.settingsReadGeneration || !this.settingsOpen) { return; }
+    this.settingsWebRoot = target;
+    this.settingsWeb = true;
+    this.settingsOpen = false;
   }
 
   private async saveClientSetting(key: string, value: preferences.ValueType): Promise<void> {
@@ -930,55 +975,32 @@ struct MainTabs {
   }
 
   private async openOwnProfile(): Promise<void> {
-    await this.account.cancelProfileNavigation();
-    const fromSettings = this.settingsOpen;
-    if (this.account.ownHandle) {
-      if (fromSettings) {
-        this.settingsWeb = true;
-        this.settingsOpen = false;
-        this.settingsWebRoot = profileUrl(this.account.ownHandle);
-      }
-      this.navigation.loadWeb(profileUrl(this.account.ownHandle), false, true, true);
-      return;
-    }
+    this.navigation.cancel();
+    const navigationGeneration = this.navigation.navigationGeneration;
+    const pendingCancel = this.account.cancelProfileNavigation();
     const generation = this.account.profileNavigation;
+    const fromSettings = this.settingsOpen;
     this.account.discovering = true;
     this.navigation.failure = 'none';
     try {
-      let handle = MainTabs.unquote(await this.webScript(OWN_HANDLE_SCRIPT));
-      if (generation !== this.account.profileNavigation || !this.pageAlive || this.appBackground) {
-        return;
-      }
+      await pendingCancel;
+      if (generation !== this.account.profileNavigation || navigationGeneration !== this.navigation.navigationGeneration ||
+        !this.pageAlive || this.appBackground) { return; }
+      const handle = this.account.ownHandle || MainTabs.unquote(await this.webScript(OWN_HANDLE_SCRIPT));
+      if (generation !== this.account.profileNavigation || navigationGeneration !== this.navigation.navigationGeneration ||
+        !this.pageAlive || this.appBackground) { return; }
       if (!/^[A-Za-z0-9_]{1,15}$/.test(handle)) {
-        if (!this.isHomeRoot()) { await this.navigation.loadWeb(TWITTER_ROUTES[0], true); }
-        const deadline = Date.now() + PROFILE_TIMEOUT_MS;
-        while (!this.isHomeRoot() && Date.now() < deadline) {
-          if (generation !== this.account.profileNavigation || !this.pageAlive || this.appBackground) {
-            return;
-          }
-          await new Promise<void>((resolve) => { setTimeout(resolve, 100); });
-        }
-        if (generation !== this.account.profileNavigation || !this.pageAlive || this.appBackground) {
-          return;
-        }
-        handle = this.isHomeRoot() ? await this.account.confirmCurrentAccount() : '';
-      }
-      if (generation !== this.account.profileNavigation || !this.pageAlive || this.appBackground) { return; }
-      if (handle === '') {
-        await this.account.closeWebDrawer();
         this.toast($r('app.string.account_unconfirmed'));
         return;
       }
+      this.account.acceptHandle(handle, false);
+      this.account.discovering = false;
       if (fromSettings) {
-        this.settingsWeb = true;
-        this.settingsOpen = false;
-        this.settingsWebRoot = profileUrl(handle);
-      }
-      this.account.acceptHandle(handle, true);
+        await this.openSettingsRoute('/' + handle);
+      } else { await this.navigation.loadWeb(profileUrl(handle)); }
     } catch (error) {
       hilog.warn(DOMAIN, TAG, 'event=profile_navigation_failed error=%{public}s', JSON.stringify(error));
       if (generation === this.account.profileNavigation) {
-        await this.account.closeWebDrawer();
         this.toast($r('app.string.account_unconfirmed'));
       }
     } finally {
@@ -1114,6 +1136,7 @@ struct MainTabs {
 
   private reloadCurrent(): void {
     if (this.retrying) { return; }
+    this.navigation.cancel();
     if (this.navigation.failure === 'policy' || !this.webNetworkReady) {
       this.retrying = true;
       const session = this.webSession;
@@ -1163,7 +1186,7 @@ struct MainTabs {
     this.renderRecoveryPending = false;
     this.webSession++;
     this.bridge = this.createBridge(this.webSession);
-    this.navigation.navigationGeneration++;
+    this.navigation.cancel();
     this.account.cancelProfileNavigation();
     this.imageViewerOpen = false;
     this.rawWeb = showWeb;
@@ -1186,7 +1209,7 @@ struct MainTabs {
   private renderExited(): void {
     this.webControllerReady = false;
     this.incomingPageReady = false;
-    this.navigation.navigationGeneration++;
+    this.navigation.cancel();
     this.account.cancelProfileNavigation();
     this.pendingDocumentUrl = '';
     this.retrying = false;
@@ -1549,7 +1572,7 @@ struct MainTabs {
       this.armFirstLoadTimeout();
     }
     if (this.navigation.currentUrl.length === 0) {
-      this.navigation.loadWeb(TWITTER_ROUTES[0], false, true);
+      this.navigation.loadDocument(TWITTER_ROUTES[0]);
     } else {
       this.reloadCurrent();
     }
@@ -1664,6 +1687,13 @@ struct MainTabs {
         const title: string = MainTabs.unquote(raw);
         this.pageTitle = MainTabs.stripSiteSuffix(title);
       }).catch((err: BusinessError) => { hilog.warn(DOMAIN, TAG, 'event=page_title_failed code=%{public}d', err.code); });
+      if (!this.navigation.isNavigating && this.navigation.viewingHandle !== '' &&
+        this.profileLayout === undefined && !this.settingsOpen) {
+        this.webScript('(function(url){if(location.href!==url)return;window.__otProfileLayout="";' +
+          'window.__otApplyTop&&window.__otApplyTop();})(' + JSON.stringify(pageUrl) + ')').catch((error: Error) => {
+          hilog.warn(DOMAIN, TAG, 'event=profile_layout_read_failed code=%{public}d', (error as BusinessError).code);
+        });
+      }
     } catch (err) {
       hilog.warn(DOMAIN, TAG, 'event=page_state_failed code=%{public}d', (err as BusinessError).code);
     }
@@ -1919,14 +1949,14 @@ struct MainTabs {
       SymbolGlyph($r('sys.symbol.person_crop_circle_fill'))
         .fontSize(32)
         .fontColor([$r('sys.color.ohos_id_color_text_secondary')])
-      if ($$.path !== '') {
-        Image($$.path)
+      ForEach($$.path === '' ? [] : [$$.path], (path: string) => {
+        Image(path)
           .width(32).height(32).borderRadius(16).objectFit(ImageFit.Cover)
           .onComplete(() => {
-            if ($$.path === this.account.avatarPath) { this.account.clearAvatarRetry(); }
+            if (path === this.account.avatarPath) { this.account.clearAvatarRetry(); }
           })
-          .onError(() => this.account.avatarImageFailed($$.path))
-      }
+          .onError(() => this.account.avatarImageFailed(path))
+      }, (path: string) => path)
     }
     .width(32).height(32)
   }
@@ -2318,13 +2348,16 @@ struct MainTabs {
       .onWindowNew((event: OnWindowNewEvent) => {
         event.handler.setWebController(null);
         if (session !== this.webSession || !this.webControllerReady) { return; }
-        if (isSiteUrl(event.targetUrl) || isAuthUrl(event.targetUrl)) {
-          this.navigation.loadWeb(event.targetUrl, false, true);
+        if (isAuthUrl(event.targetUrl)) {
+          this.navigation.loadDocument(event.targetUrl);
+        } else if (isSiteUrl(event.targetUrl)) {
+          this.navigation.loadWeb(event.targetUrl);
         } else if (/^https?:\/\//i.test(event.targetUrl)) {
           this.openExternal(event.targetUrl);
         } else { this.toast($r('app.string.operation_failed')); }
       })
-      .onLoadIntercept((event) => session !== this.webSession || !this.webControllerReady || this.interceptExternal(event))
+      .onLoadIntercept((event) => session !== this.webSession || !this.webControllerReady ||
+        (event.data.isMainFrame() && this.navigation.interceptDocument()) || this.interceptExternal(event))
       .onFullScreenEnter((event) => { if (session === this.webSession && this.webControllerReady) { this.enterFullScreen(event.handler); } })
       .onFullScreenExit(() => { if (session === this.webSession) { this.exitFullScreen(); } })
       .onContextMenuShow((event) => {
@@ -2340,7 +2373,7 @@ struct MainTabs {
         return true;
       })
       .javaScriptAccess(true)
-      .javaScriptOnDocumentStart([{ script: this.rawWeb ? '' : WEB_RESPONSE_SCRIPT + chromeDocumentStartScript(true),
+      .javaScriptOnDocumentStart([{ script: this.rawWeb ? '' : WEB_RESPONSE_SCRIPT + MEDIA_ACTION_RESPONSE_SCRIPT + chromeDocumentStartScript(true),
         scriptRules: ['https://x.com', 'https://www.x.com', 'https://twitter.com', 'https://www.twitter.com'] }])
       .domStorageAccess(true)
       // x.com's chat client keeps its session state in browser storage; ArkWeb
@@ -2401,7 +2434,7 @@ struct MainTabs {
         }
         this.saveWebSession();
         if (event && event.url) {
-          this.syncFromUrl(event.url);
+          this.syncFromUrl(event.url, true);
           this.applyPageChrome(event.url);
         }
         if (this.appBackground && !this.rawWeb) {
@@ -2651,18 +2684,27 @@ struct MainTabs {
         if (!item || items.some((existing: MediaAddress) => existing.id === item.id)) { return false; }
         items.push(item);
       }
-      this.imageItems = items;
-      this.imageIndex = data.index;
-      this.imagePost = { postId: '', postUrl: '' };
+      let post: MediaPostState = { postId: '', postUrl: '' };
       if (data.postId !== undefined) {
         if (typeof data.postId !== 'string' || !/^\d+$/.test(data.postId) || typeof data.postUrl !== 'string' ||
           !isPostDetailUrl(data.postUrl) || !data.postUrl.endsWith('/status/' + data.postId)) { return false; }
         for (const value of [data.liked, data.bookmarked, data.reposted]) {
           if (value !== undefined && typeof value !== 'boolean') { return false; }
         }
-        this.imagePost = { postId: data.postId, postUrl: data.postUrl, liked: data.liked,
+        post = { postId: data.postId, postUrl: data.postUrl, liked: data.liked,
           bookmarked: data.bookmarked, reposted: data.reposted };
       }
+      if (data.origin !== undefined) {
+        const origin = data.origin;
+        if (post.postId === '' || origin.url !== this.webUrl() || !isSiteUrl(origin.url) ||
+          typeof origin.scrollSelector !== 'string' ||
+          ![origin.x, origin.y, origin.scrollTop, origin.scrollLeft].every((value: number) =>
+            typeof value === 'number' && Number.isFinite(value))) { return false; }
+      }
+      this.imageItems = items;
+      this.imageIndex = data.index;
+      this.imagePost = post;
+      this.imageOrigin = data.origin;
       this.tick();
       this.imageViewerOpen = true;
       return true;
@@ -2672,23 +2714,183 @@ struct MainTabs {
     }
   }
 
-  /** 等待网页确认操作结果，超时和页面变更均不伪造互动成功。 */
+  /** 账号、网页实例和查看会话共同约束迟到结果。 */
+  private imageSessionCurrent(session: number): boolean {
+    return session === this.imageSession && this.imageViewerOpen && this.pageAlive && !this.appBackground &&
+      !this.rawWeb && !this.authenticationPage && this.webControllerReady && this.webSession === this.imageWebSession &&
+      this.account.ownHandle.toLowerCase() === this.imageOwner;
+  }
+
+  /** 回执可能早于节点重建，仅更新其包含的状态，避免清空其他已知按钮。 */
+  private applyImagePostState(result: MediaActionResult, replace: boolean = true): void {
+    this.imagePost = { postId: this.imagePost.postId, postUrl: this.imagePost.postUrl,
+      liked: replace || result.liked !== undefined ? result.liked : this.imagePost.liked,
+      bookmarked: replace || result.bookmarked !== undefined ? result.bookmarked : this.imagePost.bookmarked,
+      reposted: replace || result.reposted !== undefined ? result.reposted : this.imagePost.reposted };
+  }
+
+  /** 网格先展示图片，再等待原帖提供操作控件。 */
+  private async prepareImagePost(session: number): Promise<void> {
+    const postId = this.imagePost.postId;
+    let generation = this.navigation.navigationGeneration;
+    try {
+      let result = JSON.parse(MainTabs.unquote(await this.webScript(mediaActionScript(postId, 0, 'read', false)))) as MediaActionResult;
+      if (!this.imageSessionCurrent(session) || generation !== this.navigation.navigationGeneration) { return; }
+      if (result.status !== 'ready' && this.imageOrigin !== undefined) {
+        this.imageNavigation = generation + 1;
+        await this.navigation.loadDocument(this.imagePost.postUrl);
+        generation = this.imageNavigation;
+        if (!this.imageSessionCurrent(session) || generation !== this.navigation.navigationGeneration) { return; }
+      }
+      const deadline = Date.now() + PROFILE_TIMEOUT_MS;
+      while (this.imageSessionCurrent(session) && generation === this.navigation.navigationGeneration) {
+        if (result.postId !== postId) { throw new Error('Image post response mismatch'); }
+        if (result.status === 'ready') {
+          this.applyImagePostState(result);
+          this.imagePostReady = true;
+          return;
+        }
+        if (Date.now() >= deadline) { throw new Error('Image post context unavailable'); }
+        await new Promise<void>((resolve) => { setTimeout(resolve, 150); });
+        if (!this.imageSessionCurrent(session) || generation !== this.navigation.navigationGeneration) { return; }
+        result = JSON.parse(MainTabs.unquote(await this.webScript(mediaActionScript(postId, 0, 'read', false)))) as MediaActionResult;
+        if (!this.imageSessionCurrent(session) || generation !== this.navigation.navigationGeneration) { return; }
+      }
+    } catch (error) {
+      if (!this.imageSessionCurrent(session)) { return; }
+      hilog.warn(DOMAIN, TAG, 'event=image_post_context_failed error=%{public}s', JSON.stringify(error));
+      this.toast($r('app.string.operation_failed'));
+    }
+  }
+
+  /** 关闭后只恢复本查看会话主动加载的页面，不能覆盖用户的新导航。 */
+  private async restoreImageOrigin(origin: MediaOrigin, postUrl: string, session: number,
+    generation: number): Promise<void> {
+    const owner = this.imageOwner;
+    const webSession = this.imageWebSession;
+    try {
+      if (!this.pageAlive || !this.webControllerReady || this.webSession !== webSession ||
+        this.account.ownHandle.toLowerCase() !== owner) { return; }
+      this.controller.stop();
+      if (this.webUrl() === postUrl && this.webCanGoBack()) { this.controller.backward(); }
+      else if (this.webUrl() !== origin.url) {
+        await this.navigation.loadDocument(origin.url);
+        generation = this.navigation.navigationGeneration;
+      } else {
+        this.documentLoading = false;
+        this.pendingDocumentUrl = '';
+        this.finishFirstLoad();
+      }
+      const deadline = Date.now() + PROFILE_TIMEOUT_MS;
+      while (session === this.imageSession && !this.imageViewerOpen && this.pageAlive && !this.appBackground &&
+        this.webControllerReady && this.webSession === webSession && this.account.ownHandle.toLowerCase() === owner &&
+        generation === this.navigation.navigationGeneration) {
+        const result = MainTabs.unquote(await this.webScript(restoreMediaOriginScript(origin)));
+        if (session !== this.imageSession || this.imageViewerOpen || !this.pageAlive || this.appBackground ||
+          generation !== this.navigation.navigationGeneration ||
+          this.webSession !== webSession || this.account.ownHandle.toLowerCase() !== owner) { return; }
+        if (result === 'restored') { return; }
+        if (Date.now() >= deadline) { throw new Error('Image origin restoration timed out'); }
+        await new Promise<void>((resolve) => { setTimeout(resolve, 150); });
+      }
+    } catch (error) {
+      if (session !== this.imageSession || !this.pageAlive || this.webSession !== webSession ||
+        this.account.ownHandle.toLowerCase() !== owner || generation !== this.navigation.navigationGeneration) { return; }
+      hilog.warn(DOMAIN, TAG, 'event=image_origin_restore_failed error=%{public}s', JSON.stringify(error));
+      this.toast($r('app.string.operation_failed'));
+    }
+  }
+
+  /** 显式查看原帖后保留帖子页面，不再恢复媒体网格。 */
+  private async viewImagePost(): Promise<void> {
+    const session = this.imageSession;
+    if (!this.imageSessionCurrent(session) || this.imagePost.postUrl === '') { return; }
+    const url = this.imagePost.postUrl;
+    try {
+      if (this.webUrl() !== url) {
+        this.imageNavigation = this.navigation.navigationGeneration + 1;
+        await this.navigation.loadDocument(url);
+        if (!this.imageSessionCurrent(session) || this.navigation.navigationGeneration !== this.imageNavigation) { return; }
+      }
+      this.imageOrigin = undefined;
+      this.imageViewerOpen = false;
+    } catch (error) {
+      if (!this.imageSessionCurrent(session)) { return; }
+      hilog.warn(DOMAIN, TAG, 'event=image_view_post_failed error=%{public}s', JSON.stringify(error));
+      this.toast($r('app.string.operation_failed'));
+    }
+  }
+
+  /** 回执缺失只回读一次，不重复提交可能已成功的动作。 */
+  private async readBackImageAction(session: number, id: number, action: string, target: boolean): Promise<MediaActionResult> {
+    const postId = this.imagePost.postId;
+    const unknown: MediaActionResult = { requestId: id, postId: postId, status: 'unknown', target: target };
+    this.imagePostReady = false;
+    const previousGeneration = this.navigation.navigationGeneration;
+    await this.webScript('window.__otMediaReadbackBlocked=true');
+    if (!this.imageSessionCurrent(session) || id !== this.imageActionSequence ||
+      previousGeneration !== this.navigation.navigationGeneration) { return { requestId: id, postId: postId, status: 'cancelled' }; }
+    if (this.webUrl() === this.imagePost.postUrl) {
+      this.imageNavigation = ++this.navigation.navigationGeneration;
+      this.documentStarted(this.imagePost.postUrl);
+      this.controller.refresh(true);
+    } else {
+      this.imageNavigation = this.navigation.navigationGeneration + 1;
+      await this.navigation.loadDocument(this.imagePost.postUrl);
+    }
+    const generation = this.imageNavigation;
+    if (!this.imageSessionCurrent(session) || id !== this.imageActionSequence ||
+      generation !== this.navigation.navigationGeneration) { return { requestId: id, postId: postId, status: 'cancelled' }; }
+    const deadline = Date.now() + PROFILE_TIMEOUT_MS;
+    while (this.imageSessionCurrent(session) && id === this.imageActionSequence && generation === this.navigation.navigationGeneration) {
+      const result = JSON.parse(MainTabs.unquote(await this.webScript(mediaActionScript(postId, id, 'read', false)))) as MediaActionResult;
+      if (!this.imageSessionCurrent(session) || id !== this.imageActionSequence ||
+        generation !== this.navigation.navigationGeneration) { return { requestId: id, postId: postId, status: 'cancelled' }; }
+      // 新文档完成后才接受状态，不能把旧页的乐观变色当作回读结果。
+      if (!this.documentLoading && this.webUrl() === this.imagePost.postUrl && result.postId === postId && result.status === 'ready') {
+        this.applyImagePostState(result);
+        this.imagePostReady = true;
+        const current = action === 'like' ? result.liked : action === 'bookmark' ? result.bookmarked : result.reposted;
+        if (current === target) { result.status = 'done'; return result; }
+        return unknown;
+      }
+      if (Date.now() >= deadline) { return unknown; }
+      await new Promise<void>((resolve) => { setTimeout(resolve, 150); });
+    }
+    return { requestId: id, postId: postId, status: 'cancelled' };
+  }
+
+  /** 服务回执确认结果，旧节点是否变色不影响已确认的操作。 */
   private async imagePostAction(action: string): Promise<MediaActionResult> {
     const id = ++this.imageActionSequence;
     const postId = this.imagePost.postId;
     const owner = this.account.ownHandle;
     const generation = this.navigation.navigationGeneration;
     const url = this.navigation.currentUrl;
+    const session = this.imageSession;
+    const current = action === 'like' ? this.imagePost.liked : action === 'bookmark' ? this.imagePost.bookmarked : this.imagePost.reposted;
+    const target = !current;
+    const cancelled: MediaActionResult = { requestId: id, postId: postId, status: 'cancelled' };
     const deadline = Date.now() + PROFILE_TIMEOUT_MS;
     let start = true;
-    while (this.imageViewerOpen && this.pageAlive && !this.appBackground && this.account.ownHandle === owner &&
+    while (this.imageSessionCurrent(session) && id === this.imageActionSequence &&
+      this.account.ownHandle.toLowerCase() === owner.toLowerCase() &&
       this.navigation.navigationGeneration === generation && this.navigation.currentUrl === url && this.imagePost.postId === postId) {
-      const raw = MainTabs.unquote(await this.webScript(mediaActionScript(postId, id, action, start)));
-      const result = JSON.parse(raw) as MediaActionResult;
+      let result: MediaActionResult;
+      try {
+        const raw = MainTabs.unquote(await this.webScript(mediaActionScript(postId, id, action, start, target)));
+        if (!this.imageSessionCurrent(session) || id !== this.imageActionSequence ||
+          this.navigation.navigationGeneration !== generation || this.navigation.currentUrl !== url) { return cancelled; }
+        result = JSON.parse(raw) as MediaActionResult;
+      } catch (error) {
+        if (!this.imageSessionCurrent(session) || id !== this.imageActionSequence ||
+          this.navigation.navigationGeneration !== generation) { return cancelled; }
+        hilog.warn(DOMAIN, TAG, 'event=image_post_receipt_unreadable');
+        break;
+      }
       if (result.requestId !== id || result.postId !== postId) { throw new Error('Image action response mismatch'); }
-      if (result.status === 'unavailable' || result.status === 'failed') { throw new Error('Post action ' + result.status); }
+      if (result.status === 'failed' || (start && result.status === 'unavailable')) { return result; }
       if (result.status === 'done') {
-        if (!this.imageViewerOpen || this.account.ownHandle !== owner || this.navigation.currentUrl !== url) { throw new Error('Post context changed'); }
         hilog.info(DOMAIN, TAG, 'event=image_post_action_confirmed action=%{public}s', action);
         return result;
       }
@@ -2696,15 +2898,20 @@ struct MainTabs {
         const quoteUrl = result.quoteUrl;
         if (!quoteUrl || !isSiteUrl(quoteUrl) || pathOf(quoteUrl) !== '/compose/post') { throw new Error('Quote route unavailable'); }
         await this.webScript('document.dispatchEvent(new KeyboardEvent("keydown",{key:"Escape",bubbles:true}))');
+        if (!this.imageSessionCurrent(session) || id !== this.imageActionSequence ||
+          this.navigation.navigationGeneration !== generation || this.navigation.currentUrl !== url) { return cancelled; }
         this.imageViewerOpen = false;
         this.composer.openQuote(quoteUrl, owner);
         return result;
       }
-      if (Date.now() >= deadline) { throw new Error('Post action confirmation timed out'); }
+      if (Date.now() >= deadline) { break; }
       start = false;
       await new Promise<void>((resolve) => { setTimeout(resolve, 150); });
     }
-    throw new Error('Post context changed');
+    if (!this.imageSessionCurrent(session) || id !== this.imageActionSequence ||
+      this.navigation.navigationGeneration !== generation || this.navigation.currentUrl !== url) { return cancelled; }
+    if (action === 'quote') { return { requestId: id, postId: postId, status: 'unknown' }; }
+    return this.readBackImageAction(session, id, action, target);
   }
 
   @Builder
@@ -2715,6 +2922,7 @@ struct MainTabs {
       moreOpen: $imageMoreOpen, footerOffset: FLOATING_BAR_HEIGHT + this.bottomInset,
       shareTrigger: this.imageShareTrigger, immersiveMaterial: this.immersiveMaterial,
       topInset: this.topInset,
+      hasPost: this.imagePost.postId !== '', onViewPost: () => { this.viewImagePost(); },
       analyzerSelecting: $imageAnalyzerSelecting,
       cancelAnalyzerTrigger: this.imageAnalyzerCancelTrigger,
       webImages: this.webImages, onClose: () => { this.imageViewerOpen = false; },
@@ -2723,6 +2931,9 @@ struct MainTabs {
 
   /** 图片画布与常驻网页共用宿主，只切换现有 HDS 底栏的内容。 */
   private imageViewerChanged(): void {
+    const session = ++this.imageSession;
+    const previousAction = this.imageActionSequence;
+    this.imageActionSequence++;
     this.imageDetailsVisible = false;
     this.imageRepostMenuOpen = false;
     this.imageMoreOpen = false;
@@ -2732,7 +2943,30 @@ struct MainTabs {
     this.imageDragging = false;
     this.imageAnalyzerSelecting = false;
     this.imageAnalyzerCancelTrigger = 0;
-    if (!this.imageViewerOpen) { setTimeout(() => this.flushRenderRecovery(), 0); }
+    this.imagePostReady = false;
+    this.imageUncertainActions = [];
+    if (this.imageViewerOpen) {
+      this.imageOwner = this.account.ownHandle.toLowerCase();
+      this.imageWebSession = this.webSession;
+      this.imageNavigation = -1;
+      if (this.imagePost.postId !== '') { this.prepareImagePost(session); }
+    } else {
+      if (this.webControllerReady) {
+        this.webScript('if(window.__otMediaAction&&window.__otMediaAction.id===' + previousAction +
+          '){window.__otMediaAction=null;document.dispatchEvent(new KeyboardEvent("keydown",{key:"Escape",bubbles:true}));}')
+          .catch((error: Error) => {
+            hilog.warn(DOMAIN, TAG, 'event=image_action_cancel_failed code=%{public}d', (error as BusinessError).code);
+          });
+      }
+      const origin = this.imageOrigin;
+      this.imageOrigin = undefined;
+      if (origin !== undefined && this.imageNavigation === this.navigation.navigationGeneration) {
+        const generation = ++this.navigation.navigationGeneration;
+        this.restoreImageOrigin(origin, this.imagePost.postUrl, session, generation);
+      }
+      this.imageNavigation = -1;
+      setTimeout(() => this.flushRenderRecovery(), 0);
+    }
   }
 
   private dismissImageDetails(): boolean {
@@ -2748,16 +2982,23 @@ struct MainTabs {
   }
 
   private async performImagePostAction(action: string): Promise<void> {
-    if (this.dismissImageDetails() || this.imageBusy) { return; }
+    if (this.dismissImageDetails() || this.imageBusy || !this.imagePostReady || this.imageUncertainActions.includes(action)) { return; }
+    const session = this.imageSession;
     this.imageBusy = true;
     try {
       const result = await this.imagePostAction(action);
-      this.imagePost = { postId: this.imagePost.postId, postUrl: this.imagePost.postUrl,
-        liked: result.liked, bookmarked: result.bookmarked, reposted: result.reposted };
+      if (!this.imageSessionCurrent(session) || result.status === 'cancelled' || result.status === 'quote') { return; }
+      if (result.status === 'done') { this.applyImagePostState(result, false); }
+      else if (result.status === 'unknown') {
+        this.imageUncertainActions = [...this.imageUncertainActions, action];
+        this.toast($r('app.string.media_action_unknown'));
+      } else { this.toast($r('app.string.operation_failed')); }
     } catch (error) {
+      if (!this.imageSessionCurrent(session)) { return; }
       hilog.error(DOMAIN, TAG, 'event=image_post_action_failed action=%{public}s error=%{public}s', action, JSON.stringify(error));
-      this.toast($r('app.string.operation_failed'));
-    } finally { this.imageBusy = false; }
+      this.imageUncertainActions = [...this.imageUncertainActions, action];
+      this.toast($r('app.string.media_action_unknown'));
+    } finally { if (session === this.imageSession) { this.imageBusy = false; } }
   }
 
   private imageViewerBarMaterial(): uiMaterial.Material | undefined {
@@ -2791,7 +3032,10 @@ struct MainTabs {
     .alignItems(VerticalAlign.Center)
     .borderRadius(20)
     .backgroundColor(Color.Transparent)
-    .enabled(!this.imageBusy && (id !== 'image-share' || this.imageCurrentFile !== undefined))
+    .enabled(!this.imageBusy && (id === 'image-share' ? this.imageCurrentFile !== undefined :
+      this.imagePostReady && (id === 'image-like' ? typeof this.imagePost.liked === 'boolean' &&
+        !this.imageUncertainActions.includes('like') : typeof this.imagePost.bookmarked === 'boolean' &&
+        !this.imageUncertainActions.includes('bookmark'))))
     .accessibilityText(label)
     .accessibilitySelected(selected)
     .accessibilityLevel('yes')
@@ -2802,8 +3046,11 @@ struct MainTabs {
   imageRepostMenu() {
     Menu() {
       MenuItem({ content: this.imagePost.reposted ? $r('app.string.media_unrepost') : $r('app.string.media_repost') })
+        .enabled(!this.imageBusy && this.imagePostReady && !this.imageUncertainActions.includes('repost'))
         .onClick(() => { this.performImagePostAction('repost'); })
-      MenuItem({ content: $r('app.string.media_quote') }).onClick(() => { this.performImagePostAction('quote'); })
+      MenuItem({ content: $r('app.string.media_quote') })
+        .enabled(!this.imageBusy && this.imagePostReady && !this.imageUncertainActions.includes('quote'))
+        .onClick(() => { this.performImagePostAction('quote'); })
     }
   }
 
@@ -2823,7 +3070,7 @@ struct MainTabs {
           .alignItems(VerticalAlign.Center)
           .borderRadius(20)
           .backgroundColor(Color.Transparent)
-          .enabled(!this.imageBusy)
+          .enabled(!this.imageBusy && this.imagePostReady && typeof this.imagePost.reposted === 'boolean')
           .accessibilityText($r('app.string.media_repost'))
           .accessibilitySelected(this.imagePost.reposted)
           .accessibilityLevel('yes')

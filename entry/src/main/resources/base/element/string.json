@@ -81,6 +81,14 @@
       "value": "Bookmarks"
     },
     {
+      "name": "menu_likes",
+      "value": "Likes"
+    },
+    {
+      "name": "navigation_failed",
+      "value": "Unable to open this page. Try again"
+    },
+    {
       "name": "menu_lists",
       "value": "Lists"
     },
@@ -603,6 +611,8 @@
     {"name":"media_more","value":"More"},
     {"name":"media_load_original","value":"Load original image"},
     {"name":"media_details","value":"Image details"},
+    {"name":"media_view_post","value":"View post"},
+    {"name":"media_action_unknown","value":"Unable to confirm the result right now"},
     {"name":"media_repost","value":"Repost"},
     {"name":"media_unrepost","value":"Undo repost"},
     {"name":"media_quote","value":"Quote"},

@@ -13,54 +13,97 @@ export interface MediaPostState {
   reposted?: boolean;
 }
 
+/** 媒体网格恢复使用原页面和实际滚动容器的位置。 */
+export interface MediaOrigin {
+  url: string;
+  x: number;
+  y: number;
+  scrollSelector: string;
+  scrollTop: number;
+  scrollLeft: number;
+}
+
 export interface MediaActionResult {
   requestId: number;
   postId: string;
-  status: string;
+  status: 'ready' | 'unavailable' | 'pending' | 'done' | 'failed' | 'unknown' | 'cancelled' | 'quote';
   liked?: boolean;
   bookmarked?: boolean;
   reposted?: boolean;
   quoteUrl?: string;
+  target?: boolean;
 }
 
 /** 被动确认网页发出的互动请求，避免将乐观变色当作服务端成功。 */
 export const MEDIA_ACTION_RESPONSE_SCRIPT: string = `(function(){
-  if(window.__otMediaResponseHook)return;
+  if(window!==window.top||window.__otMediaResponseHook)return;
   window.__otMediaResponseHook=true;
-  function request(url,body){
-    var action=window.__otMediaAction;
-    if(!action||!body||typeof body!=='string')return null;
-    var path=new URL(url,location.href).pathname,operation=path.substring(path.lastIndexOf('/')+1);
-    var allowed=action.action==='like'?['FavoriteTweet','UnfavoriteTweet']:action.action==='bookmark'?
-      ['CreateBookmark','DeleteBookmark']:action.action==='repost'?['CreateRetweet','DeleteRetweet']:[];
-    if(allowed.indexOf(operation)<0)return null;
+  function owner(){return (/(?:^|;\\s*)twid=([^;]*)/.exec(document.cookie||'')||[])[1]||'';}
+  window.__otMediaOwner=owner;
+  function request(action,url,method,body){
+    if(!action||window.__otMediaAction!==action||action.owner!==owner()||method!=='POST'||typeof body!=='string')return null;
     try{
+      var route=new URL(url,location.href);
+      if(route.protocol!=='https:'||!/^(?:www\\.)?(?:x|twitter)\\.com$/.test(route.hostname))return null;
+      var operation=route.pathname.match(/^\\/i\\/api\\/graphql\\/[^/]+\\/([^/]+)$/);
+      var expected=action.action==='like'?(action.target?'FavoriteTweet':'UnfavoriteTweet'):
+        action.action==='bookmark'?(action.target?'CreateBookmark':'DeleteBookmark'):
+        action.action==='repost'?(action.target?'CreateRetweet':'DeleteRetweet'):'';
+      if(!operation||operation[1]!==expected)return null;
       var variables=JSON.parse(body).variables;
       if(!variables||String(variables.tweet_id||variables.source_tweet_id)!==action.postId)return null;
+      action.operation=expected;action.sent=true;
       return action;
-    }catch(error){action.failed=true;return null;}
+    }catch(error){console.warn('CruX event=image_action_request_unreadable');return null;}
   }
   function response(action,status,data){
-    if(!action||window.__otMediaAction!==action)return;
-    if(status!==200||!data||data.errors||!data.data){action.failed=true;return;}
-    action.ack=true;
+    if(!action||window.__otMediaAction!==action||action.owner!==owner())return;
+    if((status>=400&&status<500&&status!==408)||(data&&Array.isArray(data.errors)&&data.errors.length)){
+      action.failed=true;return;
+    }
+    if(status<200||status>=300||!data||!data.data)return;
+    var keys={FavoriteTweet:'favorite_tweet',UnfavoriteTweet:'unfavorite_tweet',CreateBookmark:'tweet_bookmark_put',
+      DeleteBookmark:'tweet_bookmark_delete',CreateRetweet:'create_retweet',DeleteRetweet:'unretweet'};
+    var receipt=data.data[keys[action.operation]];
+    if(receipt==='Done'||(receipt&&typeof receipt==='object'&&Object.keys(receipt).length))action.ack=true;
   }
   var send=XMLHttpRequest.prototype.send;
   var open=XMLHttpRequest.prototype.open;
-  XMLHttpRequest.prototype.open=function(method,url){this.__otMediaUrl=String(url);return open.apply(this,arguments);};
+  XMLHttpRequest.prototype.open=function(method,url){
+    var result=open.apply(this,arguments);
+    this.__otMediaUrl=String(url);this.__otMediaMethod=String(method).toUpperCase();return result;
+  };
   XMLHttpRequest.prototype.send=function(body){
-    var action=request(this.__otMediaUrl||'',body);
+    var action=request(window.__otMediaAction,this.__otMediaUrl||'',this.__otMediaMethod,body);
     if(action)this.addEventListener('loadend',function(){
+      response(action,this.status,null);
       try{response(action,this.status,this.responseType==='json'?this.response:JSON.parse(this.responseText));}
-      catch(error){action.failed=true;}
+      catch(error){console.warn('CruX event=image_action_response_unreadable');}
     },{once:true});
     return send.apply(this,arguments);
   };
   var fetch=window.fetch;
-  window.fetch=function(input,options){
-    var action=request(typeof input==='string'?input:input.url,options&&options.body);
+  if(typeof fetch==='function')window.fetch=function(input,options){
+    var pending=window.__otMediaAction;
+    var url=input&&input.url||String(input),method=String(options&&options.method||input&&input.method||'GET').toUpperCase();
+    var body;
+    if(pending){
+      if(options&&typeof options.body==='string')body=Promise.resolve(options.body);
+      else if(input&&typeof input.clone==='function'){
+        try{body=input.clone().text();}catch(error){console.warn('CruX event=image_action_request_unreadable');}
+      }
+    }
     var task=fetch.apply(this,arguments);
-    if(action)task.then(function(res){res.clone().json().then(function(data){response(action,res.status,data);},function(){action.failed=true;});},function(){action.failed=true;});
+    if(body)body.then(function(text){
+      var action=request(pending,url,method,text);
+      if(!action)return;
+      task.then(function(res){
+        response(action,res.status,null);
+        try{res.clone().json().then(function(data){response(action,res.status,data);},
+          function(){console.warn('CruX event=image_action_response_unreadable');});}
+        catch(error){console.warn('CruX event=image_action_response_unreadable');}
+      },function(){console.warn('CruX event=image_action_transport_unknown');});
+    },function(){console.warn('CruX event=image_action_request_unreadable');});
     return task;
   };
 })();`;
@@ -75,14 +118,32 @@ export function imageForQuality(address: MediaAddress, original: boolean, explic
   return address;
 }
 
-/** 动作只作用于打开图片时捕获的原帖节点，不搜索其他相似帖子。 */
-export function mediaActionScript(postId: string, requestId: number, action: string, start: boolean): string {
+/** 时间链接确认帖子归属，引用内容不能充当原帖操作区域。 */
+const MEDIA_POST_NODE_SCRIPT: string = `function(id){
+  function owns(node){
+    return node&&node.isConnected&&Array.from(node.querySelectorAll('a[href] time')).some(function(time){
+      var link=time.closest('a[href]');
+      return time.closest('article[data-testid="tweet"]')===node&&link&&
+        new RegExp('^/(?:[A-Za-z0-9_]{1,15}|i/web)/status/'+id+'$').test(new URL(link.href,location.href).pathname);
+    });
+  }
+  var post=window.__otMediaPost;
+  if(post&&post.id===id&&owns(post.node))return post.node;
+  var nodes=document.querySelectorAll('article[data-testid="tweet"]');
+  for(var i=0;i<nodes.length;i++)if(owns(nodes[i])){
+    window.__otMediaPost={id:id,node:nodes[i]};return nodes[i];
+  }
+  return null;
+}`;
+
+/** 读取和动作共用严格的原帖定位；回读不触发点击。 */
+export function mediaActionScript(postId: string, requestId: number, action: string, start: boolean,
+  target?: boolean): string {
   return MEDIA_ACTION_RESPONSE_SCRIPT + `(function(){
-    var post=window.__otMediaPost;
     var result={requestId:${requestId},postId:${JSON.stringify(postId)},status:'unavailable'};
-    if(!post||post.id!==result.postId||!post.node.isConnected)return JSON.stringify(result);
-    var node=post.node;
+    var node=(${MEDIA_POST_NODE_SCRIPT})(result.postId),action=${JSON.stringify(action)};
     function state(){
+      if(!node)return;
       var like=node.querySelector('[data-testid="like"],[data-testid="unlike"]');
       var bookmark=node.querySelector('[data-testid="bookmark"],[data-testid="removeBookmark"]');
       var repost=node.querySelector('[data-testid="retweet"],[data-testid="unretweet"]');
@@ -91,18 +152,34 @@ export function mediaActionScript(postId: string, requestId: number, action: str
       if(repost)result.reposted=repost.dataset.testid==='unretweet';
     }
     state();
-    var action=${JSON.stringify(action)};
+    if(action==='read'){result.status=node&&!window.__otMediaReadbackBlocked?'ready':'unavailable';return JSON.stringify(result);}
+    var pending=window.__otMediaAction;
+    if(!${start}&&pending&&pending.id===result.requestId&&pending.postId===result.postId&&pending.action===action&&
+      pending.owner===window.__otMediaOwner()){
+      if(pending.failed){result.status='failed';return JSON.stringify(result);}
+      if(pending.ack){
+        result[action==='like'?'liked':action==='bookmark'?'bookmarked':'reposted']=pending.target;
+        result.target=pending.target;result.status='done';return JSON.stringify(result);
+      }
+    }
+    if(!node)return JSON.stringify(result);
     if(${start}){
       var selector=action==='like'?'[data-testid="like"],[data-testid="unlike"]':action==='bookmark'?
         '[data-testid="bookmark"],[data-testid="removeBookmark"]':'[data-testid="retweet"],[data-testid="unretweet"]';
       var button=node.querySelector(selector);
       if(!button||button.disabled)return JSON.stringify(result);
-      window.__otMediaAction={id:result.requestId,postId:result.postId,action:action,initial:action==='like'?result.liked:action==='bookmark'?result.bookmarked:result.reposted,confirmed:false,ack:false,failed:false};
+      var initial=action==='like'?result.liked:action==='bookmark'?result.bookmarked:result.reposted;
+      var target=${target === undefined ? 'undefined' : String(target)};
+      if(action!=='quote'&&typeof initial!=='boolean')return JSON.stringify(result);
+      if(typeof target!=='boolean')target=!initial;
+      result.target=target;
+      if(action!=='quote'&&initial===target){result.status='done';return JSON.stringify(result);}
+      window.__otMediaAction={id:result.requestId,postId:result.postId,action:action,owner:window.__otMediaOwner(),
+        target:target,confirmed:false,ack:false,failed:false,sent:false};
       button.click();result.status='pending';return JSON.stringify(result);
     }
-    var pending=window.__otMediaAction;
-    if(!pending||pending.id!==result.requestId)return JSON.stringify(result);
-    if(pending.failed){result.status='failed';return JSON.stringify(result);}
+    if(!pending||pending.id!==result.requestId||pending.action!==action||pending.owner!==window.__otMediaOwner())return JSON.stringify(result);
+    result.target=pending.target;
     if(action==='quote'){
       var link=document.querySelector('[role="menu"] a[href*="/compose/"],[data-testid="Dropdown"] a[href*="/compose/"]');
       if(link){result.status='quote';result.quoteUrl=link.href;}else result.status='pending';
@@ -112,8 +189,7 @@ export function mediaActionScript(postId: string, requestId: number, action: str
       var confirm=document.querySelector('[data-testid="retweetConfirm"],[data-testid="unretweetConfirm"]');
       if(confirm){pending.confirmed=true;confirm.click();}
     }
-    var current=action==='like'?result.liked:action==='bookmark'?result.bookmarked:result.reposted;
-    result.status=pending.ack&&typeof current==='boolean'&&current!==pending.initial?'done':'pending';
+    result.status='pending';
     return JSON.stringify(result);
   })()`;
 }
@@ -153,6 +229,18 @@ export function resolveMedia(source: string): MediaAddress | undefined {
   return { id: match[1], source: source, candidates: candidates };
 }
 
+/** 路由和内容就绪后恢复位置，虚拟列表未展开时由宿主继续等待。 */
+export function restoreMediaOriginScript(origin: MediaOrigin): string {
+  return `(function(origin){
+    if(String(location.href)!==origin.url)return 'pending';
+    window.scrollTo(origin.x,origin.y);
+    var node=origin.scrollSelector?document.querySelector(origin.scrollSelector):null;
+    if(origin.scrollSelector&&!node)return 'pending';
+    if(node){node.scrollTop=origin.scrollTop;node.scrollLeft=origin.scrollLeft;}
+    return Math.abs(window.scrollY-origin.y)<=1&&(!node||Math.abs(node.scrollTop-origin.scrollTop)<=1)?'restored':'pending';
+  })(` + JSON.stringify(origin) + ')';
+}
+
 /** 先确认原生层接收成功再阻断网页；同帖引用卡片不会混入当前相册。 */
 export const MEDIA_CLICK_SCRIPT: string = `(function(){
   if(window.__otMediaHooked)return;
@@ -171,36 +259,57 @@ export const MEDIA_CLICK_SCRIPT: string = `(function(){
       return;
     }
     var photo=target&&target.closest('[data-testid="tweetPhoto"]');
-    var link=photo&&photo.closest('a[href]');
-    if(!photo||!link||!window.otNative||!window.otNative.onImages)return;
+    var link=target&&target.closest('a[href]');
+    if(!link&&photo)link=photo.closest('a[href]');
+    if(!link||!window.otNative||!window.otNative.onImages)return;
     var route=new URL(link.href,location.href);
-    var match=route.pathname.match(/^\\/[^/]+\\/status\\/(\\d+)\\/photo\\/\\d+$/);
+    var match=route.pathname.match(/^\\/(?:[A-Za-z0-9_]{1,15}|i\\/web)\\/status\\/(\\d+)\\/photo\\/([1-4])$/);
     if(!match)return;
-    var scope=photo.closest('article[data-testid="tweet"]')||photo;
+    var node=link.closest('article[data-testid="tweet"]');
+    var scope=node||link.closest('main')||link;
     var links=Array.from(scope.querySelectorAll('a[href]'));
-    if(scope===photo)links=[link];
-    var urls=[];
+    if(scope===link)links=[link];
+    var photos=[];
     links.forEach(function(a){
       var p=new URL(a.href,location.href).pathname;
-      if(!new RegExp('^/[^/]+/status/'+match[1]+'/photo/[0-9]+$').test(p))return;
+      var slot=new RegExp('^/(?:[A-Za-z0-9_]{1,15}|i/web)/status/'+match[1]+'/photo/([1-4])$').exec(p);
+      if(!slot)return;
+      if(node&&a.closest('article[data-testid="tweet"]')!==node)return;
       var img=a.querySelector('[data-testid="tweetPhoto"] img')||a.querySelector('img');
       var src=img&&(img.currentSrc||img.src);
-      if(src&&/^https:\\/\\/pbs\\.twimg\\.com\\/media\\//.test(src)&&urls.indexOf(src)<0)urls.push(src);
+      if(src&&/^https:\\/\\/pbs\\.twimg\\.com\\/media\\//.test(src)&&
+        !photos.some(function(item){return item.slot===Number(slot[1])||item.src===src;}))photos.push({slot:Number(slot[1]),src:src});
     });
-    var image=photo.querySelector('img');
+    photos.sort(function(a,b){return a.slot-b.slot;});
+    var urls=photos.map(function(item){return item.src;});
+    var image=link.querySelector('img');
     var index=image?urls.indexOf(image.currentSrc||image.src):-1;
     if(index<0||urls.length>4)return;
-    var node=scope.closest('article[data-testid="tweet"]');
-    var payload={urls:urls,index:index};
+    var payload={urls:urls,index:index,postId:match[1],
+      postUrl:route.origin+route.pathname.replace(/\\/photo\\/\\d+$/,'')};
     if(node){
       var like=node.querySelector('[data-testid="like"],[data-testid="unlike"]');
       var bookmark=node.querySelector('[data-testid="bookmark"],[data-testid="removeBookmark"]');
       var repost=node.querySelector('[data-testid="retweet"],[data-testid="unretweet"]');
-      payload.postId=match[1];payload.postUrl=route.origin+route.pathname.replace(/\\/photo\\/\\d+$/,'');
       if(like)payload.liked=like.dataset.testid==='unlike';
       if(bookmark)payload.bookmarked=bookmark.dataset.testid==='removeBookmark';
       if(repost)payload.reposted=repost.dataset.testid==='unretweet';
       window.__otMediaPost={id:match[1],node:node};
+    }
+    if(String(location.href)!==payload.postUrl){
+      var origin={url:String(location.href),x:window.scrollX,y:window.scrollY,scrollSelector:'',scrollTop:0,scrollLeft:0};
+      for(var parent=link.parentElement;parent&&parent!==document.scrollingElement;parent=parent.parentElement){
+        var style=getComputedStyle(parent);
+        if(!/(auto|scroll)/.test(style.overflowY)||parent.scrollHeight<=parent.clientHeight)continue;
+        var path=[],part=parent;
+        while(part){
+          var segment=part.tagName.toLowerCase();
+          if(part.parentElement)segment+=':nth-child('+(Array.prototype.indexOf.call(part.parentElement.children,part)+1)+')';
+          path.unshift(segment);part=part.parentElement;
+        }
+        origin.scrollSelector=path.join('>');origin.scrollTop=parent.scrollTop;origin.scrollLeft=parent.scrollLeft;break;
+      }
+      payload.origin=origin;
     }
     if(window.otNative.onImages(JSON.stringify(payload))===true){
       e.preventDefault();e.stopImmediatePropagation();

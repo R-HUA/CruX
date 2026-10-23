@@ -23,7 +23,13 @@ export const WEB_RESPONSE_SCRIPT: string = `(function(){
   }
   window.__otReadAccount=function(){
     var id=currentOwner(),account=window.__otResponseAccount;
-    return id&&account&&account.id===id?account.handle:'';
+    if(!id)return '';
+    if(account&&account.id===id)return account.handle;
+    var initial=window.__INITIAL_STATE__;
+    // 初始化数据可能残留在切换账号后的文档中，必须与当前会话一致。
+    if(!initial||!initial.session||initial.session.user_id!==id)return '';
+    var users=initial.entities&&initial.entities.users;
+    return userHandle(users&&users.entities&&users.entities[id]);
   };
   window.__otBeginPost=function(handle){
     if(!/^[A-Za-z0-9_]{1,15}$/.test(handle))return 0;
@@ -53,7 +59,7 @@ export const WEB_RESPONSE_SCRIPT: string = `(function(){
     return context;
   }
   function userHandle(user){
-    var handle=user&&((user.core&&user.core.screen_name)||(user.legacy&&user.legacy.screen_name));
+    var handle=user&&((user.core&&user.core.screen_name)||(user.legacy&&user.legacy.screen_name)||user.screen_name);
     return typeof handle==='string'&&/^[A-Za-z0-9_]{1,15}$/.test(handle)?handle:'';
   }
   function readAccount(data,id,request){

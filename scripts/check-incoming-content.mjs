@@ -84,7 +84,7 @@ const opened=[],notices=[];
 const state={incomingContent:{kind:'compose',value:'文字'},webControllerReady:false,incomingPageReady:false,
   modalBlocksNetworkReload:()=>false,fullScreen:false,
   composer:{openingCompose:false,openCompose:value=>opened.push(value)},toast:value=>notices.push(value),
-  navigation:{loadWeb(value,keepProfile,allowDocumentLoad){assert.equal(keepProfile,false);assert.equal(allowDocumentLoad,true);opened.push(value);}},
+  navigation:{loadWeb(value,...options){assert.deepEqual(options,[],'已有文档的站内链接不允许文档回退');opened.push(value);}},
   controller:{loadUrl(){throw Error('必须先尝试页内导航');}}};
 consume.call(state);assert.equal(state.incomingContent.value,'文字');
 state.webControllerReady=true;consume.call(state);assert.equal(opened.length,0);
