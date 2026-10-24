@@ -588,6 +588,7 @@
     {"name":"settings_font","value":"حجم النص"},
     {"name":"settings_display","value":"العرض"},
     {"name":"settings_original","value":"تحميل الصور الأصلية في العارض"},
+    {"name":"settings_notification_badge","value":"إظهار شارة الإشعارات"},
     {"name":"settings_tabs","value":"عناصر التنقل"},
     {"name":"settings_tabs_limit","value":"يمكن إظهار ما يصل إلى 5 عناصر فقط"},
     {"name":"settings_doh","value":"تحليل أسماء النطاقات المشفر"},

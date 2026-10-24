@@ -19,6 +19,7 @@ export struct NativeSettingsPage {
   @Prop floating: boolean = true;
   @Prop autoHide: boolean = true;
   @Prop originalImages: boolean = true;
+  @Prop showNotificationBadge: boolean = true;
   @Prop enabledTabs: number[] = [0, 1, 2, 3, 4];
   @Prop tabOrder: number[] = [0, 1, 2, 3, 5, 4];
   @Prop customUa: string = '';
@@ -311,6 +312,7 @@ export struct NativeSettingsPage {
         }.padding(S16).width('100%')
       }.height(undefined)
       this.toggleRow($r('app.string.settings_original'), this.originalImages, 'original_images')
+      this.toggleRow($r('app.string.settings_notification_badge'), this.showNotificationBadge, 'show_notification_badge')
     }.divider({ strokeWidth: 0.5, startMargin: S16, endMargin: S16 })
   }
 

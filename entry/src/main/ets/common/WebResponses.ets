@@ -17,6 +17,7 @@ export const WEB_RESPONSE_SCRIPT: string = `(function(){
     var next=cookieOwner();
     if(next!==owner){
       owner=next;accountEpoch++;window.__otBadgeEpoch++;window.__otBadgeCounts=null;window.__otResponseAccount=null;
+      window.__otNotificationState=null;window.__otNotificationReported=null;
       if(post)window.__otPostState='unknown';
     }
     return owner;
@@ -52,7 +53,8 @@ export const WEB_RESPONSE_SCRIPT: string = `(function(){
   }
   function start(op){
     var id=currentOwner(),request=++sequence;
-    var context={operation:op,owner:id,accountEpoch:accountEpoch,epoch:window.__otBadgeEpoch,sequence:request,post:null};
+    var context={operation:op,owner:id,accountEpoch:accountEpoch,epoch:window.__otBadgeEpoch,sequence:request,
+      notificationState:window.__otNotificationState,post:null};
     if(op==='CreateTweet'&&post&&window.__otPostState==='submitted'&&!post.request){
       post.request=request;context.post=post;
     }
@@ -107,6 +109,9 @@ export const WEB_RESPONSE_SCRIPT: string = `(function(){
       var counts=data.data.viewer_v2.user_results.result.badge_counts;
       var n=counts.ntab_unread_count,m=counts.xchat_unread_count;
       if(!Number.isSafeInteger(n)||n<0||!Number.isSafeInteger(m)||m<0)throw new Error('Invalid badge counts');
+      // 请求发出后网页已更新通知计数时，旧响应仍可更新私信，但不能恢复旧通知。
+      var notificationState=window.__otNotificationState;
+      if(notificationState&&context.notificationState!==notificationState)n=notificationState.count;
       badgeSequence=context.sequence;
       window.__otBadgeCounts={notifications:n,messages:m,time:Date.now()};
     }catch(error){warn(context.operation);}

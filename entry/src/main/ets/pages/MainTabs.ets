@@ -175,6 +175,7 @@ struct MainTabs {
   @State themeMode: string = 'system';
   @State fontScale: number = 100;
   @State originalImages: boolean = true;
+  @State showNotificationBadge: boolean = true;
   @State enabledTabs: number[] = DEFAULT_TABS.slice();
   @State tabOrder: number[] = ALL_TAB_IDS.slice();
   @State materialLevel: string = 'adaptive';
@@ -416,6 +417,7 @@ struct MainTabs {
         this.fontScale = await prefs.get('font_scale', 100) as number;
         ctx.getApplicationContext().setFontSizeScale(this.fontScale / 100);
         this.originalImages = await prefs.get('original_images', true) as boolean;
+        this.showNotificationBadge = await prefs.get('show_notification_badge', true) as boolean;
         this.enabledTabs = JSON.parse(await prefs.get('enabled_tabs', JSON.stringify(DEFAULT_TABS)) as string) as number[];
         const savedOrder = await prefs.get('tab_order', '') as string;
         if (savedOrder !== '') {
@@ -923,7 +925,8 @@ struct MainTabs {
     NativeSettingsPage({ page: $settingsPage, scroller: this.settingsScroller, handle: this.account.ownHandle, displayName: this.account.accountName,
       bio: this.account.accountBio, avatar: this.account.avatarPath, accountError: this.account.accountError,
       themeMode: this.themeMode, materialLevel: this.materialLevel, fontScale: this.fontScale, floating: this.floatingBar, autoHide: this.autoHideBar,
-      originalImages: this.originalImages, enabledTabs: this.enabledTabs, tabOrder: this.tabOrder, customUa: this.customUa,
+      originalImages: this.originalImages, showNotificationBadge: this.showNotificationBadge,
+      enabledTabs: this.enabledTabs, tabOrder: this.tabOrder, customUa: this.customUa,
       desktop: this.desktopMode, desktopLocked: deviceInfo.deviceType === '2in1', rawWeb: this.rawWeb,
       topOffset: this.topInset + HEADER_HEIGHT, bottomOffset: this.bottomChromeHeight(),
       tabToggleGeneration: this.tabToggleGeneration,
@@ -1483,6 +1486,7 @@ struct MainTabs {
       if (key === FLOATING_BAR_KEY) { this.floatingBar = value; }
       if (key === AUTO_HIDE_BAR_KEY) { this.autoHideBar = value; }
       if (key === 'original_images') { this.originalImages = value; }
+      if (key === 'show_notification_badge') { this.showNotificationBadge = value; }
       if (key === DESKTOP_MODE_KEY) {
         this.desktopMode = value;
         this.applyUserAgent();
@@ -2123,7 +2127,8 @@ struct MainTabs {
 
   @Builder
   nativeTabs() {
-    NativeBottomBar({ currentIndex: this.currentIndex, notifications: this.unread.unreadNotifications,
+    NativeBottomBar({ currentIndex: this.currentIndex,
+      notifications: this.showNotificationBadge ? this.unread.unreadNotifications : 0,
       messages: this.unread.unreadMessages, wide: this.isWide,
       labels: [this.tabLabel(0), this.tabLabel(1), this.tabLabel(2), this.tabLabel(3), this.tabLabel(4), this.tabLabel(5)],
       enabledTabs: this.enabledTabs,

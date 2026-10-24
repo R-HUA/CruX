@@ -715,17 +715,29 @@ console.log('PASS: SPA final links, History once, stale content, empty pages, ro
 let cssWrites=0, cssText='', authVisible=false;
 const style={get textContent(){return cssText;},set textContent(value){cssText=value;cssWrites++;}};
 const location={pathname:'/home',href:'https://x.com/home'};
-let chromeNotifications=0,observedOptions;
+let chromeNotifications=0,observedOptions,notificationCount,chromeMutation,chromePass;
 const chromeContext={window:{location,addEventListener(){},otNative:{onUrlChange(){chromeNotifications++;}}},location,
   history:{pushState(){},replaceState(){}},
   document:{documentElement:{},getElementById:()=>style,
     querySelector:()=>authVisible?{}:null,
-    querySelectorAll:()=>[]},
-  MutationObserver:class{observe(_root,options){observedOptions=options;}disconnect(){}},setTimeout(){},clearTimeout(){}};
+    querySelectorAll:selector=>notificationCount!==undefined&&selector.includes('AppTabBar_Notifications_Link')?
+      [{getAttribute:()=>notificationCount?`Notifications (${notificationCount} unread)`:'Notifications',querySelectorAll:()=>[]}]:[]},
+  MutationObserver:class{constructor(callback){chromeMutation=callback;}observe(_root,options){observedOptions=options;}disconnect(){}},
+  setTimeout(callback){chromePass=callback;return 1;},clearTimeout(){}};
 vm.runInNewContext(scripts.chromeScript(true,true,location.href),chromeContext);
 assert.match(cssText,/TopNavBar/);assert.match(cssText,/FloatingActionButtons_Tweet_Button/);
 const initialWrites=cssWrites;
 chromeContext.window.__otApplyTop();assert.equal(cssWrites,initialWrites);
+assert.ok(observedOptions.attributeFilter.includes('aria-label'));
+notificationCount=4;chromeMutation();chromePass();
+const badgeNotices=chromeNotifications;
+chromeContext.window.__otApplyTop();assert.equal(chromeNotifications,badgeNotices,'计数未变化时不重复回调原生');
+notificationCount=0;chromeMutation();chromePass();
+assert.equal(chromeNotifications,badgeNotices+1,'通知标签清零时经现有观察器通知原生重读');
+chromeContext.window.__otApplyTop();assert.equal(chromeNotifications,badgeNotices+1);
+notificationCount=1;chromeMutation();chromePass();
+assert.equal(chromeNotifications,badgeNotices+2,'新通知到达时重新通知原生');
+notificationCount=undefined;
 authVisible=true;chromeContext.window.__otApplyTop();assert.equal(cssText,'');
 // 首页进入详情时，即使原生回调尚未返回或旧回调迟到，也不能隐藏网页返回和标题。
 authVisible=false;location.pathname='/alice/status/123';location.href='https://x.com/alice/status/123';
@@ -834,7 +846,7 @@ chromeContext.window.__otPass();assert.equal(chromeNotifications,beforeAvatar+1)
 chromeContext.document.querySelectorAll=()=>[];
 assert.equal(observedOptions.attributes,true);
 assert.equal(observedOptions.characterData,true);
-assert.deepEqual(Array.from(observedOptions.attributeFilter),['src','srcset','style','href','aria-selected','aria-expanded','aria-hidden','hidden']);
+assert.deepEqual(Array.from(observedOptions.attributeFilter),['src','srcset','style','href','aria-label','aria-selected','aria-expanded','aria-hidden','hidden']);
 avatarContext.location.pathname='/alice';
 avatarContext.document.querySelectorAll=selector=>selector==='a[href]'?
   [{getAttribute:()=>'/alice/photo',...avatarRoot(ownAvatar)},
@@ -1086,11 +1098,12 @@ assert.equal(syncTask,undefined);assert.equal(composing.composeReady,false);
 console.log('PASS: webpage search/chat headers, home-only compose, webpage validation, stale draft results, theme and background observers');
 
 // 使用生产导航和持久化方法验证设置来源、动态底栏及主页选中态。
-const clientMethods=['setTabEnabled','syncFromUrl','openSettings','leaveSettings','openSettingsRoute'].map(name=>
+const clientMethods=['setTabEnabled','syncFromUrl','openSettings','leaveSettings','openSettingsRoute','setAppearance'].map(name=>
   mainSource.match(new RegExp('^  private (?:async )?'+name+'\\([\\s\\S]*?^  \\}','m'))[0]).join('\n');
 const ClientPage=vm.runInNewContext(stripTypeScriptTypes('class ClientPage{'+clientMethods+'};ClientPage'),{
   TWITTER_ROUTES:['https://x.com/home'],TWITTER_BASE:'https://x.com',routeIndexForUrl:routes.routeIndexForUrl,
   profileHandleForUrl:routes.profileHandleForUrl,pathOf:url=>new URL(url).pathname,$r:value=>value,
+  FLOATING_BAR_KEY:'floating_bar',AUTO_HIDE_BAR_KEY:'auto_hide_bar',DESKTOP_MODE_KEY:'desktop_mode',
   hilog:{error(){}},DOMAIN:0,TAG:'test'
 });
 const client=new ClientPage();const saved=[];let failedSave=false;let notices=0;
@@ -1117,6 +1130,39 @@ await client.setTabEnabled(2,false);await client.setTabEnabled(5,true);
 assert.deepEqual(Array.from(client.enabledTabs),[0,1,3,5,4]);
 await client.setTabEnabled(0,false);assert.deepEqual(Array.from(client.enabledTabs),[0,1,3,5,4]);
 failedSave=true;await client.setTabEnabled(3,false);assert.deepEqual(Array.from(client.enabledTabs),[0,1,3,5,4]);
+
+// 使用生产保存、启动读取和底栏绑定验证开关，不修改真实偏好。
+const readBadgeSetting=mainSource.match(/this\.showNotificationBadge = await prefs\.get\('show_notification_badge',[^;]+;/)[0];
+const readBadge=vm.runInNewContext(stripTypeScriptTypes('(async function(prefs){'+readBadgeSetting+'})'));
+const badgePrefs=new Map();
+const prefs={get:async(key,fallback)=>badgePrefs.has(key)?badgePrefs.get(key):fallback};
+const restarted={};await readBadge.call(restarted,prefs);
+assert.equal(restarted.showNotificationBadge,true,'新安装默认显示通知红点');
+client.showNotificationBadge=true;client.syncChromeInsets=()=>{};
+const originalPutPreference=client.putPreference;
+client.putPreference=async(key,value)=>{if(failedSave)throw Error('disk');badgePrefs.set(key,value);};
+const badgeFailureNotices=notices;
+await client.setAppearance('show_notification_badge',false);
+assert.equal(client.showNotificationBadge,true,'保存失败保持原显示设置');
+assert.equal(notices,badgeFailureNotices+1);
+failedSave=false;await client.setAppearance('show_notification_badge',false);
+assert.equal(client.showNotificationBadge,false);
+await readBadge.call(restarted,prefs);assert.equal(restarted.showNotificationBadge,false,'重启保留关闭设置');
+const tabBinding=mainSource.match(/NativeBottomBar\(\{([\s\S]*?)\}\)/)[1];
+const badgeBindings=Object.fromEntries(['notifications','messages','wide'].map(key=>[key,
+  new Function('return '+tabBinding.match(new RegExp(key+': ([^,\\n]+)'))[1])]));
+client.unread={unreadNotifications:4,unreadMessages:2};
+for(const wide of [false,true]){
+  client.isWide=wide;
+  assert.equal(badgeBindings.notifications.call(client),0,'底栏与侧栏均隐藏通知红点');
+  assert.equal(badgeBindings.messages.call(client),2,'开关不影响私信计数');
+  assert.equal(badgeBindings.wide.call(client),wide);
+}
+assert.equal(client.unread.unreadNotifications,4,'关闭显示不清除未读计数');
+await client.setAppearance('show_notification_badge',true);
+assert.equal(badgeBindings.notifications.call(client),4,'重新开启显示当前未读计数');
+await readBadge.call(restarted,prefs);assert.equal(restarted.showNotificationBadge,true);
+client.putPreference=originalPutPreference;failedSave=true;
 
 const appearance=load('ClientSettings',['appearanceScript','accountDetailsScript','PLATFORM_SETTINGS']);
 assert.equal(appearance.PLATFORM_SETTINGS.length,6);

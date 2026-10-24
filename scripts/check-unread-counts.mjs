@@ -212,6 +212,34 @@ const badClone = window.fetch('/i/api/graphql/current/ViewerBadgeCounts');
 const unclonable = b.reply(4,null,{clone(){throw Error('used body');}});
 assert.equal(await badClone,unclonable);assert.equal(b.stats.warnings.length,5);
 
+// 网页清零覆盖缓存和在途响应；私信仍接受原有接口计数。
+const cleared = browser();
+cleared.xhr().complete(response(4, 2));
+const staleXhr = cleared.xhr();
+const staleFetch = cleared.window.fetch('/i/api/graphql/current/ViewerBadgeCounts');
+const readNotifications = count => run(script, {
+  [NOTIFICATIONS]: [element({ attrs: { 'aria-label': count ? `Notifications (${count} unread)` : 'Notifications' } })]
+}, '', cleared.window);
+assert.equal(readNotifications(0), '0/2', '网页零值必须覆盖一分钟内的旧缓存');
+assert.equal(run(script, {}, '(4) Home / X', cleared.window), '0/2', '离开通知页不能恢复旧缓存');
+staleXhr.complete(response(4, 3));
+assert.equal(run(script, {}, '', cleared.window), '0/3', '旧 XHR 不能恢复通知，但仍更新私信');
+cleared.reply(0, response(4, 4));await staleFetch;await settleResponses();
+assert.equal(run(script, {}, '', cleared.window), '0/4', '旧 fetch 不能恢复通知，但仍更新私信');
+cleared.window.__otBadgeCounts.time = Date.now() - 60001;
+assert.equal(run(script, {}, '(4) Home / X', cleared.window), '-1/-1', '入口缺失不能用旧标题撤销已确认状态');
+cleared.xhr().complete(response(1, 5));
+assert.equal(run(script, {}, '', cleared.window), '1/5', '后续新接口响应仍能报告新通知');
+assert.equal(readNotifications(2), '2/5', '网页通知增加后仍能显示');
+const previousAccountRead = cleared.xhr();
+cleared.document.cookie = 'twid=u%3D7';
+cleared.window.__otReadAccount();
+assert.equal(cleared.window.__otNotificationState, null, '账号切换清除网页通知状态');
+previousAccountRead.complete(response(8, 8));
+assert.equal(run(script, {}, '', cleared.window), '-1/-1', '旧账号响应不能恢复缓存');
+cleared.xhr().complete(response(3, 1));
+assert.equal(run(script, {}, '', cleared.window), '3/1');
+
 const user = (id,handle) => ({__typename:'User',rest_id:id,core:{screen_name:handle}});
 const initialAccount = (id,entities) => ({session:{user_id:id},entities:{users:{entities}}});
 const initialized=browser();
@@ -323,10 +351,18 @@ await settle();
 assert.equal(session.unreadNotifications, 4);
 assert.equal(session.unreadMessages, 2);
 
+let finishOldRead;
+runJavaScript = () => new Promise(resolve => { finishOldRead = resolve; });
+session.refreshBadges();
+runJavaScript = async () => '"0/2"';
+session.refreshBadges();await settle();
+finishOldRead('"4/2"');await settle();
+assert.equal(session.unreadNotifications, 0, '同一路由较早的读取不能覆盖最新已读结果');
+
 runJavaScript = async () => '"-1/3"';
 session.refreshBadges();
 await settle();
-assert.equal(session.unreadNotifications, 4, 'unpublished notification count must retain the previous badge');
+assert.equal(session.unreadNotifications, 0, 'unpublished notification count must retain the previous badge');
 assert.equal(session.unreadMessages, 3);
 assert.equal(timeouts.size, 1, 'partial counts schedule a bounded reread');
 
@@ -339,10 +375,21 @@ assert.equal(intervals.size, 0, 'backgrounding clears the periodic badge timer')
 assert.equal(timeouts.size, 0, 'backgrounding clears the retry timer');
 finishRead('"9/9"');
 await settle();
-assert.equal(session.unreadNotifications, 4, 'a read finishing in background cannot replace the badge');
+assert.equal(session.unreadNotifications, 0, 'a read finishing in background cannot replace the badge');
 assert.equal(session.unreadMessages, 3);
 
 session.setBackground(false);
+runJavaScript = () => new Promise(resolve => { finishRead = resolve; });
+session.refreshBadges();
+session.setBackground(true);session.setBackground(false);
+finishRead('"4/3"');await settle();
+assert.equal(session.unreadNotifications, 0, '后台前的读取即使在恢复后返回也必须失效');
+runJavaScript = () => new Promise(resolve => { finishRead = resolve; });
+session.refreshBadges();const finishAccountRead = finishRead;
+runJavaScript = async () => '';session.resetAccount();
+finishAccountRead('"4/3"');await settle();
+assert.equal(session.unreadNotifications, 0, '同名账号重置后不能接受旧读取');
+assert.equal(session.unreadMessages, 0);
 runJavaScript = async () => '"-1/-1"';
 session.refreshBadges();
 await settle();
@@ -355,8 +402,8 @@ assert.equal(intervals.size, 0, 'disposing clears the periodic badge timer');
 assert.equal(timeouts.size, 0, 'disposing clears the pending retry timer');
 finishDisposedRead('"8/8"');
 await settle();
-assert.equal(session.unreadNotifications, 4, 'a read finishing after disposal cannot replace the badge');
-assert.equal(session.unreadMessages, 3);
+assert.equal(session.unreadNotifications, 0, 'a read finishing after disposal cannot replace the badge');
+assert.equal(session.unreadMessages, 0);
 console.log('UnreadSession production flow and lifecycle checks passed.');
 console.log(failed === 0 ? '\nall cases passed' : `\n${failed} case(s) failed`);
 process.exit(failed === 0 ? 0 : 1);

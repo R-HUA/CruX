@@ -592,6 +592,7 @@
     {"name":"settings_font","value":"字体大小"},
     {"name":"settings_display","value":"显示"},
     {"name":"settings_original","value":"查看图片时默认加载原图"},
+    {"name":"settings_notification_badge","value":"显示通知红点"},
     {"name":"settings_tabs","value":"底栏功能"},
     {"name":"settings_tabs_limit","value":"最多显示五项"},
     {"name":"settings_doh","value":"加密域名解析"},

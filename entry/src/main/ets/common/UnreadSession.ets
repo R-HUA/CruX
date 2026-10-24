@@ -35,6 +35,7 @@ export class UnreadSession {
   private badgeTimer: number = -1;
   private badgeRetryTimer: number = -1;
   private badgeRetries: number = 0;
+  private badgeReadGeneration: number = 0;
   private badgeShown: number = -1;
   private badgeSyncing: boolean = false;
   private badgeSyncTarget: string = '';
@@ -59,6 +60,7 @@ export class UnreadSession {
 
   /** 暂停只回收定时器，不把最后一次计数误清为零。 */
   stop(): void {
+    this.badgeReadGeneration++;
     if (this.badgeTimer !== -1) { clearInterval(this.badgeTimer); this.badgeTimer = -1; }
     if (this.badgeRetryTimer !== -1) { clearTimeout(this.badgeRetryTimer); this.badgeRetryTimer = -1; }
     if (this.notificationTimer !== -1) { clearTimeout(this.notificationTimer); this.notificationTimer = -1; }
@@ -77,6 +79,7 @@ export class UnreadSession {
 
   /** 账号或认证状态变化后，网页缓存和原生计数必须同时失效。 */
   resetAccount(resetLauncher: boolean = true): void {
+    this.badgeReadGeneration++;
     this.clearNetworkBadgeCounts();
     this.unreadNotifications = 0;
     this.unreadMessages = 0;
@@ -88,11 +91,15 @@ export class UnreadSession {
     if (!this.host.isControllerReady() || this.host.isRawWeb() || this.appBackground || !this.alive) { return; }
     const owner = this.host.owner();
     const pageUrl = this.host.url();
+    const generation = ++this.badgeReadGeneration;
     try {
       this.host.webScript(UNREAD_COUNTS_SCRIPT).then((raw: string) => {
-        if (this.appBackground || !this.alive || this.host.owner() !== owner || this.host.url() !== pageUrl) { return; }
+        if (generation !== this.badgeReadGeneration || this.appBackground || !this.alive ||
+          this.host.owner() !== owner || this.host.url() !== pageUrl) { return; }
         this.applyBadgeCounts(unquoteScriptResult(raw));
       }, (err: BusinessError) => {
+        if (generation !== this.badgeReadGeneration || this.appBackground || !this.alive ||
+          this.host.owner() !== owner || this.host.url() !== pageUrl) { return; }
         hilog.debug(DOMAIN, TAG, 'badge read failed: %{public}d %{public}s', err.code, err.message);
         this.retryBadgeRead();
       });
@@ -103,7 +110,8 @@ export class UnreadSession {
 
   private clearNetworkBadgeCounts(): void {
     if (!this.host.isControllerReady()) { return; }
-    this.host.webScript('window.__otBadgeEpoch=(window.__otBadgeEpoch||0)+1;window.__otBadgeCounts=null;')
+    this.host.webScript('window.__otBadgeEpoch=(window.__otBadgeEpoch||0)+1;window.__otBadgeCounts=null;' +
+      'window.__otNotificationState=null;window.__otNotificationReported=null;')
       .catch((err: BusinessError) => {
         hilog.warn(DOMAIN, TAG, 'event=badge_reset_failed code=%{public}d', err.code);
       });

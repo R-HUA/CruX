@@ -320,6 +320,10 @@ export function chromeScript(nativeNavigation: boolean, nativeHeader: boolean, u
     'var avatar=auth?"":' + accountAvatarScript('') + ';' +
     'if(avatar!==window.__otAccountAvatar){window.__otAccountAvatar=avatar;' +
     'if(avatar&&window.otNative)window.otNative.onUrlChange("main",String(location.href));}' +
+    'if(active){var unread=(' + UNREAD_COUNTS_SCRIPT + ').split("/")[0];' +
+    'if(unread!==""&&Number(unread)>=0&&unread!==window.__otNotificationReported){' +
+    'window.__otNotificationReported=unread;' +
+    'if(window.otNative)window.otNative.onUrlChange("main",String(location.href));}}' +
     PROFILE_LAYOUT_SCRIPT + '(active&&window.__otNativeHeader);};' +
     'window.__otOwn=function(){return ' + OWN_HANDLE_SCRIPT + ';};' +
     // x.com navigates like an app (history.pushState), which does not reload
@@ -355,7 +359,7 @@ export function chromeScript(nativeNavigation: boolean, nativeHeader: boolean, u
     'window.__otPass=function(){window.__otPend=0;try{' +
     'window.__otApplyTop&&window.__otApplyTop();' +
     '}catch(e){}};' +
-    'window.__otObserveOptions={childList:true,subtree:true,characterData:true,attributes:true,attributeFilter:["src","srcset","style","href","aria-selected","aria-expanded","aria-hidden","hidden"]};' +
+    'window.__otObserveOptions={childList:true,subtree:true,characterData:true,attributes:true,attributeFilter:["src","srcset","style","href","aria-label","aria-selected","aria-expanded","aria-hidden","hidden"]};' +
     'window.__otObs=new MutationObserver(function(){' +
     WEB_MODAL_SCRIPT + ';' +
     // 进入首页或替换加载占位时，裁剪先于下一帧；其余修饰仍合并到节流回调。
@@ -668,9 +672,9 @@ export function accountAvatarDiagScript(): string {
 export const UNREAD_COUNTS_SCRIPT: string =
   '(function(){try{' +
   'if(window.__otReadAccount)window.__otReadAccount();' +
-  // 响应只在一分钟内优先使用；站点未提供有效响应时继续读取原有页面入口。
+  // 通知入口会随已读状态更新，接口缓存只在入口缺失时补充通知计数。
   'var cached=window.__otBadgeCounts;' +
-  'if(cached&&Date.now()-cached.time<60000)return cached.notifications+"/"+cached.messages;' +
+  'var fresh=cached&&Date.now()-cached.time<60000;' +
   // An Arabic page formats counts with Arabic-Indic digits; normalise before
   // parsing so the number survives a localised page.
   'function dg(v){return String(v)' +
@@ -693,11 +697,15 @@ export const UNREAD_COUNTS_SCRIPT: string =
   // layout keeps them on the side navigation. Both are matched by href so a
   // renamed test id cannot break the read.
   'var n=cnt(\'a[href="/notifications"],[data-testid="AppTabBar_Notifications_Link"]\');' +
-  'var m=cnt(\'a[href="/messages"],a[href="/i/chat"],' +
+  'if(n>=0){' +
+  'if(!window.__otNotificationState||window.__otNotificationState.count!==n)window.__otNotificationState={count:n};' +
+  'if(cached)cached.notifications=n;' +
+  '}else if(fresh){n=cached.notifications;}' +
+  'var m=fresh?cached.messages:cnt(\'a[href="/messages"],a[href="/i/chat"],' +
   '[data-testid="AppTabBar_DirectMessage_Link"],[data-testid="AppTabBar_Messages_Link"]\');' +
   // x.com prefixes the notification count on every route it knows about:
   // "(3) Home / X". Only consulted when the navigation entry itself is missing.
-  'if(n<0){var tm=dg(document.title||"").match(/^\\((\\d{1,4})\\)/);if(tm){n=parseInt(tm[1],10);}}' +
+  'if(n<0&&!window.__otNotificationState){var tm=dg(document.title||"").match(/^\\((\\d{1,4})\\)/);if(tm){n=parseInt(tm[1],10);}}' +
   'return n+"/"+m;' +
   '}catch(e){return "";}})()';
 
