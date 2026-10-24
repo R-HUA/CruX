@@ -164,7 +164,7 @@ const goRoute=vm.runInNewContext(stripTypeScriptTypes('(async function(index){'+
   isTabRootPath:routes.isTabRootPath,routeIndexForUrl:routes.routeIndexForUrl,TWITTER_BASE:'https://x.com',TWITTER_ROUTES:['/home','/explore','/notifications','/i/chat'],scrollToTopScript:()=> 'scroll'});
 const navigations=[],scrolls=[];
 const navigationState={currentIndex:0,settingsOpen:false,settingsWeb:false,
-  account:{settingsReadGeneration:0,cancelProfileNavigation(){}},tick(){},
+  account:{settingsReadGeneration:0,cancelProfileNavigation(){}},tick(){},syncChromeInsets(){},
   navigation:{currentPath:'/settings',cancel(){},loadWeb:async url=>{navigations.push(url);return 'arrived';}},
   webScript:async value=>scrolls.push(value)};
 goRoute.call(navigationState,0);assert.deepEqual(navigations,['/home'],'二级页点击上次选中的标签仍须导航');
@@ -809,6 +809,61 @@ authVisible=true;chromeContext.window.__otApplyTop();assert.equal(cssText,'');
 authVisible=false;location.pathname='/unknown/path';location.href='https://x.com/unknown/path';
 chromeContext.history.pushState();assert.doesNotMatch(cssText,/--ot-top-inset|--ot-bottom-inset/);
 
+// 地址先变、内容后到达时，留白须等路由确认，并在设置覆盖层收起后匹配最终页面。
+{
+  const methods=['syncFromUrl','goRoute','leaveSettings','openSettingsRoute','showsNativeNavigation','overlaysWeb',
+    'bottomChromeHeight','topChromeHeight','overlayTopInset','isHomeRoot','syncChromeInsets','updateChromeFlag'].map(name=>
+    mainSource.match(new RegExp('^  private (?:async )?'+name+'\\([\\s\\S]*?^  \\}','m'))[0]).join('\n');
+  const settled=mainSource.match(/    routeSettled: (\(\) => \{[\s\S]*?\n    \}),/)[1];
+  const InsetPage=vm.runInNewContext(stripTypeScriptTypes('class InsetPage{'+methods+'\nrouteSettled='+settled+';};InsetPage'),{
+    ...routes,TWITTER_BASE:'https://x.com',TWITTER_ROUTES:['https://x.com/home','https://x.com/explore'],
+    isSecondaryUrl:url=>new URL(url).pathname.startsWith('/settings'),isSiteUrl:()=>true,
+    HEADER_HEIGHT:56,HEADER_CONTENT_LIFT:4,FLOATING_BAR_HEIGHT:58,BAR_HEIGHT:56,
+    chromeInsetsScript:scripts.chromeInsetsScript,chromeFlagScript:scripts.chromeFlagScript,
+    scrollToTopScript:()=>'',hilog:{error(){},warn(){}},DOMAIN:0,TAG:'test', $r:value=>value
+  });
+  for(const [start,target,entry,expectedTop,expectedBottom] of [
+    ['/home','/alice','settings',0,82],
+    ['/alice','/home','tab',77,82],
+    ['/alice','/home','back',77,82],
+    ['/home','/explore','tab',0,82],
+    ['/home','/settings/account','settings',95,0],
+    ['/alice','/home','direct',77,82]
+  ]){
+    const runtime=routeRuntime(start),values=new Map();let writes=0;
+    const insetContext={window:{innerWidth:400,addEventListener(){}},location:runtime.location,
+      document:{documentElement:{style:{setProperty(key,value){values.set(key,value);writes++;}}}}};
+    const page=new InsetPage();
+    Object.assign(page,{settingsOpen:entry!=='direct',settingsWeb:false,currentIndex:entry==='direct'?0:4,
+      settingsOrigin:0,settingsOriginUrl:'https://x.com/home',enabledTabs:[0,1,2,3,4],
+      webControllerReady:true,rawWeb:false,webWidth:400,topInset:39,bottomInset:24,homeTabsHeight:28,
+      floatingBar:true,isWide:false,pageAlive:true,appBackground:false,
+      account:{settingsReadGeneration:0,cancelProfileNavigation:async()=>{}},controller:runtime.controller,
+      tick(){},resetProfileLayout(){},resetChromeScroll(){},syncHeaderBlur(){},logChromeResult(){},
+      schedulePageStateRead(){},toast(){throw Error('导航应成功');},webUrl:()=>runtime.location.href,
+      webScript:async script=>vm.runInNewContext(script,insetContext)});
+    page.navigation=navigationFor(page);
+    page.navigation.host.routeSettled=page.routeSettled;
+    page.syncFromUrl(runtime.location.href);page.syncChromeInsets();
+    const initialWrites=writes;
+    runtime.window.addEventListener('popstate',()=>{
+      page.syncFromUrl(runtime.location.href);page.updateChromeFlag(runtime.location.href);
+    });
+    const pending=entry==='settings'?page.openSettingsRoute(target):entry==='back'?page.leaveSettings():
+      entry==='tab'?page.goRoute(target==='/home'?0:1):page.navigation.loadWeb('https://x.com'+target);
+    await new Promise(resolve=>setTimeout(resolve,0));
+    assert.equal(new URL(runtime.location.href).pathname,target);
+    assert.equal(page.navigation.isNavigating,true);
+    assert.equal(page.navigation.currentPath,start,'内容未确认时原生路由仍属于来源页');
+    const pendingWrites=writes;
+    runtime.render(target);await pending;
+    assert.equal(values.get('--ot-top-inset'),expectedTop+'px',entry+': '+start+' → '+target);
+    assert.equal(values.get('--ot-bottom-inset'),expectedBottom+'px',entry+': 底部占位也须匹配最终页面');
+    assert.equal(pendingWrites,initialWrites,'导航期间不按旧页面类型重写目标页留白');
+    assert.equal(page.settingsOpen,false);
+  }
+}
+
 // 头像只能来自账号控件或确认本人的资料头像，不读取大尺寸的时间线或他人头像。
 const ownAvatar='https://pbs.twimg.com/profile_images/123/own_normal.jpg';
 const otherAvatar='https://pbs.twimg.com/profile_images/456/other.jpg';
@@ -1108,6 +1163,7 @@ const ClientPage=vm.runInNewContext(stripTypeScriptTypes('class ClientPage{'+cli
 });
 const client=new ClientPage();const saved=[];let failedSave=false;let notices=0;
 Object.assign(client,{enabledTabs:[0,1,2,3,4],currentIndex:0,settingsReadGeneration:0,
+  syncChromeInsets(){},
   account:{discovering:false,settingsReadGeneration:0,accountName:'Alice',accountLoading:false,accountError:false,
     cancelProfileNavigation(){},readSettingsAccount(){this.settingsReads=(this.settingsReads||0)+1;}},incomingPageReady:true,resetChromeScroll(){},resetProfileLayout(){},
   putPreference:async(key,value)=>{if(failedSave)throw Error('disk');saved.push([key,value]);},toast(){notices++;}});
@@ -1197,6 +1253,7 @@ const NavTestPage = vm.runInNewContext(stripTypeScriptTypes('class NavTestPage {
 NavTestPage.prototype.webControllerReady=true;
 NavTestPage.prototype.webScript=async function(script){return this.controller.runJavaScript(script);};
 NavTestPage.prototype.webCanGoBack=function(){return this.controller.accessBackward();};
+NavTestPage.prototype.syncChromeInsets=function(){};
 
 const accountMethods=['closeWebDrawer','cancelProfileNavigation','acceptHandle','finishDiscover'].map(accountMethod).join('\n');
 const AccountPage=vm.runInNewContext(stripTypeScriptTypes('class AccountPage{'+accountMethods+'};AccountPage'),{

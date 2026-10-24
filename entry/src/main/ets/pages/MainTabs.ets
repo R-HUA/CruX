@@ -232,6 +232,7 @@ struct MainTabs {
     cancelProfileNavigation: () => this.account.cancelProfileNavigation(),
     routeSettled: () => {
       this.syncFromUrl(this.webUrl());
+      this.updateChromeFlag(this.navigation.currentUrl);
       this.schedulePageStateRead();
     },
     toast: (message: ResourceStr) => this.toast(message)
@@ -778,6 +779,7 @@ struct MainTabs {
     else if (wasSettings) { return; }
     const actualIndex = routeIndexForUrl(TWITTER_BASE + this.navigation.currentPath);
     this.currentIndex = result === 'arrived' ? index : actualIndex >= 0 ? actualIndex : previousIndex;
+    this.syncChromeInsets();
   }
 
   /** 原生设置覆盖常驻网页，资料读取与用户离开共用代际取消。 */
@@ -808,6 +810,7 @@ struct MainTabs {
     this.settingsOpen = false;
     this.settingsWeb = false;
     this.currentIndex = this.settingsOrigin;
+    this.syncChromeInsets();
   }
 
   private async openSettingsRoute(path: string): Promise<void> {
@@ -822,6 +825,7 @@ struct MainTabs {
     this.settingsWebRoot = target;
     this.settingsWeb = true;
     this.settingsOpen = false;
+    this.syncChromeInsets();
   }
 
   private async saveClientSetting(key: string, value: preferences.ValueType): Promise<void> {
@@ -1459,6 +1463,8 @@ struct MainTabs {
   }
 
   private syncChromeInsets(): void {
+    // 目标内容确认前仍保留来源页面类型，不能据此改写目标页留白。
+    if (this.navigation.isNavigating) { return; }
     if (!this.webControllerReady || this.rawWeb || !isSiteUrl(this.navigation.currentUrl) || this.webWidth <= 0) { return; }
     if (this.navigation.viewingHandle !== '') { this.syncHeaderBlur(this.lastScrollY); }
     this.webScript(chromeInsetsScript(
