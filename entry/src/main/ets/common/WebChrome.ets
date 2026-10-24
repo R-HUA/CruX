@@ -72,6 +72,7 @@ export function chromeInsetsScript(top: number, bottom: number, viewportWidth: n
       document.documentElement.style.setProperty('--ot-bottom-inset',(window.__otInsetBottom*scale)+'px');
     };
     window.__otUpdateInsets();
+    window.__otGrokLayout='';
     if(window.__otApplyTop)window.__otApplyTop();
     if(!window.__otInsetResize){window.__otInsetResize=true;window.addEventListener('resize',function(){
       window.__otUpdateInsets();if(window.__otApplyTop)window.__otApplyTop();});}
@@ -286,6 +287,32 @@ export const PROFILE_LAYOUT_SCRIPT: string = `(function(active){
   if(key!==window.__otProfileLayout){window.__otProfileLayout=key;window.otNative.onProfileLayout(JSON.stringify(result));}
 })`;
 
+/** 读取输入控件下方实际空隙，避免网页已有留白与原生底栏整段叠加。 */
+export const GROK_LAYOUT_SCRIPT: string = `(function(active){
+  if(!window.otNative||!window.otNative.onGrokLayout)return;
+  var path=location.pathname.replace(/\\/$/,'').toLowerCase();
+  if(!active||(path!=='/grok'&&!/^\\/i\\/grok(?:\\/|$)/.test(path))){window.__otGrokLayout='';return;}
+  var editors=document.querySelectorAll('main[role="main"] textarea,main[role="main"] [contenteditable="true"][role="textbox"]');
+  var bottom=-1;
+  for(var i=0;i<editors.length;i++){
+    var editor=editors[i];
+    if(editor.closest('article,header,nav,[role="dialog"],[role="menu"],[aria-hidden="true"],[hidden]'))continue;
+    var rect=editor.getBoundingClientRect();
+    if(rect.width<=0||rect.height<=0||rect.bottom<=0||rect.top>=window.innerHeight)continue;
+    bottom=Math.max(bottom,rect.bottom);
+    var form=editor.closest('form')||editor.parentElement;
+    var controls=form?form.querySelectorAll('button,[role="button"]'):[];
+    for(var j=0;j<controls.length;j++){
+      var button=controls[j].getBoundingClientRect();
+      if(button.width>0&&button.height>0&&button.bottom>0&&button.top<window.innerHeight)bottom=Math.max(bottom,button.bottom);
+    }
+  }
+  var result={url:String(location.href),width:window.innerWidth,viewWidth:window.__otViewportWidth||0,
+    gap:bottom<0?-1:Math.round(Math.max(0,window.innerHeight-bottom)*100)/100};
+  var key=JSON.stringify(result);
+  if(key!==window.__otGrokLayout){window.__otGrokLayout=key;window.otNative.onGrokLayout(key);}
+})`;
+
 /** 原生控件和网页去重共用路由判定，不以账号元素是否存在决定界面。 */
 export function chromeScript(nativeNavigation: boolean, nativeHeader: boolean, url: string): string {
   return '(function(nav,header,url){try{' +
@@ -324,7 +351,7 @@ export function chromeScript(nativeNavigation: boolean, nativeHeader: boolean, u
     'if(unread!==""&&Number(unread)>=0&&unread!==window.__otNotificationReported){' +
     'window.__otNotificationReported=unread;' +
     'if(window.otNative)window.otNative.onUrlChange("main",String(location.href));}}' +
-    PROFILE_LAYOUT_SCRIPT + '(active&&window.__otNativeHeader);};' +
+    PROFILE_LAYOUT_SCRIPT + '(active&&window.__otNativeHeader);' + GROK_LAYOUT_SCRIPT + '(active);};' +
     'window.__otOwn=function(){return ' + OWN_HANDLE_SCRIPT + ';};' +
     // x.com navigates like an app (history.pushState), which does not reload
     // the page and therefore never reaches the shell through the Web component
@@ -345,14 +372,17 @@ export function chromeScript(nativeNavigation: boolean, nativeHeader: boolean, u
     // 顶部残留滚回 0；只处理从顶部附近向下拉的手势，不干扰正常滚动。
     'if(!window.__otPullFix&&document.addEventListener){window.__otPullFix=1;' +
     'var otPullStart=0,otPullY=0,otPulled=false,otTouch=false,otPullTimers=[],otPullPath="";' +
+    'var otGrokPath=/^\\/(?:grok\\/?$|i\\/grok(?:\\/|$))/i;' +
     'var otClearPullTimers=function(){for(var i=0;i<otPullTimers.length;i++){clearTimeout(otPullTimers[i]);}otPullTimers=[];};' +
     'window.__otClearPullTimers=otClearPullTimers;' +
-    'var otSettleTop=function(){if(otTouch||location.pathname!==otPullPath){return;}if(window.scrollY>0&&window.scrollY<200){window.scrollTo(0,0);}};' +
+    'var otSettleTop=function(){if(otTouch||location.pathname!==otPullPath||otGrokPath.test(location.pathname)){return;}if(window.scrollY>0&&window.scrollY<200){window.scrollTo(0,0);}};' +
     'document.addEventListener("touchstart",function(e){otTouch=true;otClearPullTimers();' +
-    'if(!e.touches||!e.touches.length){return;}otPullStart=window.scrollY;otPullY=e.touches[0].clientY;otPulled=false;otPullPath=location.pathname;},{passive:true,capture:true});' +
-    'document.addEventListener("touchmove",function(e){if(!e.touches||!e.touches.length){return;}' +
+    'otPulled=false;otPullPath=location.pathname;if(otGrokPath.test(otPullPath)||!e.touches||!e.touches.length){return;}' +
+    'otPullStart=window.scrollY;otPullY=e.touches[0].clientY;},{passive:true,capture:true});' +
+    'document.addEventListener("touchmove",function(e){if(otGrokPath.test(location.pathname)||location.pathname!==otPullPath||!e.touches||!e.touches.length){return;}' +
     'if(otPullStart<=100&&e.touches[0].clientY-otPullY>24){otPulled=true;}},{passive:true,capture:true});' +
-    'document.addEventListener("touchend",function(){otTouch=false;if(!otPulled){return;}otPulled=false;' +
+    'document.addEventListener("touchend",function(){otTouch=false;var pulled=otPulled;otPulled=false;' +
+    'if(!pulled||otGrokPath.test(location.pathname)||location.pathname!==otPullPath){return;}' +
     'otPullTimers=[setTimeout(otSettleTop,500),setTimeout(otSettleTop,1200),setTimeout(otSettleTop,2000)];},{passive:true,capture:true});' +
     'document.addEventListener("touchcancel",function(){otTouch=false;otPulled=false;otClearPullTimers();},{passive:true,capture:true});}' +
     'if(!window.__otObs){window.__otPend=0;' +

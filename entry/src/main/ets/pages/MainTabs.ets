@@ -80,6 +80,9 @@ class PageBridge {
   private profileHandler: (payload: string) => void = () => {};
   setProfileHandler(handler: (payload: string) => void): void { this.profileHandler = handler; }
   onProfileLayout(payload: string): void { if (this.active()) { this.profileHandler(payload); } }
+  private grokHandler: (payload: string) => void = () => {};
+  setGrokHandler(handler: (payload: string) => void): void { this.grokHandler = handler; }
+  onGrokLayout(payload: string): void { if (this.active()) { this.grokHandler(payload); } }
   private themeHandler: (color: string) => void = () => {};
   setThemeHandler(handler: (color: string) => void): void { this.themeHandler = handler; }
   onTheme(source: string, color: string): void { if (this.active() && source === 'main') { this.themeHandler(color); } }
@@ -124,6 +127,14 @@ interface ProfileLayout {
   identityBottom: number;
   name: string;
   handle: string;
+}
+
+/** 只传递布局尺寸，不读取输入内容。 */
+interface GrokLayout {
+  url: string;
+  width: number;
+  viewWidth: number;
+  gap: number;
 }
 
 interface AccountPictureState {
@@ -212,6 +223,8 @@ struct MainTabs {
   @State webColorMode: ThemeColorMode = ThemeColorMode.SYSTEM;
   @State pageBackground: string = '';
   @State webWidth: number = 0;
+  // 未测量时保持网页原有布局，收到实际空隙后仅补不足部分。
+  @State grokBottomGap: number = -1;
   private lastScrollY: number = 0;
   private scrollDistance: number = 0;
   private webTouchActive: boolean = false;
@@ -321,6 +334,7 @@ struct MainTabs {
       this.updateWebModal(open);
     });
     bridge.setProfileHandler((payload: string) => this.receiveProfileLayout(payload));
+    bridge.setGrokHandler((payload: string) => this.receiveGrokLayout(payload));
     bridge.setThemeHandler((color: string) => {
       const match = /^rgb\((\d{1,3}),\s*(\d{1,3}),\s*(\d{1,3})\)$/.exec(color);
       if (!match || !isSiteUrl(this.webUrl())) { return; }
@@ -722,7 +736,7 @@ struct MainTabs {
       this.imageViewerOpen = false;
     }
     if (this.account.discovering && url !== this.navigation.currentUrl && pathOf(url) !== '/home') { this.account.cancelProfileNavigation(); }
-    if (url !== this.navigation.currentUrl) { this.resetProfileLayout(); this.resetChromeScroll(); }
+    if (url !== this.navigation.currentUrl) { this.grokBottomGap = -1; this.resetProfileLayout(); this.resetChromeScroll(); }
     this.navigation.syncFromUrl(url, documentLoaded);
     const idx: number = routeIndexForUrl(TWITTER_BASE + this.navigation.currentPath);
     if (!this.navigation.isNavigating && !this.settingsOpen && !this.settingsWeb && idx >= 0 && this.enabledTabs.includes(idx) && idx !== this.currentIndex) {
@@ -1135,6 +1149,7 @@ struct MainTabs {
 
   /** 应用发起的加载先登记目标，覆盖 PageBegin 之前的失败。 */
   private documentStarted(url: string): void {
+    this.grokBottomGap = -1;
     this.pendingDocumentUrl = url;
     this.failedWebUrl = url;
     this.documentLoading = true;
@@ -1249,9 +1264,45 @@ struct MainTabs {
       usesNativeNavigation(this.navigation.currentUrl);
   }
 
-  /** 私信使用固定视口和底部输入框，保留原生栏占位而不覆盖网页。 */
+  /** 私信和 Grok 有底部输入框，保留原生栏占位而不覆盖网页。 */
   private overlaysWeb(): boolean {
-    return this.showsNativeNavigation() && (isPostDetailUrl(this.navigation.currentUrl) || routeIndexForUrl(this.navigation.currentUrl) !== 3);
+    const index: number = routeIndexForUrl(this.navigation.currentUrl);
+    return this.showsNativeNavigation() && (isPostDetailUrl(this.navigation.currentUrl) || (index !== 3 && index !== 5));
+  }
+
+  /** 网页已有底部空隙，只为原生底栏补足尚缺的高度。 */
+  private webBottomPadding(): number {
+    if (this.settingsOpen || this.imageViewerOpen || this.overlaysWeb()) { return 0; }
+    const height: number = this.bottomChromeHeight();
+    if (routeIndexForUrl(this.navigation.currentUrl) !== 5) { return height; }
+    return this.grokBottomGap < 0 ? 0 : Math.max(0, height - this.grokBottomGap);
+  }
+
+  /** 测量与补足保持同一边界，避免安全区扩展反复改变网页空隙。 */
+  private webSafeAreaEdges(): SafeAreaEdge[] {
+    if (routeIndexForUrl(this.navigation.currentUrl) === 5 && this.bottomChromeHeight() > 0) { return []; }
+    return this.navigation.viewingHandle !== '' && this.showsNativeNavigation()
+      ? [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM] : [SafeAreaEdge.BOTTOM];
+  }
+
+  /** 网页回调只属于当前路由及视口，旧尺寸不能影响切页后的布局。 */
+  private receiveGrokLayout(payload: string): void {
+    let layout: GrokLayout;
+    try {
+      layout = JSON.parse(payload) as GrokLayout;
+    } catch (error) {
+      hilog.error(DOMAIN, TAG, 'event=grok_layout_invalid error=%{public}s', String(error));
+      return;
+    }
+    if (!layout || !this.pageAlive || this.appBackground || this.rawWeb || this.settingsOpen ||
+      this.imageViewerOpen || this.navigation.isNavigating || routeIndexForUrl(this.navigation.currentUrl) !== 5 ||
+      layout.url !== this.navigation.currentUrl || layout.url !== this.webUrl() ||
+      layout.viewWidth !== this.webWidth || !(layout.width > 0) || !Number.isFinite(layout.width) ||
+      !Number.isFinite(layout.gap) || (layout.gap < 0 && layout.gap !== -1)) { return; }
+    const gap: number = layout.gap < 0 ? -1 : layout.gap * this.webWidth / layout.width;
+    if ((gap < 0) !== (this.grokBottomGap < 0) || Math.abs(gap - this.grokBottomGap) >= 0.5) {
+      this.grokBottomGap = gap;
+    }
   }
 
   private bottomChromeHeight(): number {
@@ -2333,13 +2384,12 @@ struct MainTabs {
       .width('100%')
       .height('100%')
       // 网页遮罩和背景延伸至手势区，交互元素由网页安全区样式避让。
-      .expandSafeArea([SafeAreaType.SYSTEM], this.navigation.viewingHandle !== '' && this.showsNativeNavigation()
-        ? [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM] : [SafeAreaEdge.BOTTOM])
+      .expandSafeArea([SafeAreaType.SYSTEM], this.webSafeAreaEdges())
       // Injected at document start, so the page's history hook always finds it.
       .javaScriptProxy({
         object: this.bridge,
         name: 'otNative',
-        methodList: ['onUrlChange', 'onImages', 'onTheme', 'onProfileLayout', 'onWebModal'],
+        methodList: ['onUrlChange', 'onImages', 'onTheme', 'onProfileLayout', 'onGrokLayout', 'onWebModal'],
         controller: this.controller
       })
       .onControllerAttached(() => {
@@ -2406,7 +2456,7 @@ struct MainTabs {
       .onScroll((event: OnScrollEvent) => { this.handleWebScroll(event.yOffset); })
       .onAreaChange((_old: Area, area: Area) => {
         if (session !== this.webSession) { return; }
-        if (this.webWidth !== Number(area.width)) { this.resetProfileLayout(); }
+        if (this.webWidth !== Number(area.width)) { this.grokBottomGap = -1; this.resetProfileLayout(); }
         this.webWidth = Number(area.width);
         this.syncChromeInsets();
       })
@@ -2532,10 +2582,11 @@ struct MainTabs {
             .width('100%')
             .height('100%')
             // Web 位于刷新容器内，两者须使用相同的绘制扩展边界。
-            .expandSafeArea([SafeAreaType.SYSTEM], this.navigation.viewingHandle !== '' && this.showsNativeNavigation()
-              ? [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM] : [SafeAreaEdge.BOTTOM])
-            .pullToRefresh(true)
+            .expandSafeArea([SafeAreaType.SYSTEM], this.webSafeAreaEdges())
+            .pullToRefresh(routeIndexForUrl(this.navigation.currentUrl) !== 5)
+            .pullDownRatio(routeIndexForUrl(this.navigation.currentUrl) === 5 ? 0 : undefined)
             .onRefreshing(() => {
+              if (routeIndexForUrl(this.navigation.currentUrl) === 5) { this.refreshing = false; return; }
               this.refreshing = true;
               this.reloadCurrent();
             })
@@ -2589,8 +2640,7 @@ struct MainTabs {
     .flexGrow(1)
     .flexShrink(1)
     // 资料横幅及其遮罩一起延伸至状态栏；其他页面沿用底部扩展边界。
-    .expandSafeArea([SafeAreaType.SYSTEM], this.navigation.viewingHandle !== '' && this.showsNativeNavigation()
-      ? [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM] : [SafeAreaEdge.BOTTOM])
+    .expandSafeArea([SafeAreaType.SYSTEM], this.webSafeAreaEdges())
     .backgroundColor($r('sys.color.ohos_id_color_background'))
   }
 
@@ -3169,7 +3219,7 @@ struct MainTabs {
               // 网页自带标题时由视口避让状态栏；原生标题覆盖的列表仍从屏幕顶部绘制。
               .padding({ top: this.settingsOpen || this.imageViewerOpen || this.fullScreen || (this.overlaysWeb() && this.topChromeHeight() > 0) ? 0 :
                 this.topInset + (this.overlaysWeb() ? 0 : this.topChromeHeight()),
-                bottom: this.settingsOpen || this.imageViewerOpen || this.overlaysWeb() ? 0 : this.bottomChromeHeight() })
+                bottom: this.webBottomPadding() })
             }
             .tabBar(this.bottomNavigation())
           }

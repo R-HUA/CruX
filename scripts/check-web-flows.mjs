@@ -10,7 +10,7 @@ function load(name, exports) {
   const context = name === 'WebChrome' ? load('WebConfig', ['RESERVED_ROOTS','SECONDARY_PATH_PATTERN','PROFILE_PATH_PATTERN']) : {};
   return vm.runInNewContext(js + ';({' + exports.join(',') + '})', context);
 }
-const routes = load('WebConfig', ['routeIndexForUrl', 'profileHandleForUrl','usesNativeNavigation','usesNativeHeader','isTabRootPath','isPostDetailUrl','TWITTER_BOOKMARKS']);
+const routes = load('WebConfig', ['routeIndexForUrl', 'profileHandleForUrl','usesNativeNavigation','usesNativeHeader','isTabRootPath','isPostDetailUrl','isSecondaryUrl','TWITTER_BOOKMARKS']);
 const bookmarksPath = new URL(routes.TWITTER_BOOKMARKS).pathname;
 assert.equal(routes.TWITTER_BOOKMARKS,'https://x.com/i/history','书签直接使用历史页的默认标签，避免旧入口重定向');
 for (const [path, expected] of [['/home',0],['/search?q=a',1],['/notifications',2],['/messages/42',3],['/i/chat',3],['/someone',-1],['/i/grok',5],['/grok',5],['/i/flow/login',-1],['/settings',-1],['/someone/status/123',-1]]) {
@@ -51,7 +51,7 @@ assert.equal(routes.isPostDetailUrl('https://x.com/i/web/status/123'),true);
 for (const url of ['https://x.com/alice/status/123/photo/1','https://x.com/alice/status/123/mediaViewer','https://example.com/alice/status/123']) {
   assert.equal(routes.isPostDetailUrl(url),false,url);
 }
-const scripts = load('WebChrome', ['fillComposerScript','clickPostButtonScript','POST_RESULT_SCRIPT','chromeScript','chromeFlagScript','chromeInsetsScript','chromeDocumentStartScript','chromeActiveScript','COMPOSER_READY_SCRIPT','ACCOUNT_SWITCH_SCRIPT','OWN_HANDLE_SCRIPT','profileBootstrapScript','clickRouteScript','cancelRouteScript','finishRouteScript','accountAvatarScript','accountAvatarDiagScript','PROFILE_LAYOUT_SCRIPT','PROFILE_MEDIA_SCRIPT','WEB_MODAL_SCRIPT']);
+const scripts = load('WebChrome', ['fillComposerScript','clickPostButtonScript','POST_RESULT_SCRIPT','chromeScript','chromeFlagScript','chromeInsetsScript','chromeDocumentStartScript','chromeActiveScript','COMPOSER_READY_SCRIPT','ACCOUNT_SWITCH_SCRIPT','OWN_HANDLE_SCRIPT','profileBootstrapScript','clickRouteScript','cancelRouteScript','finishRouteScript','accountAvatarScript','accountAvatarDiagScript','PROFILE_LAYOUT_SCRIPT','PROFILE_MEDIA_SCRIPT','WEB_MODAL_SCRIPT','GROK_LAYOUT_SCRIPT']);
 assert.equal(scripts.chromeDocumentStartScript(false),'');
 // 模拟网页处理事件后，浏览器是否还会执行链接的默认导航。
 function clickRuntime() {
@@ -205,6 +205,92 @@ insetState.navigation.viewingHandle='alice';assert.equal(topInset.call(insetStat
 insetState.navigation.viewingHandle='';assert.equal(topInset.call(insetState),95,'Leaving a profile restores the other page inset');
 insetState.topChromeHeight=()=>0;assert.equal(topInset.call(insetState),0);
 insetState.overlaysWeb=()=>false;assert.equal(topInset.call(insetState),0);
+
+// Grok 保留网页自身空隙，原生只补不足部分；仍按实际地址禁用刷新。
+{
+  const methods=['showsNativeNavigation','overlaysWeb','webBottomPadding','webSafeAreaEdges','bottomChromeHeight','receiveGrokLayout'].map(name=>
+    mainSource.match(new RegExp('^  private '+name+'\\([\\s\\S]*?^  \\}','m'))[0]).join('\n');
+  const SafeAreaEdge={TOP:0,BOTTOM:1};
+  const GrokPage=vm.runInNewContext(stripTypeScriptTypes('class GrokPage{'+methods+'};GrokPage'),{
+    ...routes,SafeAreaEdge,FLOATING_BAR_HEIGHT:58,BAR_HEIGHT:56,hilog:{error(){}},DOMAIN:0,TAG:''});
+  const binding=pattern=>vm.runInNewContext('(function(){return '+mainSource.match(pattern)[1]+';})',routes);
+  const canRefresh=binding(/\.pullToRefresh\(([^\r\n]*)\)/);
+  const pullRatio=binding(/\.pullDownRatio\(([^\r\n]*)\)/);
+  const bottomPadding=binding(/bottom: (this\.webBottomPadding\(\))/);
+  const refresh=vm.runInNewContext('(function(){'+mainSource.match(/\.onRefreshing\(\(\) => \{([\s\S]*?)\n            \}\)/)[1]+'})',routes);
+  const page=new GrokPage();let reloads=0;
+  Object.assign(page,{currentIndex:0,rawWeb:false,fullScreen:false,authenticationPage:false,settingsOpen:false,
+    imageViewerOpen:false,webModalOpen:false,isWide:false,floatingBar:true,bottomInset:24,
+    pageAlive:true,appBackground:false,webWidth:400,grokBottomGap:-1,
+    navigation:{currentUrl:'',viewingHandle:'',isNavigating:false},
+    webUrl(){return this.navigation.currentUrl;},reloadCurrent(){reloads++;}});
+  const report=gap=>page.receiveGrokLayout(JSON.stringify({url:page.navigation.currentUrl,width:400,viewWidth:400,gap}));
+  for(const url of ['https://x.com/grok','https://x.com/grok/?conversation=42#input',
+    'https://x.com/i/grok','https://www.twitter.com/i/grok/conversations/42?lang=zh']){
+    page.navigation.currentUrl=url;
+    assert.equal(routes.routeIndexForUrl(url),5,url);
+    assert.equal(canRefresh.call(page),false,url);assert.equal(pullRatio.call(page),0,url);
+    page.refreshing=true;refresh.call(page);assert.equal(page.refreshing,false);assert.equal(reloads,0);
+    page.grokBottomGap=-1;
+    assert.equal(page.overlaysWeb(),false);assert.equal(bottomPadding.call(page),0,'未测量时不整段抬高');
+    assert.deepEqual(Array.from(page.webSafeAreaEdges()),[],'测量前后保持相同的网页安全区边界');
+    report(60);assert.equal(bottomPadding.call(page),22,'网页已有 60vp，仅补足 22vp');
+    assert.deepEqual(Array.from(page.webSafeAreaEdges()),[]);
+  }
+  page.bottomInset=32;page.floatingBar=false;
+  assert.equal(bottomPadding.call(page),28,'切换底栏后仍扣除网页已有空隙');
+  report(100);assert.equal(bottomPadding.call(page),0,'网页空隙足够时不新增占位');
+  assert.deepEqual(Array.from(page.webSafeAreaEdges()),[],'已有空隙足够时也不通过扩展反复改变测量值');
+  report(0);assert.equal(bottomPadding.call(page),88,'网页没有留白时才预留完整底栏');
+  page.receiveGrokLayout(JSON.stringify({url:page.navigation.currentUrl,width:980,viewWidth:400,gap:147}));
+  assert.equal(bottomPadding.call(page),28,'桌面站点缩放按 CSS 像素换算到 vp');
+  page.navigation.isNavigating=true;report(0);assert.equal(bottomPadding.call(page),28);
+  page.navigation.isNavigating=false;
+  for(const changed of [{url:'https://x.com/home'},{viewWidth:800},{gap:-2},{gap:-0.5},{gap:'60'}]){
+    page.receiveGrokLayout(JSON.stringify({url:page.navigation.currentUrl,width:400,viewWidth:400,gap:0,...changed}));
+    assert.equal(bottomPadding.call(page),28,'旧路由、旧视口和非法尺寸不影响当前布局');
+  }
+  page.webModalOpen=true;assert.equal(bottomPadding.call(page),0);
+  page.webModalOpen=false;page.isWide=true;assert.equal(bottomPadding.call(page),0);
+  assert.deepEqual(Array.from(page.webSafeAreaEdges()),[SafeAreaEdge.BOTTOM]);
+  page.isWide=false;page.rawWeb=true;assert.equal(bottomPadding.call(page),0);
+  page.rawWeb=false;page.floatingBar=true;page.bottomInset=24;page.currentIndex=5;
+  for(const [path,overlays,padding] of [['/home',true,0],['/i/chat',false,82]]){
+    page.navigation.currentUrl='https://x.com'+path;
+    assert.equal(page.overlaysWeb(),overlays);assert.equal(bottomPadding.call(page),padding);
+    assert.equal(canRefresh.call(page),true);assert.equal(pullRatio.call(page),undefined);
+    assert.deepEqual(Array.from(page.webSafeAreaEdges()),[SafeAreaEdge.BOTTOM]);
+    refresh.call(page);
+  }
+  assert.equal(reloads,2,'切离 Grok 后刷新恢复，不能依赖仍选中的 Grok 标签');
+  assert.equal((mainSource.match(/\.expandSafeArea\(\[SafeAreaType.SYSTEM\], this.webSafeAreaEdges\(\)\)/g)||[]).length,3,
+    'Web、刷新容器与内容区使用一致的扩展边界');
+
+  // 用实际注入脚本读取布局，表单自己的 padding 不应当作输入控件边界。
+  page.navigation.currentUrl='https://x.com/i/grok';page.grokBottomGap=-1;
+  let ownGap=60,viewportHeight=800,ready=true,reports=0;
+  const scale=980/400;
+  const window={innerWidth:980,__otViewportWidth:400,addEventListener(){},
+    get innerHeight(){return (viewportHeight-page.webBottomPadding())*scale;},
+    otNative:{onGrokLayout(payload){reports++;page.receiveGrokLayout(payload);}}};
+  const controlRect=offset=>({width:100,height:40,top:window.innerHeight-(ownGap+offset+40)*scale,
+    bottom:window.innerHeight-(ownGap+offset)*scale});
+  const form={querySelectorAll:()=>[{getBoundingClientRect:()=>controlRect(0)}]};
+  const editor={closest:selector=>selector==='form'?form:null,getBoundingClientRect:()=>controlRect(20)};
+  const layoutContext={window,location:{pathname:'/i/grok',href:page.navigation.currentUrl},
+    document:{querySelectorAll:()=>ready?[editor]:[],documentElement:{style:{setProperty(){}}}}};
+  const measure=()=>vm.runInNewContext(scripts.GROK_LAYOUT_SCRIPT+'(true)',layoutContext);
+  measure();assert.equal(page.webBottomPadding(),22,'输入框与更低的发送按钮均避开底栏');
+  measure();assert.equal(page.webBottomPadding(),22);assert.equal(reports,1,'视口缩小后不重复累计补偿');
+  viewportHeight=480;ownGap=100;measure();assert.equal(page.webBottomPadding(),0,'短屏且网页已有足够空隙时不抬高');
+  ownGap=0;measure();assert.equal(page.webBottomPadding(),82);
+  ownGap=60;measure();assert.equal(page.webBottomPadding(),22);
+  ready=false;measure();assert.equal(page.webBottomPadding(),0);
+  ready=true;measure();assert.equal(page.webBottomPadding(),22,'输入区后挂载时更新尺寸');
+  page.grokBottomGap=-1;window.__otApplyTop=measure;
+  vm.runInNewContext(scripts.chromeInsetsScript(0,0,400),layoutContext);
+  assert.equal(page.webBottomPadding(),22,'路由确认后同步可重新发布导航期间被拒绝的相同尺寸');
+}
 
 // 真实边界与滚动统一为 vp；标题和模糊独立变化，并连续反向恢复。
 const profileMethods=['syncHeaderBlur','resetHeaderBlur','resetProfileLayout','receiveProfileLayout','profileBannerButtons'].map(name=>
@@ -809,6 +895,32 @@ authVisible=true;chromeContext.window.__otApplyTop();assert.equal(cssText,'');
 authVisible=false;location.pathname='/unknown/path';location.href='https://x.com/unknown/path';
 chromeContext.history.pushState();assert.doesNotMatch(cssText,/--ot-top-inset|--ot-bottom-inset/);
 
+// Grok 下拉不安排网页回顶；首页保留修正，切页后的迟到修正失效。
+{
+  const handlers=new Map(),timers=new Map(),scrolls=[];
+  const touchLocation={pathname:'/home',href:'https://x.com/home'};let timerId=0;
+  const touchContext={...chromeContext,location:touchLocation,history:{pushState(){},replaceState(){}},
+    window:{location:touchLocation,scrollY:0,addEventListener(){},scrollTo(x,y){scrolls.push([x,y]);this.scrollY=y;}},
+    document:{...chromeContext.document,documentElement:{},addEventListener(type,callback){handlers.set(type,callback);}},
+    MutationObserver:class{observe(){}disconnect(){}},
+    setTimeout(callback){timers.set(++timerId,callback);return timerId;},clearTimeout(id){timers.delete(id);}};
+  vm.runInNewContext(scripts.chromeScript(true,true,touchLocation.href),touchContext);
+  const pull=()=>{
+    touchContext.window.scrollY=0;
+    handlers.get('touchstart')({touches:[{clientY:100}]});
+    handlers.get('touchmove')({touches:[{clientY:150}]});
+    handlers.get('touchend')();
+  };
+  const settle=()=>{for(const [id,callback] of timers){timers.delete(id);callback();}};
+  for(const path of ['/grok','/grok/','/i/grok','/i/grok/conversations/42']){
+    touchLocation.pathname=path;pull();assert.equal(timers.size,0,path);
+  }
+  touchLocation.pathname='/home';pull();assert.equal(timers.size,3);
+  touchContext.window.scrollY=56;settle();assert.deepEqual(scrolls,[[0,0]]);
+  pull();touchLocation.pathname='/i/grok';touchContext.window.scrollY=56;settle();
+  assert.equal(scrolls.length,1,'首页排队的回顶修正不能影响 Grok');
+}
+
 // 地址先变、内容后到达时，留白须等路由确认，并在设置覆盖层收起后匹配最终页面。
 {
   const methods=['syncFromUrl','goRoute','leaveSettings','openSettingsRoute','showsNativeNavigation','overlaysWeb',
@@ -828,7 +940,13 @@ chromeContext.history.pushState();assert.doesNotMatch(cssText,/--ot-top-inset|--
     ['/alice','/home','back',77,82],
     ['/home','/explore','tab',0,82],
     ['/home','/settings/account','settings',95,0],
-    ['/alice','/home','direct',77,82]
+    ['/alice','/home','direct',77,82],
+    ['/home','/i/grok','tab',0,0],
+    ['/home','/grok','direct',0,0],
+    ['/home','/i/grok/conversations/42','direct',0,0],
+    ['/i/grok','/home','tab',77,82],
+    ['/i/grok','/i/chat','direct',0,0],
+    ['/i/chat','/i/grok','direct',0,0]
   ]){
     const runtime=routeRuntime(start),values=new Map();let writes=0;
     const insetContext={window:{innerWidth:400,addEventListener(){}},location:runtime.location,
@@ -850,7 +968,7 @@ chromeContext.history.pushState();assert.doesNotMatch(cssText,/--ot-top-inset|--
       page.syncFromUrl(runtime.location.href);page.updateChromeFlag(runtime.location.href);
     });
     const pending=entry==='settings'?page.openSettingsRoute(target):entry==='back'?page.leaveSettings():
-      entry==='tab'?page.goRoute(target==='/home'?0:1):page.navigation.loadWeb('https://x.com'+target);
+      entry==='tab'?page.goRoute(routes.routeIndexForUrl('https://x.com'+target)):page.navigation.loadWeb('https://x.com'+target);
     await new Promise(resolve=>setTimeout(resolve,0));
     assert.equal(new URL(runtime.location.href).pathname,target);
     assert.equal(page.navigation.isNavigating,true);

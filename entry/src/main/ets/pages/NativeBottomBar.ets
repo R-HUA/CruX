@@ -17,7 +17,6 @@ export struct NativeBottomBar {
     if (index === 1) { return $r('sys.symbol.compass_circle_fill'); }
     if (index === 2) { return $r('sys.symbol.bell_fill'); }
     if (index === 3) { return $r('sys.symbol.envelope_fill'); }
-    if (index === 5) { return $r('sys.symbol.wand_and_stars'); }
     return $r('sys.symbol.gearshape');
   }
 
@@ -40,9 +39,16 @@ export struct NativeBottomBar {
   item(index: number) {
     Column({ space: S4 }) {
       Badge({ count: this.badge(index), position: BadgePosition.RightTop, style: { fontSize: 10, badgeSize: 16 } }) {
-        SymbolGlyph(this.symbol(index)).fontSize(this.wide ? 26 : 23)
-          .fontColor([this.currentIndex === index ? $r('sys.color.ohos_id_color_emphasize') :
-            $r('sys.color.ohos_id_color_text_secondary')])
+        if (index === 5) {
+          Image($r('app.media.grok')).width(this.wide ? 26 : 23).height(this.wide ? 26 : 23)
+            .objectFit(ImageFit.Contain)
+            .fillColor(this.currentIndex === index ? $r('sys.color.ohos_id_color_emphasize') :
+              $r('sys.color.ohos_id_color_text_secondary'))
+        } else {
+          SymbolGlyph(this.symbol(index)).fontSize(this.wide ? 26 : 23)
+            .fontColor([this.currentIndex === index ? $r('sys.color.ohos_id_color_emphasize') :
+              $r('sys.color.ohos_id_color_text_secondary')])
+        }
       }
       Text(this.label(index)).fontSize(11).fontFamily(FONT_FAMILY).maxLines(1)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
