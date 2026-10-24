@@ -483,6 +483,22 @@ const accountDocument={
   querySelector:selector=>selector==='[role=dialog]'?(menuOpen?dialog:null):(profileReady?profileButton:null)
 };
 assert.equal(vm.runInNewContext(scripts.OWN_HANDLE_SCRIPT,{window:{},document:accountDocument}),'');
+// 原生栏隐藏网页入口后，无 href 的当前账号控件仍可提供身份。
+const identityNode=(id,text='')=>({getAttribute:name=>name==='data-testid'?id:null,textContent:text});
+let controlIdentities=[identityNode('UserAvatar-Container-alice')],controlInPost=false;
+const ownControl={closest:()=>controlInPost?{}:null,querySelectorAll:()=>controlIdentities};
+const controlsDocument={querySelectorAll:selector=>selector.startsWith('[data-testid="AppTabBar_Profile_Link"]')?[ownControl]:[]};
+assert.equal(vm.runInNewContext(scripts.OWN_HANDLE_SCRIPT,{window:{},document:controlsDocument}),'alice');
+controlIdentities=[identityNode('UserAvatar-Container-unknown')];
+assert.equal(vm.runInNewContext(scripts.OWN_HANDLE_SCRIPT,{window:{},document:controlsDocument}),'','头像占位标识不能成为当前账号');
+controlIdentities.push(identityNode('', '@unknown'));
+assert.equal(vm.runInNewContext(scripts.OWN_HANDLE_SCRIPT,{window:{},document:controlsDocument}),'unknown','明确账号文本仍可确认同名账号');
+controlIdentities=[identityNode('', '@bob')];
+assert.equal(vm.runInNewContext(scripts.OWN_HANDLE_SCRIPT,{window:{},document:controlsDocument}),'bob');
+controlIdentities.push(identityNode('UserAvatar-Container-alice'));
+assert.equal(vm.runInNewContext(scripts.OWN_HANDLE_SCRIPT,{window:{},document:controlsDocument}),'');
+controlIdentities=[identityNode('UserAvatar-Container-alice')];controlInPost=true;
+assert.equal(vm.runInNewContext(scripts.OWN_HANDLE_SCRIPT,{window:{},document:controlsDocument}),'');
 const accountContext={window:{},document:accountDocument,setTimeout:()=>1,clearTimeout(){},
   MutationObserver:class{constructor(callback){accountChanged=callback;}observe(){}disconnect(){}}};
 assert.equal(vm.runInNewContext(scripts.profileBootstrapScript(false),accountContext),'armed');
@@ -498,6 +514,18 @@ assert.equal(vm.runInNewContext(scripts.profileBootstrapScript(false),accountCon
 assert.equal(accountContext.window.__otBoot,'');
 profileReady=true;accountChanged();
 assert.equal(accountContext.window.__otBoot,'alice');assert.equal(menuOpen,false);
+// 账号入口缺失时，后续页面更新仍能消费已确认的会话身份。
+let verifiedHandle='',verifiedReady;
+const verificationContext={window:{__otReadAccount:()=>verifiedHandle},
+  document:{querySelectorAll:()=>[],querySelector:()=>null},setTimeout:()=>1,clearTimeout(){},
+  MutationObserver:class{constructor(callback){verifiedReady=callback;}observe(){}disconnect(){}}};
+assert.equal(vm.runInNewContext(scripts.profileBootstrapScript(false),verificationContext),'armed');
+assert.equal(verificationContext.window.__otBoot,'');
+verifiedHandle='alice';verifiedReady();
+assert.equal(verificationContext.window.__otBoot,'alice');
+verifiedHandle='';vm.runInNewContext(scripts.profileBootstrapScript(false),verificationContext);
+verificationContext.window.__otBootCancel();verifiedHandle='bob';verifiedReady();
+assert.equal(verificationContext.window.__otBoot,'','已取消的页面回调不能覆盖新查看意图');
 // 保留真实地址与已渲染内容两份独立状态，不能通过改地址让夹具自动切页。
 function routeRuntime(start='/home') {
   const listeners=new Map(),stack=[{url:'https://x.com'+start,state:{key:'source'}}];
@@ -1068,13 +1096,14 @@ const ClientPage=vm.runInNewContext(stripTypeScriptTypes('class ClientPage{'+cli
 const client=new ClientPage();const saved=[];let failedSave=false;let notices=0;
 Object.assign(client,{enabledTabs:[0,1,2,3,4],currentIndex:0,settingsReadGeneration:0,
   account:{discovering:false,settingsReadGeneration:0,accountName:'Alice',accountLoading:false,accountError:false,
-    cancelProfileNavigation(){}},incomingPageReady:true,resetChromeScroll(){},resetProfileLayout(){},
+    cancelProfileNavigation(){},readSettingsAccount(){this.settingsReads=(this.settingsReads||0)+1;}},incomingPageReady:true,resetChromeScroll(){},resetProfileLayout(){},
   putPreference:async(key,value)=>{if(failedSave)throw Error('disk');saved.push([key,value]);},toast(){notices++;}});
 client.navigation=navigationFor({...client,currentUrl:'https://x.com/home',toast:client.toast},
   {loadUrl:url=>{client.loaded=url;},runJavaScript:async()=>''});
 client.navigation.host.controller=()=>({loadUrl:url=>{client.loaded=url;},runJavaScript:async()=>''});
 client.navigation.loadWeb=async url=>{client.loaded=url;return 'arrived';};
 client.openSettings();assert.equal(client.currentIndex,4);assert.equal(client.settingsOpen,true);
+assert.equal(client.account.settingsReads,1,'打开设置主动读取当前账号');
 client.syncFromUrl('https://x.com/alice');assert.equal(client.currentIndex,4,'后台读取本人资料不抢占设置标签');
 client.openSettingsRoute('/settings/notifications');client.syncFromUrl('https://x.com/settings/notifications');
 assert.equal(client.currentIndex,4,'设置子页保持来源标签');
@@ -1133,7 +1162,8 @@ const accountFor=(page,overrides={})=>{
     host:{isControllerReady:()=>!!page.controller,getUIContext:()=>({getHostContext:()=>({})}),
       webScript:async script=>page.controller.runJavaScript(script),loadWeb:(...args)=>page.navigation.loadWeb(...args),
       accountChanged:()=>page.unread?.resetAccount?.(),toast:value=>page.toast?.(value)},
-    saveOwnHandle(){},restoreAvatar(){},readAvatar(){},resetAvatar(){},confirmCurrentAccount:async()=>'',...overrides});
+    saveOwnHandle(){},restoreAvatar(){},readAvatar(){},resetAvatar(){},
+    confirmCurrentAccount:async()=>JSON.parse(await page.controller.runJavaScript(scripts.OWN_HANDLE_SCRIPT)),...overrides});
   return account;
 };
 const UnreadPage=vm.runInNewContext(stripTypeScriptTypes('class UnreadPage{'+
@@ -1332,7 +1362,7 @@ const unreadFor=page=>{
   Object.assign(navClient, {
     currentIndex: 0,
     settingsOpen: false,
-    account:{accountError:false,cancelProfileNavigation(){}},
+    account:{accountError:false,cancelProfileNavigation(){},readSettingsAccount(){}},
     resetChromeScroll() {},
     resetProfileLayout() {},
     navigation: {currentUrl:'https://x.com/home',cancel(){},loadWeb: url => { navUrl = url; }}

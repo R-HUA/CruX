@@ -314,15 +314,16 @@ console.log('PASS: cause-specific retries preserve URLs, rebuild once, and keep 
   await ExtraPage.prototype.openOwnProfile.call(p);
   assert.deepEqual(accepted, [['Alice', false]]);assert.deepEqual(targets,['https://x.com/Alice']);
   let finish;
-  p.currentPath='/home';p.controller.runJavaScript=async script=>script==='owner'?new Promise(resolve=>{finish=resolve;}):'';
+  p.currentPath='/home';p.confirmCurrentAccount=()=>new Promise(resolve=>{finish=resolve;});
   const stale = ExtraPage.prototype.openOwnProfile.call(p); await tick();
   p.cancelProfileNavigation(); p.currentPath = '/explore'; finish('old'); await stale;
   assert.equal(accepted.length, 1); assert.equal(p.discovering, false);
 }
-// 无法读取当前身份时明确失败，不绕回首页或打开抽屉。
+// 无法完成账号确认时不导航。
 {
   const p=page(),accepted=[];
   Object.assign(p,{currentPath:'/search',webControllerReady:true,
+    confirmCurrentAccount:async()=>'',
     controller:{runJavaScript:async()=> ''},isHomeRoot:ExtraPage.prototype.isHomeRoot,
     loadWeb:async()=>{throw Error('身份未确认时不得导航');},
     acceptHandle:(...args)=>accepted.push(args)});

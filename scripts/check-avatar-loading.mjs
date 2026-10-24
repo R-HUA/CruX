@@ -59,7 +59,7 @@ const runtime = {
   isSiteUrl: url => /^https:\/\/x\.com\//.test(url), accountDetailsScript: handle => 'account:' + handle,
   setTimeout: callback => { const id = ++timerId; timers.set(id, callback); return id; },
   clearTimeout: id => timers.delete(id), clearInterval,
-  AVATAR_RETRY_MS: 1200, AVATAR_RETRY_LIMIT: 6,
+  AVATAR_RETRY_MS: 1200, AVATAR_RETRY_LIMIT: 6, PROFILE_TIMEOUT_MS: 10000, OWN_HANDLE_KEY: 'own_handle',
   preferences: { getPreferences: async () => prefs },
   NetworkConfig: { getInstance: () => ({ getDohPolicy: () => policy }) },
   accountAvatarScript: () => 'avatar', accountAvatarDiagScript: () => 'diag',
@@ -189,6 +189,17 @@ const qualityStart=requests.length;await read(page,urlA);
 assert.deepEqual(requests.slice(qualityStart).map(item=>item.url),[
   'https://pbs.twimg.com/profile_images/1/first_400x400.jpg','https://pbs.twimg.com/profile_images/1/first.jpg']);
 assert.notEqual(page.avatarPath,'');page.aboutToDisappear();await settle();
+
+// 小档位也必须规整到同一张头像，不能拼成 mini_400x400。
+for (const suffix of ['mini','x96','200x200']) {
+  page=makePage();responses.push(ok());
+  const start=requests.length;
+  await read(page,urlA.replace('_normal','_'+suffix));
+  assert.equal(requests[start].url,'https://pbs.twimg.com/profile_images/1/first_400x400.jpg');
+  await read(page,urlA);
+  assert.equal(requests.length,start+1,'同一头像的尺寸变化不重复下载');
+  page.aboutToDisappear();await settle();
+}
 
 // 两个高清候选均不存在时，不请求 normal/bigger，也不撤下已显示的头像。
 page=makePage();responses.push(ok());await read(page,urlA);
@@ -347,6 +358,25 @@ const leavingLoad = page.loadAvatar(urlA); await settle();
 page.aboutToDisappear(); assert.equal(requests.at(-1).destroyed, true);
 leavingDownload.resolve(ok()); await leavingLoad; await settle();
 assert.equal(page.avatarPath, '');
+
+// 设置主动确认账号；缺少身份入口时展示错误，旧读取不能取消新的资料请求。
+page=makePage();page.ownHandle='';page.settingsOpen=true;
+page.account.restoreAvatar=()=>{};page.account.readAvatar=()=>{};
+jsResults.push('', 'armed', 'alice', '', '');
+await page.readSettingsAccount();await settle();
+assert.equal(page.ownHandle,'alice');assert.equal(page.account.accountError,false);assert.equal(page.account.accountLoading,false);
+page.aboutToDisappear();await settle();
+page=makePage();page.ownHandle='';page.settingsOpen=true;
+jsResults.push('', 'err', '');await page.readSettingsAccount();
+assert.equal(page.account.accountError,true);assert.equal(page.account.accountLoading,false);
+page.aboutToDisappear();await settle();
+page=makePage();page.ownHandle='';page.settingsOpen=true;
+const oldIdentity=deferred();jsResults.push(oldIdentity);
+const oldSettings=page.readSettingsAccount();await settle();
+page.settingsOpen=false;page.account.settingsReadGeneration++;page.account.profileNavigation++;
+const newerProfile=page.account.profileNavigation;oldIdentity.resolve('alice');await oldSettings;
+assert.equal(page.ownHandle,'');assert.equal(page.account.profileNavigation,newerProfile,'过期设置读取不能取消新资料请求');
+page.aboutToDisappear();await settle();
 
 // Injection diagnostics are asynchronous, useful, and exclude page/user content.
 page = makePage();

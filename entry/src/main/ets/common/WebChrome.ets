@@ -87,6 +87,24 @@ export const OWN_HANDLE_SCRIPT: string = `(function(){
     var href=links[i].getAttribute('href')||'';
     if(/^\\/[A-Za-z0-9_]{1,15}$/.test(href))return href.substring(1);
   }
+  var controls=document.querySelectorAll('[data-testid="AppTabBar_Profile_Link"],'+
+    '[data-testid="DashButton_ProfileIcon_Link"],[data-testid="SideNav_AccountSwitcher_Button"]');
+  var controlHandle='';
+  for(var c=0;c<controls.length;c++){
+    if(controls[c].closest('article,[data-testid="cellInnerDiv"],[data-testid="tweet"]'))continue;
+    var identities=controls[c].querySelectorAll('[data-testid^="UserAvatar-Container-"],span');
+    for(var n=0;n<identities.length;n++){
+      var id=identities[n].getAttribute('data-testid')||'';
+      var match=/^UserAvatar-Container-([A-Za-z0-9_]{1,15})$/.exec(id);
+      // 网页会给尚未确认身份的头像使用 unknown 占位标识。
+      if(match&&match[1].toLowerCase()==='unknown')match=null;
+      if(!match)match=/^@([A-Za-z0-9_]{1,15})$/.exec((identities[n].textContent||'').trim());
+      if(!match)continue;
+      if(controlHandle&&controlHandle.toLowerCase()!==match[1].toLowerCase())return '';
+      controlHandle=match[1];
+    }
+  }
+  if(controlHandle)return controlHandle;
   var dialogs=document.querySelectorAll('[role="dialog"]');
   var found='';
   for(var d=0;d<dialogs.length;d++){
@@ -726,7 +744,7 @@ export function fillComposerScript(text: string): string {
     '}catch(err){return \'error\';}})(' + JSON.stringify(text) + ');';
 }
 
-/** 移动网页需打开账号抽屉才能确认本人资料入口，导航沿用网页点击事件。 */
+/** 账号入口缺失时复用页面会话确认身份，抽屉导航沿用网页点击事件。 */
 export function profileBootstrapScript(navigate: boolean): string {
   return '(function(navigate){try{' +
   'if(window.__otBootCancel)window.__otBootCancel();' +
@@ -738,10 +756,10 @@ export function profileBootstrapScript(navigate: boolean): string {
   'if(close)close.click();else btn.click();}}}' +
   'window.__otBootCancel=stop;' +
   'function read(){if(done)return;try{' +
-  'if(!launched){btn=document.querySelector("[data-testid=DashButton_ProfileIcon_Link],[data-testid=SideNav_AccountSwitcher_Button]");' +
-  'if(!btn)return;launched=true;opened=!document.querySelector("[role=dialog]");if(opened)btn.click();}' +
   'window.__otBoot=' + OWN_HANDLE_SCRIPT + ';' +
-  'if(!window.__otBoot)return;' +
+  'if(!window.__otBoot){if(launched)return;btn=document.querySelector("[data-testid=DashButton_ProfileIcon_Link],[data-testid=SideNav_AccountSwitcher_Button]");' +
+  'if(!btn)return;launched=true;opened=!document.querySelector("[role=dialog]");if(opened)btn.click();' +
+  'window.__otBoot=' + OWN_HANDLE_SCRIPT + ';if(!window.__otBoot)return;}' +
   'if(navigate&&window.__otBoot){var links=document.querySelectorAll("[role=dialog] a[href]");' +
   'for(var i=0;i<links.length;i++){if(links[i].getAttribute("href").toLowerCase()==="/"+window.__otBoot.toLowerCase()){' +
   'links[i].click();break;}}}stop();' +

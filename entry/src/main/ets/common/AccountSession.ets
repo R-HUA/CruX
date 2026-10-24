@@ -79,6 +79,7 @@ export class AccountSession {
   profileNavigation: number = 0;
   private alive: boolean = false;
   private appBackground: boolean = false;
+  private accountReadEmptyLogged: boolean = false;
   private host: AccountHost;
 
   constructor(host: AccountHost) { this.host = host; }
@@ -106,6 +107,7 @@ export class AccountSession {
   /** 登录表单出现时，旧身份及其异步读取同时失效。 */
   authenticationRequired(): void {
     this.ownHandle = '';
+    this.accountReadEmptyLogged = false;
     this.saveOwnHandle('');
     this.settingsReadGeneration++;
     this.profileNavigation++;
@@ -324,6 +326,10 @@ export class AccountSession {
       if (!this.alive || this.host.url() !== pageUrl || this.appBackground || generation !== this.profileNavigation) { return; }
       const direct: string = AccountSession.parseHandle('/' + unquoteScriptResult(raw));
       if (direct !== '') { this.acceptHandle(direct, false); }
+      else if (this.ownHandle === '' && !this.accountReadEmptyLogged) {
+        this.accountReadEmptyLogged = true;
+        hilog.info(DOMAIN, TAG, 'event=account_read_empty');
+      }
     } catch (error) {
       hilog.warn(DOMAIN, TAG, 'event=account_read_failed code=%{public}d', (error as BusinessError).code);
     }
@@ -358,6 +364,7 @@ export class AccountSession {
       this.host.accountChanged();
     }
     this.ownHandle = handle;
+    this.accountReadEmptyLogged = false;
     this.saveOwnHandle(handle);
     if (changed) {
       this.restoreAvatar(handle);
@@ -381,13 +388,16 @@ export class AccountSession {
   /** 设置页只消费仍属于本次打开过程的账号结果。 */
   async readSettingsAccount(): Promise<void> {
     const generation = ++this.settingsReadGeneration;
+    const profileGeneration = this.profileNavigation;
     this.accountLoading = true;
     this.accountError = false;
     try {
       if (this.ownHandle === '') {
         const handle = await this.confirmCurrentAccount();
+        if (!this.alive || this.appBackground || generation !== this.settingsReadGeneration ||
+          profileGeneration !== this.profileNavigation || !this.host.isSettingsOpen()) { return; }
         await this.cancelProfileNavigation();
-        if (generation !== this.settingsReadGeneration || !this.host.isSettingsOpen()) { return; }
+        if (!this.alive || this.appBackground || generation !== this.settingsReadGeneration || !this.host.isSettingsOpen()) { return; }
         if (handle !== '') {
           this.acceptHandle(handle, false);
         } else {

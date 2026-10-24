@@ -203,7 +203,7 @@ export function isMediaDownloadUrl(source: string): boolean {
 export function resolveMedia(source: string): MediaAddress | undefined {
   const avatar = /^https:\/\/pbs\.twimg\.com\/profile_images\/([0-9]+)\/([A-Za-z0-9_-]+)\.(jpg|jpeg|png|webp|gif)$/i.exec(source);
   if (avatar) {
-    const original = source.replace(/_(normal|bigger|400x400)(?=\.[a-z]+$)/i, '');
+    const original = source.replace(/_(mini|normal|bigger|x96|200x200|400x400)(?=\.[a-z]+$)/i, '');
     const large = original.replace(/(\.[a-z]+)$/i, '_400x400$1');
     const candidates = original === source ? [source] : [original];
     if (large !== source && original !== source) { candidates.push(large); }

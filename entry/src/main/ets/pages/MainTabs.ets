@@ -38,7 +38,7 @@ import {
   isTabRootPath, isPostDetailUrl, isSecondaryUrl, usesNativeNavigation, usesNativeHeader, userAgentFor
 } from '../common/WebConfig';
 import {
-  OWN_HANDLE_SCRIPT, chromeScript, chromeFlagScript, chromeInsetsScript, chromeDocumentStartScript, chromeActiveScript, scrollToTopScript,
+  chromeScript, chromeFlagScript, chromeInsetsScript, chromeDocumentStartScript, chromeActiveScript, scrollToTopScript,
   unquoteScriptResult,
   HOME_TAB_SCRIPT, selectHomeTabScript,
   ACCOUNT_SWITCH_SCRIPT
@@ -792,6 +792,7 @@ struct MainTabs {
     this.settingsWeb = false;
     this.resetChromeScroll();
     if (this.authenticationPage || !this.incomingPageReady) { this.account.accountError = true; }
+    else { this.account.readSettingsAccount(); }
   }
 
   private async leaveSettings(): Promise<void> {
@@ -986,7 +987,7 @@ struct MainTabs {
       await pendingCancel;
       if (generation !== this.account.profileNavigation || navigationGeneration !== this.navigation.navigationGeneration ||
         !this.pageAlive || this.appBackground) { return; }
-      const handle = this.account.ownHandle || MainTabs.unquote(await this.webScript(OWN_HANDLE_SCRIPT));
+      const handle = this.account.ownHandle || await this.account.confirmCurrentAccount();
       if (generation !== this.account.profileNavigation || navigationGeneration !== this.navigation.navigationGeneration ||
         !this.pageAlive || this.appBackground) { return; }
       if (!/^[A-Za-z0-9_]{1,15}$/.test(handle)) {

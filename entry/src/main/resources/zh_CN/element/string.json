@@ -202,7 +202,7 @@
     },
     {
       "name": "account_unconfirmed",
-      "value": "请先在网页中确认当前账号"
+      "value": "暂时无法读取当前账号，请稍后重试"
     },
     {
       "name": "account_changed",
